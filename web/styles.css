@@ -770,8 +770,9 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in sr
 .queue-approval-content h4 { margin-bottom: 8px; overflow-wrap: anywhere; }
 .queue-approval-content dl { margin: 0; display: grid; gap: 6px; }
 .queue-approval-content dl > div { display: grid; grid-template-columns: minmax(100px, 150px) minmax(0, 1fr); gap: 12px; }
-.queue-approval-content dt { color: var(--text-muted); }
-.queue-approval-content dd { margin: 0; color: var(--text-strong); overflow-wrap: anywhere; }
+.queue-approval-content dt { min-width: 0; color: var(--text-muted); overflow-wrap: anywhere; }
+.queue-approval-content dd { min-width: 0; margin: 0; color: var(--text-strong); overflow-wrap: anywhere; }
+.queue-approval-content .queue-approval-variables dl > div { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); column-gap: 20px; align-items: start; }
 .queue-approval-targets { overflow-x: auto; }
 .queue-approval-targets table { width: 100%; border-collapse: collapse; font: 11px SFMono-Regular, Consolas, monospace; }
 .queue-approval-targets th, .queue-approval-targets td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }

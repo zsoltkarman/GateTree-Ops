@@ -4,7 +4,7 @@ export const PREVIEW_SETTINGS = [
   ["Docker host", "AF Docker host"], ["Docker repository", "AF Docker repo"], ["Docker image", "AF Docker image"],
 ];
 
-// GateTree accepts both a single debug string and older msg arrays, merging
+// Accept both a single debug string and older msg arrays, merging
 // fields from separate tasks (including IMAGE_VERSION) by inventory hostname.
 export function parseValidationPreview(output) {
   const text = String(output ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
@@ -37,7 +37,7 @@ function previewFields(message) {
     if (separator > 0) {
       const key = line.slice(0, separator).trim();
       // Ignore arbitrary debug prose; accept the preview's named fields and
-      // role variables such as KAFKA_VERSION or ORASYS_JDK_VERSION.
+      // role variables such as KAFKA_VERSION or JDK_VERSION.
       if (PREVIEW_SETTINGS.some(([, field]) => field === key)
         || ["Ansible hostname", "Ansible ssh host", "IMAGE_VERSION"].includes(key)
         || /^[A-Z][A-Z0-9_]+$/.test(key)) {

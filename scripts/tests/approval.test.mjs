@@ -12,19 +12,19 @@ const dialogSource = (await read("web/modules/deployments/approval-dialog.js"))
   .replace("../../shared/ui.js", escapeUrl).replace("./validation-preview.js", previewUrl);
 const { approvalDialogMarkup } = await import(moduleUrl(dialogSource));
 const debug = (host, msg) => `ok: [${host}] => ${JSON.stringify({ msg })}\n`;
-const output = debug("host-1", ["Deployment target", "Role name: kafka", "Environment: devcorp", "Location: phx", "Strategy: linear", "Running User: orasys", "Ansible ssh host: 100.105.129.216", "Ansible hostname: host-1", "IMAGE_VERSION: 2026.9.3", "Galaxy version: 0.12.251", "AF Docker host: registry.example:5000"])
-  + debug("host-1", ["KAFKA_VERSION: 3.9.2", "ORASYS_JDK_VERSION: graalvm-jdk-25.0.4.1"]);
+const output = debug("host-1", ["Deployment target", "Role name: kafka", "Environment: test", "Location: region-a", "Strategy: linear", "Running User: deploy", "Ansible ssh host: 192.0.2.10", "Ansible hostname: host-1", "IMAGE_VERSION: 2026.9.3", "Galaxy version: 0.12.251", "AF Docker host: registry.example:5000"])
+  + debug("host-1", ["KAFKA_VERSION: 3.9.2", "JDK_VERSION: jdk-21.0.1"]);
 
-test("GateTree preview arrays merge deployment settings and role variables by host", () => {
+test("preview arrays merge deployment settings and role variables by host", () => {
   const [target] = parseValidationPreview(output);
   assert.equal(target["Ansible hostname"], "host-1");
-  assert.equal(target["Ansible ssh host"], "100.105.129.216");
+  assert.equal(target["Ansible ssh host"], "192.0.2.10");
   assert.equal(target.IMAGE_VERSION, "2026.9.3");
   assert.equal(target.KAFKA_VERSION, "3.9.2");
   assert.equal(target["AF Docker host"], "registry.example:5000");
 });
 
-test("GateTree escaped debug strings support wrapped values and older separate version tasks", () => {
+test("escaped debug strings support wrapped values and older separate version tasks", () => {
   const log = debug("inventory-host", "Deployment target\\nRole name: kafka\\nAnsible ssh host: fe80::1\\nAnsible hostname: host-2\\nIMAGE_VERSION:\\n2026.9.3")
     + debug("inventory-host", ["Galaxy version: 0.12.251"]);
   const [target] = parseValidationPreview(log);
@@ -47,7 +47,7 @@ const plan = { id: "plan", planNumber: 2, name: "Deploy Kafka", jobs: [job] };
 
 test("review displays validation, preview, payload, and both decisions, with escaped output", () => {
   const markup = approvalDialogMarkup(plan, { ...job, log: output + '<img src=x onerror="alert(1)">', payload: "<script>unsafe</script>" });
-  for (const value of ["Deployment settings", "host-1", "100.105.129.216", "2026.9.3", "KAFKA_VERSION", "Validation output", "Deployment payload", 'data-decision="deny"', 'data-decision="approve"']) assert(markup.includes(value), value);
+  for (const value of ["Deployment settings", "host-1", "192.0.2.10", "2026.9.3", "KAFKA_VERSION", "Validation output", "Deployment payload", 'data-decision="deny"', 'data-decision="approve"']) assert(markup.includes(value), value);
   assert(markup.includes("&lt;img"));
   assert(!markup.includes("<script>"));
   assert(markup.includes('<details open><summary>Validation output'));

@@ -64,7 +64,7 @@ pub fn read_keepass_entry(
     }
 
     // KeePassXC databases can expose their root group differently through the
-    // UI and CLI. If GateTree-compatible path lookup failed, resolve the entry
+    // UI and CLI. If direct path lookup failed, resolve the entry
     // title only when the database contains one unambiguous match. The saved
     // Vault path remains untouched and continues to be the primary lookup key.
     if let Some(title) = entry_title(entry_path) {
@@ -206,22 +206,22 @@ mod tests {
     use super::{entry_path_candidates, matching_search_paths};
 
     #[test]
-    fn uses_gatetree_path_order() {
+    fn tries_saved_path_before_root_group_fallback() {
         assert_eq!(
-            entry_path_candidates("/Personal/Oracle/IES/account_gbujira"),
+            entry_path_candidates("/Personal/Example/Operations/account_issue"),
             vec![
-                "/Personal/Oracle/IES/account_gbujira",
-                "Oracle/IES/account_gbujira"
+                "/Personal/Example/Operations/account_issue",
+                "Example/Operations/account_issue"
             ]
         );
     }
 
     #[test]
     fn accepts_only_unambiguous_exact_title_search_results() {
-        let output = b"Personal/Oracle/IES/account_gbujira\nPersonal/Other/account\n";
+        let output = b"Personal/Example/Operations/account_issue\nPersonal/Other/account\n";
         assert_eq!(
-            matching_search_paths(output, "account_gbujira"),
-            vec!["Personal/Oracle/IES/account_gbujira"]
+            matching_search_paths(output, "account_issue"),
+            vec!["Personal/Example/Operations/account_issue"]
         );
     }
 }

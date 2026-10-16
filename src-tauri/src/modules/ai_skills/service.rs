@@ -574,7 +574,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_gate_tree_catalog_front_matter_in_order() {
+    fn reads_catalog_front_matter_in_order() {
         let groups = parse_catalog(concat!(
             "---\n",
             "groups:\n",

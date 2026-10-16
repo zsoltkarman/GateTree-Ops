@@ -20,7 +20,7 @@ export function approvalDialogMarkup(plan, job) {
     <div class="queue-approval-content">
       ${settings ? `<section><h3>Deployment settings</h3><dl>${settings}</dl></section>` : ""}
       <section><h3>Validation targets</h3>${targets.length ? `<div class="queue-approval-targets"><table><thead><tr><th>Hostname</th><th>SSH / IP</th><th>Image version</th></tr></thead><tbody>${targets.map((target) => `<tr><td>${escapeHtml(target["Ansible hostname"])}</td><td>${escapeHtml(target["Ansible ssh host"] || "—")}</td><td>${escapeHtml(target.IMAGE_VERSION || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<p class="queue-approval-notice">No deployment preview block was found. Review the validation output for target ${escapeHtml(job.target || "—")}.</p>`}</section>
-      ${variables ? `<details><summary>Role variables</summary>${variables}</details>` : ""}
+      ${variables ? `<details class="queue-approval-variables"><summary>Role variables</summary>${variables}</details>` : ""}
       <details open><summary>Validation output</summary><pre>${escapeHtml(job.log || "No validation output is available.")}</pre></details>
       <details><summary>Deployment payload</summary><pre>${escapeHtml(job.payload || "{}")}</pre></details>
     </div>
