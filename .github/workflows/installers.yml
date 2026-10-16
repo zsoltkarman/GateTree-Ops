@@ -1,0 +1,117 @@
+name: Build installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal DMG
+            runner: macos-latest
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --bundles dmg --target universal-apple-darwin
+            artifact_name: pharos-macos-universal
+            artifact_path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          - name: Windows x64 MSI
+            runner: windows-latest
+            rust_targets: x86_64-pc-windows-msvc
+            args: --bundles msi --target x86_64-pc-windows-msvc
+            artifact_name: pharos-windows-x64
+            artifact_path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js for the Tauri CLI
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Cache Rust build output
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Prepare macOS Agent sidecar
+        if: runner.os == 'macOS'
+        working-directory: src-tauri
+        run: |
+          cargo build --release -p pharos-agent --target aarch64-apple-darwin
+          cargo build --release -p pharos-agent --target x86_64-apple-darwin
+          mkdir -p binaries
+          lipo -create \
+            target/aarch64-apple-darwin/release/pharos-agent \
+            target/x86_64-apple-darwin/release/pharos-agent \
+            -output binaries/pharos-agent-universal-apple-darwin
+
+      - name: Prepare Windows Agent sidecar
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: src-tauri
+        run: |
+          cargo build --release -p pharos-agent --target x86_64-pc-windows-msvc
+          New-Item -ItemType Directory -Force -Path binaries | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/pharos-agent.exe binaries/pharos-agent-x86_64-pc-windows-msvc.exe
+
+      - name: Build installer
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.runner == 'macos-latest' && '-' || '' }}
+        with:
+          projectPath: src-tauri
+          args: ${{ matrix.args }}
+
+      - name: Verify macOS Agent in DMG
+        if: runner.os == 'macOS'
+        run: ./scripts/verify-macos-installer.sh src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+
+      - name: Verify Windows Agent in MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Msi = Get-ChildItem "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" | Select-Object -First 1
+          .\scripts\verify-windows-installer.ps1 -MsiPath $Msi.FullName
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v7
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" release-artifacts/* --repo "$GITHUB_REPOSITORY" --title "PHAROS $GITHUB_REF_NAME" --generate-notes

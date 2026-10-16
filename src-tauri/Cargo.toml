@@ -1,0 +1,51 @@
+[package]
+name = "pharos"
+version = "0.1.4"
+description = "Persistent Host Access & Remote Operations Suite"
+authors = ["Zsolt Karman"]
+edition = "2024"
+default-run = "pharos"
+
+[workspace]
+members = ["agent", "agent-core"]
+resolver = "3"
+
+[[bin]]
+name = "pharos"
+path = "src/main.rs"
+
+[lib]
+name = "pharos_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+getrandom = "0.3"
+pbkdf2 = "0.12"
+pharos-agent-core = { path = "agent-core" }
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+zeroize = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+keyring = { version = "4.2", default-features = false, features = ["v1", "apple-native-keyring-store"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-local-authentication = { version = "0.3", features = ["LAContext"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "4.2", default-features = false, features = ["v1", "windows-native-keyring-store"] }
+windows = { version = "0.62", features = ["Foundation", "Security_Credentials_UI"] }
+

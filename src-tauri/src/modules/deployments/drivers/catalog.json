@@ -1,0 +1,49 @@
+{
+  "jira": {
+    "id": "jira",
+    "defaults": {
+      "headers": { "Accept": "application/json", "Content-Type": "application/json" },
+      "timeout_seconds": 30,
+      "verify_tls": true
+    },
+    "actions": {
+      "validate": {
+        "request": { "method": "GET", "path": "/rest/api/2/issue/{{input.issue_key}}" },
+        "success": { "status_codes": [200] },
+        "output": {
+          "issue_key": "$.key",
+          "summary": "$.fields.summary",
+          "description": "$.fields.description",
+          "status": "$.fields.status.name",
+          "assignee": "$.fields.assignee.displayName",
+          "reporter": "$.fields.reporter.displayName"
+        }
+      },
+      "update": {
+        "request": {
+          "method": "POST",
+          "path": "/rest/api/2/issue/{{input.issue_key}}/comment",
+          "body": { "body": "{{input.comment}}" }
+        },
+        "success": { "status_codes": [200, 201] },
+        "output": { "comment_id": "$.id" }
+      }
+    }
+  },
+  "cx": {
+    "id": "cx",
+    "defaults": { "timeout_seconds": 30, "verify_tls": true },
+    "actions": {
+      "validate": { "implementation": "pending" },
+      "update": { "implementation": "pending" }
+    }
+  },
+  "olam": {
+    "id": "olam",
+    "defaults": { "timeout_seconds": 30, "verify_tls": true },
+    "actions": {
+      "validate": { "implementation": "pending" },
+      "deploy": { "implementation": "pending" }
+    }
+  }
+}
