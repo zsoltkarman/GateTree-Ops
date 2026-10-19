@@ -35,11 +35,12 @@ export async function mountAgentView(root, options = {}) {
 
 function render(root, state) {
   state.onSnapshot?.({ sshSessions: state.sshSessions, jobSets: state.jobSets });
-  const filters = activityFilters(state);
+  const visibleState = { ...state, jobSets: state.jobSets.filter((plan) => plan.status !== "completed") };
+  const filters = activityFilters(visibleState);
   if (!filters.some((filter) => filter.id === state.filter)) state.filter = "all";
   const filtered = {
     ...state,
-    jobSets: ["all", "deploy"].includes(state.filter) ? state.jobSets : [],
+    jobSets: ["all", "deploy"].includes(state.filter) ? visibleState.jobSets : [],
     sshSessions: ["all", "ssh"].includes(state.filter) ? state.sshSessions : [],
     activities: state.activities.filter((activity) => state.filter === "all" || activityType(activity) === state.filter),
   };

@@ -23,6 +23,21 @@ function icon(path) {
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`;
 }
 
+function planStatusIcon(status = "queued") {
+  const shapes = {
+    queued: "<circle cx='12' cy='12' r='8'/><path d='M12 7v5l3 2'/>",
+    running: "<circle cx='12' cy='12' r='8'/><path d='m10 8 6 4-6 4z'/>",
+    completed: "<circle cx='12' cy='12' r='8'/><path d='m8 12 3 3 5-6'/>",
+    awaiting_approval: "<path d='m12 3 8 4v5c0 5-8 9-8 9s-8-4-8-9V7zM12 8v5M12 16h.01'/>",
+    stopped: "<circle cx='12' cy='12' r='8'/><path d='M9 9h6v6H9z'/>",
+    failed: "<circle cx='12' cy='12' r='8'/><path d='m9 9 6 6m0-6-6 6'/>",
+    denied: "<circle cx='12' cy='12' r='8'/><path d='m6.5 6.5 11 11'/>",
+    warning: "<path d='m12 3 10 17H2zM12 9v5M12 17h.01'/>",
+    disabled: "<circle cx='12' cy='12' r='8'/><path d='m6.5 6.5 11 11'/>",
+  };
+  return `<svg class="deployment-plan-status is-${escapeHtml(status)}" viewBox="0 0 24 24" role="img" aria-label="${escapeHtml(status.replaceAll("_", " "))}"><title>${escapeHtml(status.replaceAll("_", " "))}</title>${shapes[status] ?? shapes.queued}</svg>`;
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"]/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&#62;", '"': "&quot;",
@@ -219,8 +234,8 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     queueLinks.hidden = !hasPlans || !deploymentQueueExpanded;
     queueLinks.innerHTML = deploymentCatalog.plans.map((plan) => `
       <button class="deployment-navigation-resource${deploymentCatalog.section === "queue" && deploymentCatalog.selectedPlanId === plan.id ? " is-active" : ""}"
-              data-queue-plan="${escapeHtml(plan.id)}" title="#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}">
-        ${icon("<path d='M6 4h12v16H6zM9 8h6M9 12h6M9 16h4'/>")}<span>#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</span>
+              data-queue-plan="${escapeHtml(plan.id)}" title="#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)} · ${escapeHtml((plan.status ?? "queued").replaceAll("_", " "))}">
+        ${planStatusIcon(plan.status)}<span>#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</span>
       </button>`).join("");
     queueLinks.querySelectorAll("[data-queue-plan]").forEach((button) => {
       button.addEventListener("click", () => navigate("deployments", { section: "queue", planId: button.dataset.queuePlan }));

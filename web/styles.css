@@ -715,6 +715,10 @@ input:focus { border-color: #58d0d5; box-shadow: 0 0 0 3px rgba(88,208,213,.1); 
 .queue-status.is-warning { color: #df9d54; }
 .queue-status.is-completed { color: var(--accent); }
 .queue-status.is-stopped { color: #df9d54; }
+.deployment-plan-status.is-completed { color: #30ba84; }
+.deployment-plan-status.is-running { color: #3bcf8e; }
+.deployment-plan-status.is-awaiting_approval, .deployment-plan-status.is-stopped, .deployment-plan-status.is-warning { color: #df9d54; }
+.deployment-plan-status.is-failed, .deployment-plan-status.is-denied { color: #e16c6c; }
 .queue-info { padding: 11px 14px; background: color-mix(in srgb,var(--app-bg) 78%,var(--surface)); border-bottom: 1px solid var(--border); }
 .queue-info[hidden] { display: none; }
 .queue-info dl { margin: 0; display: flex; flex-wrap: wrap; gap: 9px 22px; }

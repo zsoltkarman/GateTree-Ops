@@ -52,7 +52,7 @@ function queueMarkup(state) {
     ? state.plans.filter((plan) => plan.id === state.selectedId)
     : state.plans;
   return `<section class="queue-module">
-    <header class="queue-toolbar"><strong>${escapeHtml(visiblePlans[0]?.name && state.selectedId ? visiblePlans[0].name : "Queue")}</strong><button data-action="add" title="Add Plan" aria-label="Add Plan">${icon("plus")}</button></header>
+    ${state.selectedId && visiblePlans.length ? "" : `<header class="queue-toolbar"><strong>Queue</strong><button data-action="add" title="Add Plan" aria-label="Add Plan">${icon("plus")}</button></header>`}
     ${state.message ? `<p class="queue-message${state.error ? " is-error" : ""}">${escapeHtml(state.message)}</p>` : ""}
     <div class="queue-groups">
       ${visiblePlans.length ? visiblePlans.map((plan) => planMarkup(plan, state)).join("") : '<div class="queue-empty">No plans in the Queue.</div>'}
@@ -66,6 +66,7 @@ function planMarkup(plan, state) {
     <header>
       <div><strong>Plan #${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</strong><span>${escapeHtml(plan.processName)}</span></div>
       <div class="queue-plan-actions">
+        ${state.selectedId ? `<button data-action="add" title="Add Plan" aria-label="Add Plan">${icon("plus")}</button>` : ""}
         <span class="queue-status is-${escapeHtml(plan.status)}">${escapeHtml(plan.status)}</span>
         <button data-info="plan-info:${escapeHtml(plan.id)}" title="Plan Info" aria-label="Plan Info">${icon("info")}</button>
         <button data-info="plan-log:${escapeHtml(plan.id)}" title="Plan Log" aria-label="Plan Log">${icon("log")}</button>
