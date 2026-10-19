@@ -1,4 +1,4 @@
-const THEME_KEY = "pharos.appearance.theme";
+const THEME_KEY = "gatetree-ops.appearance.theme";
 
 const themes = [
   ["ocean", "Ocean", "#58d0d5"],

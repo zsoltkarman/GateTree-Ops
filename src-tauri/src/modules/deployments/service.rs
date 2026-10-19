@@ -383,6 +383,17 @@ fn validate_http_endpoint(base_url: &str) -> Result<(), DeploymentError> {
     ))
 }
 
+pub(super) fn olam_deploy_action(step: &Value) -> Result<&'static str, DeploymentError> {
+    let phases = step.get("workflow").and_then(Value::as_array)
+        .ok_or_else(|| DeploymentError::Invalid("OLAM deploy requires an explicit workflow, for example [\"validate\", \"approve\", \"deploy\"].".into()))?;
+    let phases: Option<Vec<&str>> = phases.iter().map(Value::as_str).collect();
+    match phases.as_deref() {
+        Some(["validate", "approve", "deploy"]) => Ok("validate_deploy"),
+        Some(["approve", "deploy"]) => Ok("deploy"),
+        _ => Err(DeploymentError::Invalid("Supported OLAM workflows: [\"validate\", \"approve\", \"deploy\"] or [\"approve\", \"deploy\"].".into())),
+    }
+}
+
 fn validate_process(
     _connection: &Connection,
     object: &Map<String, Value>,
@@ -396,6 +407,23 @@ fn validate_process(
             "Process details must contain at least one configured driver.".into(),
         ));
     }
+    for step in object
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if step["driver"] == "cx"
+            && step["action"] == "update"
+            && step
+                .get("requester")
+                .is_some_and(|value| !value.is_string())
+        {
+            return Err(DeploymentError::Invalid(
+                "CX update step requester must be text.".into(),
+            ));
+        }
+    }
     let catalog: Value = serde_json::from_str(DRIVER_CATALOG)
         .map_err(|error| DeploymentError::Invalid(format!("Driver catalog is invalid: {error}")))?;
     let mut endpoints = Vec::new();
@@ -407,8 +435,36 @@ fn validate_process(
         let driver_details = driver_details.as_object().ok_or_else(|| {
             DeploymentError::Invalid(format!("Process details '{alias}' must be a JSON object."))
         })?;
-        endpoints.push(required_string(driver_details, "url")?);
-        if alias == "olam" {
+        let used_actions: Vec<&str> = object
+            .get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|step| step.get("driver").and_then(Value::as_str) == Some(alias))
+            .filter_map(|step| step.get("action").and_then(Value::as_str))
+            .collect();
+        let url = required_string(driver_details, "url")?;
+        if !used_actions.is_empty() {
+            endpoints.push(url);
+        }
+        if alias == "cx" && used_actions.contains(&"update") {
+            required_string(driver_details, "account")?;
+            if driver_details
+                .get("requester")
+                .is_some_and(|value| !value.is_string())
+            {
+                return Err(DeploymentError::Invalid("CX requester must be text; configure it in inputs.cx.requester, the CX update step, or details.cx.requester.".into()));
+            }
+        }
+        if alias == "olam" && used_actions.iter().any(|action| *action != "validate") {
+            let combined = object["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|step| step["driver"] == "olam" && step["action"] == "deploy")
+                .map(olam_deploy_action)
+                .collect::<Result<Vec<_>, _>>()?
+                .contains(&"validate_deploy");
             let payload_defaults = driver_details
                 .get("payload_defaults")
                 .and_then(Value::as_object)
@@ -418,10 +474,15 @@ fn validate_process(
                     )
                 })?;
             required_string(payload_defaults, "ENVIRONMENT")?;
-            required_string(driver_details, "validation_template_job")?;
-            required_string(driver_details, "deployment_template_job")?;
-            required_positive_id(driver_details, "validation_template_id")?;
-            required_positive_id(driver_details, "deployment_template_id")?;
+            for (action, phase) in [
+                ("validate_deployment", "validation"),
+                ("deploy", "deployment"),
+            ] {
+                if used_actions.contains(&action) || (phase == "validation" && combined) {
+                    required_string(driver_details, &format!("{phase}_template_job"))?;
+                    required_positive_id(driver_details, &format!("{phase}_template_id"))?;
+                }
+            }
         }
     }
 
@@ -447,6 +508,22 @@ fn validate_process(
             )));
         }
         let action_name = required_identifier(step, "action")?;
+        if driver_name == "olam" && action_name == "deploy" {
+            olam_deploy_action(&Value::Object(step.clone()))?;
+        }
+        if matches!(driver_name.as_str(), "jira" | "cx") && action_name == "update" {
+            let report = step.get("report").ok_or_else(|| {
+                DeploymentError::Invalid(
+                    "Update requires an explicit report in the Process step.".into(),
+                )
+            })?;
+            (if driver_name == "cx" {
+                crate::agent_ipc::validate_cx_update_report
+            } else {
+                crate::agent_ipc::validate_jira_update_report
+            })(report)
+            .map_err(DeploymentError::Invalid)?;
+        }
         let available_actions = catalog
             .get(&driver_name)
             .and_then(|driver| driver.get("actions"))
@@ -469,8 +546,16 @@ fn validate_process_credentials(
     let Some(details) = process.get("details").and_then(Value::as_object) else {
         return Ok(());
     };
-    for driver_details in details.values() {
-        validate_tool_credential(connection, driver_details)?;
+    for driver in process
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|step| step.get("driver").and_then(Value::as_str))
+    {
+        if let Some(driver_details) = details.get(driver) {
+            validate_tool_credential(connection, driver_details)?;
+        }
     }
     Ok(())
 }
@@ -855,7 +940,7 @@ mod tests {
             .expect("clock")
             .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "pharos-deployments-test-{}-{unique}",
+            "gatetree-ops-deployments-test-{}-{unique}",
             std::process::id()
         ));
         fs::create_dir_all(&directory).expect("create test directory");
@@ -870,6 +955,107 @@ mod tests {
     }
 
     #[test]
+    fn requires_only_the_olam_template_selected_by_process_steps() {
+        let connection = Connection::open_in_memory().unwrap();
+        for (action, phase) in [
+            ("validate_deployment", "validation"),
+            ("deploy", "deployment"),
+        ] {
+            let mut value = json!({"name":"Process", "steps":[{"name":"Step", "driver":"olam", "action":action}],
+                "details":{"olam":{"url":"https://olam.test", "payload_defaults":{"ENVIRONMENT":"test"}}}});
+            if action == "deploy" {
+                value["steps"][0]["workflow"] = json!(["approve", "deploy"]);
+            }
+            value["details"]["olam"][format!("{phase}_template_job")] = json!("Template");
+            value["details"]["olam"][format!("{phase}_template_id")] = json!(12);
+            assert!(validate_process(&connection, value.as_object().unwrap()).is_ok());
+        }
+        let value = json!({"name":"Process", "steps":[{"name":"Check", "driver":"jira", "action":"validate"}],
+            "details":{"jira":{"url":"https://jira.test"}, "olam":{"url":"https://unused.test"}}});
+        let endpoints = validate_process(&connection, value.as_object().unwrap()).unwrap();
+        assert_eq!(endpoints, vec!["https://jira.test"]);
+    }
+
+    #[test]
+    fn combined_workflow_requires_both_templates_and_rejects_implicit_or_invalid_order() {
+        let connection = Connection::open_in_memory().unwrap();
+        let mut value = json!({"steps":[{"name":"Deploy", "driver":"olam", "action":"deploy"}],
+            "details":{"olam":{"url":"https://olam.test", "payload_defaults":{"ENVIRONMENT":"test"},
+                "deployment_template_id":12, "deployment_template_job":"Deploy"}}});
+        assert!(
+            validate_process(&connection, value.as_object().unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("workflow")
+        );
+        value["steps"][0]["workflow"] = json!(["validate", "approve", "deploy"]);
+        assert!(validate_process(&connection, value.as_object().unwrap()).is_err());
+        value["details"]["olam"]["validation_template_id"] = json!(14);
+        value["details"]["olam"]["validation_template_job"] = json!("Validate");
+        assert!(validate_process(&connection, value.as_object().unwrap()).is_ok());
+        for workflow in [
+            json!([]),
+            json!(["deploy", "validate"]),
+            json!(["validate", "deploy"]),
+            json!(["validate", 1, "deploy"]),
+        ] {
+            value["steps"][0]["workflow"] = workflow;
+            assert!(validate_process(&connection, value.as_object().unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn jira_update_requires_explicit_valid_report_configuration() {
+        let connection = Connection::open_in_memory().unwrap();
+        let mut config = json!({"steps":[{"name":"Report","driver":"jira","action":"update"}],"details":{"jira":{"url":"https://jira.test"}}});
+        assert!(
+            validate_process(&connection, config.as_object().unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("report")
+        );
+        config["steps"][0]["report"] =
+            json!({"scope":"deployment","comment_template":"Role {{role}}, job {{job_id}}"});
+        assert!(validate_process(&connection, config.as_object().unwrap()).is_ok());
+        config["steps"][0]["report"]["comment_template"] = json!("{{unknown}}");
+        assert!(validate_process(&connection, config.as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn cx_update_requires_requester_and_valid_explicit_report() {
+        let connection = Connection::open_in_memory().unwrap();
+        let mut config = json!({"steps":[{"name":"Update CX","driver":"cx","action":"update"}],"details":{"cx":{"url":"https://cx.test/requests","account":"cx"}}});
+        assert!(
+            validate_process(&connection, config.as_object().unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("report")
+        );
+        config["details"]["cx"]["requester"] = json!("operator@example.test");
+        assert!(validate_process(&connection, config.as_object().unwrap()).is_err());
+        config["steps"][0]["report"] =
+            json!({"scope":"plan","comment_template":"Request {{request}}"});
+        assert!(validate_process(&connection, config.as_object().unwrap()).is_ok());
+        config["details"]["cx"]
+            .as_object_mut()
+            .unwrap()
+            .remove("requester");
+        assert!(validate_process(&connection, config.as_object().unwrap()).is_ok());
+        config["steps"][0]["requester"] = json!("step@example.test");
+        assert!(validate_process(&connection, config.as_object().unwrap()).is_ok());
+        config["steps"][0]["requester"] = json!(42);
+        assert!(
+            validate_process(&connection, config.as_object().unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("must be text")
+        );
+        config["steps"][0]["requester"] = json!("step@example.test");
+        config["steps"][0]["report"]["comment_template"] = json!("{{typo}}");
+        assert!(validate_process(&connection, config.as_object().unwrap()).is_err());
+    }
+
+    #[test]
     fn stores_versioned_processes_and_validates_bundled_driver_actions() {
         let (state, directory) = workspace();
         let missing_credential = DeploymentsService::validate(
@@ -881,7 +1067,7 @@ mod tests {
                 { "name": "Validate Jira", "driver": "jira", "action": "validate" }
               ],
               "details": {
-                "jira": { "url": "https://jira.example.com", "account": "jira_account" }
+                "jira": { "url": "https://jira.test", "account": "jira_account" }
               }
             }"#
             .to_owned(),
@@ -899,7 +1085,7 @@ mod tests {
                 { "name": "Validate Jira", "driver": "jira", "action": "validate" }
               ],
               "details": {
-                "jira": { "url": "https://jira.example.com", "account": "jira_account" }
+                "jira": { "url": "https://jira.test", "account": "jira_account" }
               }
             }"#
             .to_owned(),
@@ -917,7 +1103,7 @@ mod tests {
                 { "name": "Bad", "driver": "jira", "action": "missing_action" }
               ],
               "details": {
-                "jira": { "url": "https://jira.example.com", "account": "jira_account" }
+                "jira": { "url": "https://jira.test", "account": "jira_account" }
               }
             }"#
             .to_owned(),
@@ -932,10 +1118,10 @@ mod tests {
             r#"{
               "name": "Production Deployment Updated",
               "steps": [
-                { "name": "Update Jira", "driver": "jira", "action": "update" }
+                { "name": "Update Jira", "driver": "jira", "action": "update", "report": { "scope": "deployment", "comment_template": "{{target}}: {{status}}" } }
               ],
               "details": {
-                "jira": { "url": "https://jira.example.com", "account": "jira_account" }
+                "jira": { "url": "https://jira.test", "account": "jira_account" }
               }
             }"#
             .to_owned(),

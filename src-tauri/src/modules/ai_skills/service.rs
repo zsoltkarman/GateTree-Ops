@@ -347,7 +347,10 @@ fn front_matter_value(contents: &str, key: &str) -> Option<String> {
 }
 
 fn codex_executable() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("PHAROS_CODEX_PATH").map(PathBuf::from) {
+    if let Some(path) = env::var_os("GATETREE_OPS_CODEX_PATH")
+        .or_else(|| env::var_os("PHAROS_CODEX_PATH"))
+        .map(PathBuf::from)
+    {
         if path.is_file() {
             return Some(path);
         }
@@ -559,7 +562,7 @@ pub enum AiSkillsError {
     SkillNotFound,
     #[error("The skill path is outside its configured library.")]
     OutsideLibrary,
-    #[error("Codex CLI was not found. Install Codex or set PHAROS_CODEX_PATH.")]
+    #[error("Codex CLI was not found. Install Codex or set GATETREE_OPS_CODEX_PATH.")]
     CodexUnavailable,
     #[error("Codex failed:\n{0}")]
     CodexFailed(String),

@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension};
 
-const LATEST_SCHEMA_VERSION: i64 = 18;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 22;
 
 pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -29,7 +29,7 @@ pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
     if current_version < 1 {
         transaction.execute_batch(
             "
-            INSERT OR IGNORE INTO workspace_metadata(key, value) VALUES ('format', 'pharos-workspace');
+            INSERT OR IGNORE INTO workspace_metadata(key, value) VALUES ('format', 'gatetree-ops-workspace');
             INSERT INTO schema_migrations(version) VALUES (1);
             ",
         )?;
@@ -350,6 +350,42 @@ pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    if current_version < 19 {
+        transaction.execute_batch(
+            "ALTER TABLE deployment_plans ADD COLUMN process_definition_json TEXT;
+             INSERT INTO schema_migrations(version) VALUES (19);",
+        )?;
+    }
+
+    if current_version < 20 {
+        transaction.execute_batch(
+            "CREATE TABLE quick_launch_items (
+                connection_id TEXT PRIMARY KEY REFERENCES connections(id) ON DELETE CASCADE,
+                label TEXT,
+                position INTEGER NOT NULL
+             );
+             CREATE INDEX quick_launch_position_idx ON quick_launch_items(position);
+             INSERT INTO schema_migrations(version) VALUES (20);",
+        )?;
+    }
+
+    if current_version < 21 {
+        transaction.execute_batch(
+            "ALTER TABLE connections ADD COLUMN icon TEXT NOT NULL DEFAULT 'icon12';
+            INSERT INTO schema_migrations(version) VALUES (21);",
+        )?;
+    }
+
+    if current_version < 22 {
+        transaction.execute_batch(
+            "ALTER TABLE connection_folders ADD COLUMN credential_reference TEXT REFERENCES vault_entries(id) ON DELETE SET NULL;
+             ALTER TABLE connection_folders ADD COLUMN credential_mode TEXT NOT NULL DEFAULT 'inherit' CHECK(credential_mode IN ('inherit', 'manual', 'keepass'));
+             ALTER TABLE connections ADD COLUMN credential_mode TEXT NOT NULL DEFAULT 'inherit' CHECK(credential_mode IN ('inherit', 'manual', 'keepass'));
+             UPDATE connections SET credential_mode = 'keepass' WHERE credential_reference IS NOT NULL;
+             INSERT INTO schema_migrations(version) VALUES (22);",
+        )?;
+    }
+
     transaction.execute(
         "INSERT INTO workspace_metadata(key, value) VALUES ('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -362,6 +398,36 @@ pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn version_21_migration_preserves_existing_account_choices() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES(21);
+            CREATE TABLE workspace_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE vault_entries(id TEXT PRIMARY KEY);
+            CREATE TABLE connection_folders(id TEXT PRIMARY KEY);
+            CREATE TABLE connections(id TEXT PRIMARY KEY,credential_reference TEXT REFERENCES vault_entries(id));
+            INSERT INTO vault_entries VALUES('existing-account');
+            INSERT INTO connections VALUES('assigned','existing-account'),('unassigned',NULL);").unwrap();
+        run_migrations(&mut db).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT credential_mode FROM connections WHERE id='assigned'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "keepass"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT credential_mode FROM connections WHERE id='unassigned'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "inherit"
+        );
+    }
     #[test]
     fn creates_notes_schema_and_can_run_repeatedly() {
         let mut connection = Connection::open_in_memory().expect("open database");
@@ -388,6 +454,7 @@ mod tests {
             "deployment_config_history",
             "deployment_plans",
             "deployment_jobs",
+            "quick_launch_items",
         ] {
             let exists: bool = connection
                 .query_row(
@@ -406,6 +473,6 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("schema version");
-        assert_eq!(version, "18");
+        assert_eq!(version, "22");
     }
 }

@@ -30,14 +30,14 @@ pub async fn status(_alias: &str) -> Result<PlatformBiometricStatus, BiometricEr
 }
 
 pub async fn store(alias: &str, key: &[u8]) -> Result<(), BiometricError> {
-    authenticate("Enable biometric unlock for this PHAROS workspace")?;
+    authenticate("Enable biometric unlock for this GateTree-Ops workspace")?;
     entry(alias)?
         .set_secret(key)
         .map_err(|error| BiometricError::CredentialStore(error.to_string()))
 }
 
 pub async fn retrieve(alias: &str) -> Result<Vec<u8>, BiometricError> {
-    authenticate("Unlock your PHAROS workspace")?;
+    authenticate("Unlock your GateTree-Ops workspace")?;
     entry(alias)?.get_secret().map_err(|error| match error {
         keyring::Error::NoEntry => BiometricError::NotConfigured,
         other => BiometricError::CredentialStore(other.to_string()),

@@ -7,7 +7,7 @@ use super::{
     model::{AgentActivity, AgentStatus, SshHostKeyInspection},
     service::AgentService,
 };
-use pharos_agent_core::{AgentJobSetStatus, SshHostKey, SshSessionStatus, SshTerminalChunk};
+use gatetree_ops_agent_core::{AgentJobSetStatus, SshHostKey, SshSessionStatus, SshTerminalChunk};
 
 #[tauri::command]
 pub fn start_agent() -> Result<AgentStatus, String> {
@@ -173,4 +173,36 @@ pub fn delete_agent_activity(
 pub fn kill_agent() -> Result<AgentStatus, String> {
     crate::agent_ipc::kill().map_err(|error| error.to_string())?;
     Ok(AgentService::status())
+}
+
+#[tauri::command]
+pub async fn connect_agent_ssh_with_keepass(
+    app: tauri::AppHandle,
+    connection_id: String,
+    columns: u16,
+    rows: u16,
+) -> Result<SshSessionStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<WorkspaceState>();
+        let selection = crate::modules::connections::ConnectionsService::resolve_account(&state, &connection_id).map_err(|e| e.to_string())?;
+        if selection.mode != "keepass" { return Err("This connection no longer uses a KeePass account. Connect again.".into()); }
+        let reference = selection.credential_reference.ok_or("The assigned KeePass account was deleted. Choose another account.")?;
+        let (entry_path, authentication, transport): (String, String, String) = state.with_connection(|db| db.query_row(
+            "SELECT v.entry_path, COALESCE(c.authentication,'password'), c.ssh_transport FROM vault_entries v JOIN connections c ON c.id=?2 AND c.connection_type='ssh' WHERE v.id=?1", [&reference, &connection_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))).map_err(|e| e.to_string())?;
+        if transport != "openssh" && !matches!(authentication.as_str(), "password" | "keyboard-interactive" | "ssh-agent") {
+            return Err("KeePass account login supports Password, Keyboard interactive, or SSH agent. Use manual login for a private key.".into());
+        }
+        let pid = AgentService::status().pid.ok_or("Start Agent and unlock KeePass first.")?;
+        let password = crate::modules::vaults::session_keepass_password(&state, pid)?.ok_or("Unlock KeePass for this session first.")?;
+        let database = state.with_connection(|db| db.query_row("SELECT value FROM vault_settings WHERE key='keepass_database_path'", [], |row| row.get::<_, String>(0))).map_err(|e| e.to_string())?;
+        let account = crate::modules::vaults::read_keepass_entry(&database, &entry_path, &password)?;
+        if AgentService::status().pid != Some(pid) { return Err("Agent restarted during login. Unlock KeePass again.".into()); }
+        let current = crate::modules::connections::ConnectionsService::resolve_account(&state, &connection_id).map_err(|e| e.to_string())?;
+        if current.mode != "keepass" || current.credential_reference.as_deref() != Some(&reference) {
+            return Err("The connection account changed during login. Connect again.".into());
+        }
+        AgentService::connect_ssh_connection(&state, connection_id, Some(account.username), Some(account.password), None, None, columns, rows).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
 }

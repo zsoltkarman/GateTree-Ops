@@ -1,7 +1,7 @@
 [package]
-name = "pharos-agent"
-version = "0.1.4"
+name = "gatetree-ops-agent"
+version = "0.1.15"
 edition = "2024"
 
 [dependencies]
-pharos-agent-core = { path = "../agent-core" }
+gatetree-ops-agent-core = { path = "../agent-core" }

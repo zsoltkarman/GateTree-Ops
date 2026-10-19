@@ -208,20 +208,20 @@ mod tests {
     #[test]
     fn tries_saved_path_before_root_group_fallback() {
         assert_eq!(
-            entry_path_candidates("/Personal/Example/Operations/account_issue"),
+            entry_path_candidates("/Personal/Services/Operations/account_issue"),
             vec![
-                "/Personal/Example/Operations/account_issue",
-                "Example/Operations/account_issue"
+                "/Personal/Services/Operations/account_issue",
+                "Services/Operations/account_issue"
             ]
         );
     }
 
     #[test]
     fn accepts_only_unambiguous_exact_title_search_results() {
-        let output = b"Personal/Example/Operations/account_issue\nPersonal/Other/account\n";
+        let output = b"Personal/Services/Operations/account_issue\nPersonal/Other/account\n";
         assert_eq!(
             matching_search_paths(output, "account_issue"),
-            vec!["Personal/Example/Operations/account_issue"]
+            vec!["Personal/Services/Operations/account_issue"]
         );
     }
 }

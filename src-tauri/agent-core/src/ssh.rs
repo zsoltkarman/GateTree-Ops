@@ -130,7 +130,7 @@ impl SshSessionManager {
     pub(crate) fn new() -> Result<Self, SshManagerError> {
         let runtime = Builder::new_multi_thread()
             .enable_all()
-            .thread_name("pharos-ssh")
+            .thread_name("gatetree-ops-ssh")
             .build()?;
         Ok(Self {
             runtime,
@@ -295,9 +295,7 @@ impl SshSessionManager {
             "-p",
             port.as_str(),
         ]);
-        if !request.username.trim().is_empty() {
-            command.args(["-l", request.username.as_str()]);
-        }
+        command.args(["-l", request.username.trim()]);
         command.arg(request.host.as_str());
         command.env("TERM", "xterm-256color");
 
@@ -310,7 +308,7 @@ impl SshSessionManager {
         let closed = Arc::new(AtomicBool::new(false));
         let reader_closed = Arc::clone(&closed);
         thread::Builder::new()
-            .name("pharos-openssh-reader".into())
+            .name("gatetree-ops-openssh-reader".into())
             .spawn(move || {
                 let mut buffer = [0_u8; 16 * 1024];
                 loop {
@@ -387,7 +385,7 @@ impl SshSessionManager {
                 .runtime
                 .block_on(handle.disconnect(
                     Disconnect::ByApplication,
-                    "PHAROS session closed",
+                    "GateTree-Ops session closed",
                     "en",
                 ))
                 .map_err(SshManagerError::from),
@@ -490,7 +488,7 @@ impl SshSessionManager {
                 SessionBackend::Russh { handle, .. } => {
                     let _ = self.runtime.block_on(handle.disconnect(
                         Disconnect::ByApplication,
-                        "PHAROS Agent stopped",
+                        "GateTree-Ops Agent stopped",
                         "en",
                     ));
                 }
@@ -638,8 +636,7 @@ fn validate_request(request: &SshConnectRequest) -> Result<(), SshManagerError> 
     validate_terminal_size(request.columns, request.rows)?;
     if request.connection_id.trim().is_empty()
         || request.name.trim().is_empty()
-        || (!matches!(request.authentication, SshAuthentication::OpenSsh)
-            && request.username.trim().is_empty())
+        || request.username.trim().is_empty()
     {
         return Err(SshManagerError::InvalidRequest);
     }
@@ -790,7 +787,7 @@ mod tests {
 
     use super::*;
 
-    const USERNAME: &str = "pharos-test";
+    const USERNAME: &str = "gatetree-ops-test";
     const PASSWORD: &str = "test-only-password";
 
     #[derive(Clone)]
@@ -913,6 +910,26 @@ mod tests {
                 thread.join().unwrap();
             }
         }
+    }
+
+    #[test]
+    fn openssh_requires_an_explicit_username_instead_of_using_the_local_account() {
+        let mut request = SshConnectRequest {
+            connection_id: "connection".into(),
+            name: "Host".into(),
+            host: "192.0.2.1".into(),
+            port: 22,
+            username: String::new(),
+            authentication: SshAuthentication::OpenSsh,
+            trusted_host_key: String::new(),
+            columns: 80,
+            rows: 24,
+        };
+        assert!(validate_request(&request).is_err());
+        request.username = "   ".into();
+        assert!(validate_request(&request).is_err());
+        request.username = "remote-user".into();
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]

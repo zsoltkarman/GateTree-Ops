@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $MsiPath = (Resolve-Path $MsiPath).Path
-$ExtractPath = Join-Path ([System.IO.Path]::GetTempPath()) ("pharos-msi-" + [guid]::NewGuid())
+$ExtractPath = Join-Path ([System.IO.Path]::GetTempPath()) ("gatetree-ops-msi-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $ExtractPath | Out-Null
 
 try {
@@ -19,9 +19,9 @@ try {
     if ($Process.ExitCode -notin @(0, 3010)) {
         throw "MSI administrative extraction failed with exit code $($Process.ExitCode)."
     }
-    $Agent = Get-ChildItem -Path $ExtractPath -Filter "pharos-agent.exe" -File -Recurse | Select-Object -First 1
+    $Agent = Get-ChildItem -Path $ExtractPath -Filter "gatetree-ops-agent.exe" -File -Recurse | Select-Object -First 1
     if (-not $Agent) {
-        throw "The MSI does not contain pharos-agent.exe."
+        throw "The MSI does not contain gatetree-ops-agent.exe."
     }
     Write-Host "Verified bundled Agent: $($Agent.FullName)"
 }

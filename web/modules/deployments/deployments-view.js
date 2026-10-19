@@ -1,3 +1,4 @@
+import { showDeploymentHelp } from "../help/help-view.js";
 import { escapeHtml } from "../../shared/ui.js";
 import {
   deleteDeploymentResource,
@@ -88,6 +89,7 @@ function render(root, state) {
         <header class="deployment-json-toolbar">
           <div><strong>${escapeHtml(selected?.name || `New ${label}`)}</strong><span>${selected ? `Revision ${selected.revision}` : "Not saved"}${dirty ? " · Unsaved" : ""}</span></div>
           <nav>
+            <button data-action="help" title="Process Config help (F1)" aria-label="Process Config help">${icon("help")}</button>
             <button class="deployment-delete" data-action="delete" title="Delete" aria-label="Delete" ${selected ? "" : "disabled"}>${icon("trash")}</button>
             <button class="deployment-save" data-action="save" title="Save and validate" aria-label="Save and validate" ${state.busy ? "disabled" : ""}>${icon("save")}</button>
           </nav>
@@ -104,6 +106,7 @@ function render(root, state) {
 }
 
 function bindEvents(root, state) {
+  root.querySelector('[data-action="help"]').addEventListener("click", showDeploymentHelp);
   const editor = root.querySelector('[data-role="json-editor"]');
   editor.addEventListener("input", () => {
     state.draft = editor.value;
@@ -112,6 +115,7 @@ function bindEvents(root, state) {
     root.querySelector(".deployment-json-toolbar > div span").textContent = `${selected ? `Revision ${selected.revision}` : "Not saved"}${state.draft !== state.original ? " · Unsaved" : ""}`;
   });
   editor.addEventListener("keydown", (event) => {
+    if (event.key === "F1") { event.preventDefault(); showDeploymentHelp(); return; }
     if (event.key !== "Tab") return;
     event.preventDefault();
     editor.setRangeText("  ", editor.selectionStart, editor.selectionEnd, "end");
@@ -150,6 +154,6 @@ async function runAction(root, state, action) {
 }
 
 function icon(name) {
-  const paths = { save: "<path d='M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6'/>", trash: "<path d='M5 7h14M9 7V4h6v3M7.5 7l.7 13h7.6l.7-13M10 11v5M14 11v5'/>" };
+  const paths = { help: "<circle cx='12' cy='12' r='9'/><path d='M9.8 9.5a2.3 2.3 0 1 1 3.2 2.1c-.7.3-1 1-1 1.7M12 16.7h.01'/>", save: "<path d='M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6'/>", trash: "<path d='M5 7h14M9 7V4h6v3M7.5 7l.7 13h7.6l.7-13M10 11v5M14 11v5'/>" };
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
 }

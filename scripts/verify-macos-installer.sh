@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "$#" -ne 1 || ! -f "$1" ]]; then
-  echo "Usage: $0 <PHAROS.dmg>"
+  echo "Usage: $0 <GateTree-Ops.dmg>"
   exit 1
 fi
 
@@ -14,9 +14,9 @@ cleanup() {
 trap cleanup EXIT
 
 hdiutil attach "$1" -nobrowse -readonly -mountpoint "$mount_dir" -quiet
-agent_path="$(find "$mount_dir" -type f -path '*/PHAROS.app/Contents/MacOS/pharos-agent' -print -quit)"
+agent_path="$(find "$mount_dir" -type f -path '*/GateTree-Ops.app/Contents/MacOS/gatetree-ops-agent' -print -quit)"
 if [[ -z "$agent_path" || ! -x "$agent_path" ]]; then
-  echo "The DMG does not contain an executable PHAROS Agent sidecar."
+  echo "The DMG does not contain an executable GateTree-Ops Agent sidecar."
   exit 1
 fi
 

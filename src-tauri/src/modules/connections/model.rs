@@ -6,6 +6,8 @@ pub struct ConnectionFolder {
     pub id: String,
     pub name: String,
     pub parent_id: Option<String>,
+    pub credential_reference: Option<String>,
+    pub credential_mode: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -23,7 +25,9 @@ pub struct ConnectionItem {
     pub username: Option<String>,
     pub authentication: Option<String>,
     pub credential_reference: Option<String>,
+    pub credential_mode: String,
     pub ssh_transport: String,
+    pub icon: String,
     pub created_at: String,
     pub updated_at: String,
 }

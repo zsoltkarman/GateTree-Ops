@@ -8,7 +8,7 @@ import {
   validateAndSetKeePassDatabasePath,
 } from "./vaults-api.js";
 
-export async function mountVaultsView(root) {
+export async function mountVaultsView(root, detail = {}) {
   const state = {
     databasePath: "",
     databaseDraft: "",
@@ -26,6 +26,13 @@ export async function mountVaultsView(root) {
     state.databaseDraft = snapshot.databasePath;
     state.entries = snapshot.entries;
     render(root, state);
+    if (detail.entryId) {
+      const row = root.querySelector(`[data-entry-id="${CSS.escape(detail.entryId)}"]`)?.closest(".vault-entry-row");
+      if (row) {
+        row.classList.add("is-search-target");
+        row.scrollIntoView({ block: "center" });
+      }
+    }
   } catch (cause) {
     root.innerHTML = `<div class="vaults-error">${escapeHtml(cause)}</div>`;
   }

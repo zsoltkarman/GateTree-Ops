@@ -69,6 +69,8 @@ pub fn create_connection_item(
     authentication: Option<String>,
     credential_reference: Option<String>,
     ssh_transport: Option<String>,
+    icon: Option<String>,
+    credential_mode: Option<String>,
 ) -> Result<ConnectionItem, String> {
     ConnectionsService::create_connection(
         &state,
@@ -82,6 +84,8 @@ pub fn create_connection_item(
         authentication,
         credential_reference,
         ssh_transport,
+        icon,
+        credential_mode,
     )
     .map_err(|error| error.to_string())
 }
@@ -107,6 +111,8 @@ pub fn update_connection_item(
     authentication: Option<String>,
     credential_reference: Option<String>,
     ssh_transport: Option<String>,
+    icon: Option<String>,
+    credential_mode: Option<String>,
 ) -> Result<ConnectionItem, String> {
     ConnectionsService::update_connection(
         &state,
@@ -119,6 +125,8 @@ pub fn update_connection_item(
         authentication,
         credential_reference,
         ssh_transport,
+        icon,
+        credential_mode,
     )
     .map_err(|error| error.to_string())
 }

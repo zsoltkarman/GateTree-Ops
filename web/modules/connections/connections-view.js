@@ -1,7 +1,13 @@
+import { credentialMode, resolveCredentialPolicy, credentialSelection, parseCredentialSelection } from "./credential-policy.js";
+import { ensureAgentCredentials } from "../agent/credential-recovery.js";
+import { connectionIcon, connectionIconPicker } from "../../shared/connection-icons.js";
+import { pinQuickLaunchItem } from "../quick-launcher/quick-launcher-api.js";
 import { escapeHtml } from "../../shared/ui.js";
 import { createModuleRoot } from "../../shared/module-root.js";
+import { focusNavigationItem } from "../../shared/focus-navigation.js";
 import {
   connectAgentSshConnection,
+  connectAgentSshWithKeePass,
   inspectAgentSshHostKey,
   listAgentSshSessions,
   openUrlConnection,
@@ -12,6 +18,8 @@ import { mountSshTerminal } from "./terminal-view.js";
 import { openDetachedTerminalWindow } from "./detached-terminal-window.js";
 import {
   createConnectionFolder,
+  setConnectionFolderCredentials,
+  resolveConnectionAccount,
   createConnectionItem,
   deleteConnectionFolder,
   listConnectionFolders,
@@ -22,10 +30,12 @@ import {
   renameConnectionFolder,
 } from "./connections-api.js";
 
-const BROWSER_WIDTH_KEY = "pharos.connections.browserWidth";
+const BROWSER_WIDTH_KEY = "gatetree-ops.connections.browserWidth";
 
 export async function mountConnectionsView(contentRoot, options = {}) {
   const root = createModuleRoot(contentRoot, options.navigationRoot);
+  const mountId = crypto.randomUUID();
+  contentRoot.dataset.connectionsMountId = mountId;
   const state = {
     folders: [],
     connections: [],
@@ -42,6 +52,7 @@ export async function mountConnectionsView(contentRoot, options = {}) {
     selectedConnectionId: null,
     terminalSession: options.terminalSession ?? null,
     sshSessions: [],
+    onOpenSsh: options.onOpenSsh,
     error: "",
     browserWidth: storedBrowserWidth(),
     navigationRoot: options.navigationRoot ?? null,
@@ -54,6 +65,7 @@ export async function mountConnectionsView(contentRoot, options = {}) {
       getVaults(),
       listAgentSshSessions().catch(() => []),
     ]);
+    if (!contentRoot.isConnected || contentRoot.dataset.connectionsMountId !== mountId) return;
     state.folders = folders;
     state.connections = connections;
     state.vaultEntries = vaults.entries;
@@ -61,15 +73,43 @@ export async function mountConnectionsView(contentRoot, options = {}) {
     if (state.terminalSession) {
       state.selectedConnectionId = state.terminalSession.connectionId;
     }
-    state.selectedId = state.folders[0]?.id ?? null;
-    state.folders.filter((folder) => !folder.parentId).forEach((folder) => state.expandedIds.add(folder.id));
+    const roots = childrenOf(state, null);
+    state.selectedId = roots[0]?.id ?? null;
+    const searchedConnection = state.connections.find((item) => item.id === options.connectionId);
+    const searchedFolder = folderById(state, searchedConnection?.folderId ?? options.folderId);
+    if (searchedFolder) {
+      state.selectedId = searchedFolder.id;
+      state.selectedConnectionId = searchedConnection?.id ?? null;
+      let folder = searchedFolder;
+      const seen = new Set();
+      while (folder && !seen.has(folder.id)) {
+        seen.add(folder.id);
+        state.expandedIds.add(folder.id);
+        folder = folderById(state, folder.parentId);
+      }
+    }
     render(root, state);
+    if (searchedConnection || searchedFolder) {
+      const selector = searchedConnection
+        ? `.connection-item-row[data-connection-id="${CSS.escape(searchedConnection.id)}"]`
+        : `.connection-folder-main[data-folder-id="${CSS.escape(searchedFolder.id)}"]`;
+      focusNavigationItem(root, selector);
+      if (options.launchConnection && searchedConnection) {
+        root.querySelector(selector)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+      }
+    }
   } catch (cause) {
     root.innerHTML = `<div class="connections-error">${escapeHtml(cause)}</div>`;
   }
 }
 
+function showSshSession(state, session) {
+  if (state.onOpenSsh) state.onOpenSsh(session);
+  else state.terminalSession = session;
+}
+
 function render(root, state) {
+  if (!(root.contentRoot ?? root).isConnected) return;
   const roots = childrenOf(state, null);
   const selected = folderById(state, state.selectedId);
   const selectedConnection = state.connections.find((item) => item.id === state.selectedConnectionId) ?? null;
@@ -123,8 +163,8 @@ function folderNode(folder, state, depth) {
   const hasContent = children.length || connections.length;
   const expanded = state.expandedIds.has(folder.id);
   return `
-    <div class="connection-tree-branch">
-      <div class="connection-folder-row${state.selectedId === folder.id ? " is-active" : ""}" style="--folder-depth:${depth}" data-folder-id="${folder.id}">
+    <div class="connection-tree-branch" style="--folder-depth:${depth}">
+      <div class="connection-folder-row${state.selectedId === folder.id ? " is-active" : ""}" data-folder-id="${folder.id}">
         <button class="connection-folder-toggle${hasContent ? "" : " is-empty"}" data-action="toggle" data-folder-id="${folder.id}" ${hasContent ? "" : "disabled"} aria-label="${expanded ? "Collapse" : "Expand"} ${escapeHtml(folder.name)}">${icon("chevron")}</button>
         ${state.renamingId === folder.id ? `
           <form class="connection-inline-rename" data-role="rename-form" data-folder-id="${folder.id}">
@@ -136,10 +176,26 @@ function folderNode(folder, state, depth) {
       <div class="connection-folder-children" ${expanded && children.length ? "" : "hidden"}>
         ${children.map((child) => folderNode(child, state, depth + 1)).join("")}
       </div>
-      <div class="connection-items" style="--connection-indent:${(depth + 1) * 17 + 24}px" ${expanded && connections.length ? "" : "hidden"}>
-        ${connections.map((item) => `<button class="connection-item-row${state.selectedConnectionId === item.id ? " is-active" : ""}" data-action="select-connection" data-connection-id="${item.id}">${connectionIcon(item.connectionType)}<span>${escapeHtml(item.name)}</span>${state.sshSessions.some((session) => session.connectionId === item.id) ? '<i class="connection-session-indicator" title="SSH session running in Agent" aria-label="SSH session running in Agent"></i>' : ""}</button>`).join("")}
+      <div class="connection-items" ${expanded && connections.length ? "" : "hidden"}>
+        ${connections.map((item) => `<button class="connection-item-row${state.selectedConnectionId === item.id ? " is-active" : ""}" data-action="select-connection" data-connection-id="${item.id}">${connectionIcon(item.connectionType, item.icon)}<span>${escapeHtml(item.name)}</span>${state.sshSessions.some((session) => session.connectionId === item.id) ? '<i class="connection-session-indicator" title="SSH session running in Agent" aria-label="SSH session running in Agent"></i>' : ""}</button>`).join("")}
       </div>
     </div>`;
+}
+
+function accountPicker(item, state, { folder = false } = {}) {
+  const selection = credentialSelection(item);
+  const inherited = resolveCredentialPolicy({ ...item, credentialMode: "inherit", credentialReference: null }, state.folders, state.vaultEntries, { folder });
+  const inheritLabel = inherited.mode === "keepass" ? `Inherit · ${inherited.account?.name ?? "Missing account"} (${inherited.source?.name ?? "folder"})` : "Inherit · manual login";
+  const effective = resolveCredentialPolicy(item, state.folders, state.vaultEntries, { folder });
+  const description = effective.mode === "keepass"
+    ? effective.account ? `KeePass: ${effective.account.name}${effective.source && effective.source.id !== item.id ? ` · from ${effective.source.name}` : ""}` : "The assigned account was deleted. Choose another account."
+    : "Ask for credentials when connecting.";
+  return `<label><span>KeePass account</span><select data-role="connection-account">
+    <option value="inherit"${selection === "inherit" ? " selected" : ""}>${escapeHtml(inheritLabel)}</option>
+    <option value="manual"${selection === "manual" ? " selected" : ""}>Manual login · do not inherit</option>
+    ${state.vaultEntries.map(entry => `<option value="keepass:${escapeHtml(entry.id)}"${selection === `keepass:${entry.id}` ? " selected" : ""}>${escapeHtml(entry.name)}</option>`).join("")}
+    ${selection.startsWith("keepass:") && !state.vaultEntries.some(entry => selection === `keepass:${entry.id}`) ? `<option value="${escapeHtml(selection)}" selected>Missing account · choose another</option>` : ""}
+  </select><small class="connection-account-hint" data-role="account-hint">${escapeHtml(description)}</small></label>`;
 }
 
 function folderPanel(folder, state) {
@@ -151,6 +207,11 @@ function folderPanel(folder, state) {
       <strong>${escapeHtml(folder.name)}</strong>
       <span>${escapeHtml(folderPath(state, folder.id))}</span>
       <small>${children.length} subfolder${children.length === 1 ? "" : "s"} · ${connections.length} connection${connections.length === 1 ? "" : "s"}</small>
+      <form class="connection-folder-account" data-role="folder-credentials-form" data-folder-id="${escapeHtml(folder.id)}">
+        ${accountPicker(folder, state, { folder: true })}
+        <small>Inherited by SSH and RDP connections in this folder and its subfolders.</small>
+        <button class="connection-primary-action" type="submit">Save account</button>
+      </form>
     </div>`;
 }
 
@@ -163,52 +224,53 @@ function connectionForm(state) {
   const authentication = existing?.authentication ?? "password";
   return `
     <form class="connection-editor" data-role="connection-form">
-      <span class="connection-editor-icon">${connectionIcon(type)}</span>
+      <span class="connection-editor-icon">${connectionIcon(type, existing?.icon)}</span>
       <strong>${existing ? "Edit" : "New"} ${type.toUpperCase()} connection</strong>
       <small>${escapeHtml(folderPath(state, folderId))}</small>
       <label><span>Name</span><input data-role="connection-name" maxlength="120" autocomplete="off" required value="${escapeHtml(existing?.name ?? "")}" /></label>
       <label><span>${isUrl ? "URL" : "Host"}</span><input data-role="connection-target" autocomplete="off" spellcheck="false" required value="${escapeHtml(existing?.target ?? "")}" /></label>
       ${isUrl ? "" : `<label><span>Port</span><input data-role="connection-port" type="number" min="1" max="65535" value="${existing?.port ?? (type === "ssh" ? 22 : 3389)}" /></label>`}
+      ${isUrl ? "" : accountPicker(existing ?? { folderId, credentialMode: "inherit" }, state)}
+      ${isUrl ? "" : `<label><span>Manual username</span><input data-role="connection-username" maxlength="255" autocomplete="off" value="${escapeHtml(existing?.username ?? "")}" /></label>`}
       ${isSsh ? `
         <label><span>SSH engine</span><select data-role="connection-ssh-transport">
-          <option value="embedded"${(existing?.sshTransport ?? "embedded") === "embedded" ? " selected" : ""}>PHAROS embedded SSH</option>
+          <option value="embedded"${(existing?.sshTransport ?? "embedded") === "embedded" ? " selected" : ""}>GateTree-Ops embedded SSH</option>
           <option value="openssh"${existing?.sshTransport === "openssh" ? " selected" : ""}>Local OpenSSH config (ProxyJump / MFA)</option>
         </select></label>
-        <label><span>Username</span><input data-role="connection-username" maxlength="255" autocomplete="off" value="${escapeHtml(existing?.username ?? "")}" /></label>
         <label><span>Authentication</span><select data-role="connection-authentication">
           ${authenticationOption("password", "Password", authentication)}
           ${authenticationOption("private-key", "Private key", authentication)}
           ${authenticationOption("keyboard-interactive", "Keyboard interactive", authentication)}
           ${authenticationOption("ssh-agent", "SSH agent", authentication)}
         </select></label>
-        <label><span>Credential reference</span><select data-role="connection-credential-reference">
-          <option value="">None</option>
-          ${state.vaultEntries.map((entry) => `<option value="${escapeHtml(entry.id)}"${entry.id === existing?.credentialReference ? " selected" : ""}>${escapeHtml(entry.name)}</option>`).join("")}
-        </select></label>` : ""}
+        <small class="connection-account-hint">KeePass supplies the username and password for Password / Keyboard interactive. Local OpenSSH uses the KeePass username; password and MFA prompts stay in the terminal. Private-key login uses manual credentials.</small>` : ""}
+      ${isUrl ? connectionIconPicker(existing?.icon) : ""}
       <label><span>Tag</span><input data-role="connection-tag" maxlength="120" autocomplete="off" value="${escapeHtml(existing?.tag ?? "")}" /></label>
       <div><button class="connection-primary-action" type="submit">Save</button><button type="button" data-action="cancel-connection">Cancel</button></div>
     </form>`;
 }
 
 function connectionPanel(connection, state) {
-  const credential = state.vaultEntries.find((entry) => entry.id === connection.credentialReference);
+  const effectiveAccount = resolveCredentialPolicy(connection, state.folders, state.vaultEntries);
+  const credential = effectiveAccount.account;
   const activeSession = state.sshSessions.find((session) => session.connectionId === connection.id);
   const endpoint = connection.connectionType === "ssh" && connection.username
     ? `${connection.username}@${connection.target}`
     : connection.target;
   const details = [
     connection.connectionType === "ssh" && connection.sshTransport === "openssh" ? "OpenSSH config" : connection.connectionType === "ssh" ? authenticationLabel(connection.authentication) : connection.connectionType.toUpperCase(),
-    credential?.name,
+    credential ? `KeePass: ${credential.name}${effectiveAccount.source ? ` (from ${effectiveAccount.source.name})` : ""}` : effectiveAccount.mode === "keepass" ? "Missing KeePass account" : null,
     connection.tag,
   ].filter(Boolean).map(escapeHtml).join(" · ");
   return `
     <div class="connection-folder-panel">
-      ${connectionIcon(connection.connectionType)}
+      ${connectionIcon(connection.connectionType, connection.icon)}
       <strong>${escapeHtml(connection.name)}</strong>
       <span>${escapeHtml(endpoint)}${connection.port ? `:${connection.port}` : ""}</span>
       <small>${details}</small>
       ${activeSession ? '<span class="connection-running-status"><i></i>Running in Agent</span>' : ""}
-      ${activeSession ? `<button class="connection-open-action" data-action="attach-active-session" data-session-id="${activeSession.id}">Open</button>` : ""}
+      ${activeSession ? `<button class="connection-open-action" data-action="attach-active-session" data-session-id="${activeSession.id}">Show open session</button>` : ""}
+      ${connection.connectionType === "ssh" ? `<button class="connection-open-action" data-action="new-ssh-session" data-connection-id="${connection.id}">New SSH session</button>` : ""}
       <button class="connection-secondary-action" data-action="edit-connection" data-connection-id="${connection.id}">Edit</button>
       ${connection.connectionType === "url" ? `<button class="connection-open-action" data-action="open-url" data-connection-id="${connection.id}">Open</button>` : ""}
     </div>`;
@@ -219,6 +281,27 @@ function emptyPanel() {
 }
 
 function bindEvents(root, state) {
+  root.querySelectorAll('[data-role="connection-account"]').forEach(select => {
+    select.addEventListener("change", () => {
+      const form = select.closest("form"), isFolder = form.dataset.role === "folder-credentials-form";
+      const item = isFolder ? folderById(state, form.dataset.folderId)
+        : state.connections.find(item => item.id === state.creatingConnection?.connectionId) ?? { folderId: state.creatingConnection?.folderId };
+      const binding = parseCredentialSelection(select.value);
+      const effective = resolveCredentialPolicy({ ...item, credentialMode: binding.mode, credentialReference: binding.reference }, state.folders, state.vaultEntries, { folder: isFolder });
+      form.querySelector('[data-role="account-hint"]').textContent = effective.mode === "keepass"
+        ? effective.account ? `KeePass: ${effective.account.name}${effective.source && effective.source.id !== item.id ? ` · from ${effective.source.name}` : ""}` : "Choose an available KeePass account."
+        : "Ask for credentials when connecting.";
+    });
+  });
+  root.querySelector('[data-role="folder-credentials-form"]')?.addEventListener("submit", async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const binding = parseCredentialSelection(form.querySelector('[data-role="connection-account"]').value);
+    await runAction(root, state, async () => {
+      const updated = await setConnectionFolderCredentials(form.dataset.folderId, binding.mode, binding.reference);
+      Object.assign(folderById(state, updated.id), updated);
+    });
+  });
   bindResizer(root, state);
   bindContextMenus(root, state);
   bindFolderDragging(root, state);
@@ -308,16 +391,12 @@ function bindEvents(root, state) {
         }
         const sessions = await listAgentSshSessions();
         state.sshSessions = sessions;
-        const session = sessions.find((item) => item.connectionId === connection.id);
-        if (session) {
-          state.terminalSession = session;
-          return;
-        }
         if (connection.sshTransport === "openssh") {
-          state.terminalSession = await connectAgentSshConnection(connection.id, {
-            username: connection.username ?? "",
-          });
-          state.sshSessions.push(state.terminalSession);
+          const connectedSession = await connectSshWithDialog(connection);
+          if (connectedSession) {
+            showSshSession(state, connectedSession);
+            state.sshSessions.push(connectedSession);
+          }
           return;
         }
         const port = connection.port ?? 22;
@@ -342,12 +421,15 @@ function bindEvents(root, state) {
             connection.authentication,
             connection.credentialReference,
             "openssh",
+            connection.icon,
+            connection.credentialMode,
           );
           Object.assign(connection, updated);
-          state.terminalSession = await connectAgentSshConnection(connection.id, {
-            username: connection.username ?? "",
-          });
-          state.sshSessions.push(state.terminalSession);
+          const connectedSession = await connectSshWithDialog(connection);
+          if (connectedSession) {
+            showSshSession(state, connectedSession);
+            state.sshSessions.push(connectedSession);
+          }
           return;
         }
         if (inspection.state !== "trusted") {
@@ -366,7 +448,7 @@ function bindEvents(root, state) {
         }
         const connectedSession = await connectSshWithDialog(connection);
         if (connectedSession) {
-          state.terminalSession = connectedSession;
+          showSshSession(state, connectedSession);
           state.sshSessions.push(connectedSession);
         }
       });
@@ -375,6 +457,11 @@ function bindEvents(root, state) {
   root.querySelector('[data-action="cancel-connection"]')?.addEventListener("click", () => {
     state.creatingConnection = null;
     render(root, state);
+  });
+  root.querySelector('[data-role="connection-form"]')?.addEventListener("change", (event) => {
+    if (event.target.name === "connection-icon") {
+      root.querySelector('.connection-editor-icon').innerHTML = connectionIcon("url", event.target.value);
+    }
   });
   root.querySelector('[data-role="connection-form"]')?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -387,8 +474,10 @@ function bindEvents(root, state) {
     const usernameInput = root.querySelector('[data-role="connection-username"]');
     const username = usernameInput?.value.trim() || null;
     const authentication = root.querySelector('[data-role="connection-authentication"]')?.value || null;
-    const credentialReference = root.querySelector('[data-role="connection-credential-reference"]')?.value || null;
+    const binding = parseCredentialSelection(root.querySelector('[data-role="connection-account"]')?.value ?? "inherit");
+    const credentialReference = binding.reference;
     const sshTransport = root.querySelector('[data-role="connection-ssh-transport"]')?.value || null;
+    const selectedIcon = root.querySelector('[name="connection-icon"]:checked')?.value || null;
     if (!name || !target) {
       state.error = "Name and target are required.";
       render(root, state);
@@ -402,8 +491,8 @@ function bindEvents(root, state) {
     await runAction(root, state, async () => {
       const connectionId = state.creatingConnection.connectionId;
       const connection = connectionId
-        ? await updateConnectionItem(connectionId, name, target, port, tag, username, authentication, credentialReference, sshTransport)
-        : await createConnectionItem(folderId, type, name, target, port, tag, username, authentication, credentialReference, sshTransport);
+        ? await updateConnectionItem(connectionId, name, target, port, tag, username, authentication, credentialReference, sshTransport, selectedIcon, binding.mode)
+        : await createConnectionItem(folderId, type, name, target, port, tag, username, authentication, credentialReference, sshTransport, selectedIcon, binding.mode);
       const index = state.connections.findIndex((item) => item.id === connection.id);
       if (index >= 0) state.connections[index] = connection;
       else state.connections.push(connection);
@@ -429,15 +518,32 @@ function bindEvents(root, state) {
     render(root, state);
     root.querySelector('[data-role="connection-name"]')?.focus();
   });
-  root.querySelector('[data-action="attach-active-session"]')?.addEventListener("click", (event) => {
-    const session = state.sshSessions.find((item) => item.id === event.currentTarget.dataset.sessionId);
-    if (!session) return;
-    state.terminalSession = session;
-    render(root, state);
+  root.querySelector('[data-action="new-ssh-session"]')?.addEventListener("click", event => {
+    root.querySelector(`.connection-item-row[data-connection-id="${CSS.escape(event.currentTarget.dataset.connectionId)}"]`)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+  });
+  root.querySelector('[data-action="attach-active-session"]')?.addEventListener("click", async event => {
+    const sessionId = event.currentTarget.dataset.sessionId;
+    await runAction(root, state, async () => {
+      const sessions = await listAgentSshSessions();
+      state.sshSessions = sessions;
+      const session = sessions.find(item => item.id === sessionId);
+      if (!session) {
+        state.error = "This SSH session has closed. Use New SSH session to connect again.";
+        return;
+      }
+      showSshSession(state, session);
+    });
   });
 }
 
-function connectSshWithDialog(connection) {
+async function connectSshWithDialog(connection) {
+  const account = await resolveConnectionAccount(connection.id);
+  if (account.mode === "keepass") {
+    if (!account.credentialReference || !account.accountName) throw new Error("The assigned KeePass account was deleted. Choose another account.");
+    if (!(await ensureAgentCredentials())) return null;
+    return connectAgentSshWithKeePass(connection.id);
+  }
+  const openSsh = connection.sshTransport === "openssh";
   const privateKey = connection.authentication === "private-key";
   const sshAgent = connection.authentication === "ssh-agent";
   const dialog = document.createElement("dialog");
@@ -446,8 +552,8 @@ function connectSshWithDialog(connection) {
     <form>
       <strong>Connect to ${escapeHtml(connection.name)}</strong>
       <small>${escapeHtml(connection.target)}:${connection.port ?? 22}</small>
-      <label><span>Username</span><input data-role="ssh-username" required autocomplete="username" value="${escapeHtml(connection.username ?? "")}" /></label>
-      ${sshAgent ? "" : privateKey ? `
+      <label><span>Username</span><input data-role="ssh-username" required autocomplete="off" autocapitalize="none" spellcheck="false" value="" /></label>
+      ${openSsh || sshAgent ? "" : privateKey ? `
         <label><span>Private key</span><textarea data-role="ssh-private-key" required spellcheck="false"></textarea></label>
         <label><span>Passphrase</span><input data-role="ssh-passphrase" type="password" autocomplete="off" /></label>` : `
         <label><span>${connection.authentication === "keyboard-interactive" ? "Response" : "Password"}</span><input data-role="ssh-credential" type="password" required autocomplete="off" /></label>`}
@@ -470,7 +576,14 @@ function connectSshWithDialog(connection) {
       event.preventDefault();
       const submit = dialog.querySelector('[type="submit"]');
       const error = dialog.querySelector('[data-role="ssh-auth-error"]');
-      const authentication = sshAgent
+      const username = dialog.querySelector('[data-role="ssh-username"]').value.trim();
+      if (!username) {
+        error.textContent = "Enter an SSH username before connecting.";
+        error.hidden = false;
+        dialog.querySelector('[data-role="ssh-username"]').focus();
+        return;
+      }
+      const authentication = openSsh || sshAgent
         ? { username: dialog.querySelector('[data-role="ssh-username"]').value.trim() }
         : privateKey
         ? {
@@ -499,8 +612,13 @@ function connectSshWithDialog(connection) {
 }
 
 function bindConnectionDragging(root, state) {
-  const clearTargets = () => root.querySelectorAll(".is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
+  const clearTargets = () => {
+    root.querySelectorAll(".is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
+    document.querySelector(".quick-launcher")?.classList.remove("is-launcher-drop-target");
+  };
   const targetAt = (x, y, item) => {
+    const launcher = document.elementFromPoint(x, y)?.closest(".quick-launcher");
+    if (launcher) return launcher;
     const row = document.elementFromPoint(x, y)?.closest(".connection-folder-row");
     if (!row || row.dataset.folderId === item.folderId) return null;
     return row;
@@ -519,6 +637,7 @@ function bindConnectionDragging(root, state) {
     window.setTimeout(() => { state.suppressClick = false; }, 0);
     if (!target) return;
     await runAction(root, state, async () => {
+      if (target.matches(".quick-launcher")) { await pinQuickLaunchItem(item.id); return; }
       Object.assign(item, await moveConnectionItem(item.id, target.dataset.folderId));
       state.selectedId = item.folderId;
       state.selectedConnectionId = item.id;
@@ -549,7 +668,8 @@ function bindConnectionDragging(root, state) {
       event.preventDefault();
       clearTargets();
       const item = state.connections.find((connection) => connection.id === drag.connectionId);
-      targetAt(event.clientX, event.clientY, item)?.classList.add("is-drop-target");
+      const target = targetAt(event.clientX, event.clientY, item);
+      target?.classList.add(target.matches(".quick-launcher") ? "is-launcher-drop-target" : "is-drop-target");
     });
     button.addEventListener("pointerup", (event) => finish(button, event));
     button.addEventListener("pointercancel", (event) => finish(button, event, true));
@@ -584,6 +704,7 @@ function showConnectionContextMenu(root, state, connection, x, y) {
   const menu = document.createElement("div");
   menu.className = "connection-context-menu";
   menu.innerHTML = `
+    <button data-context-action="quick-launch">${icon("connection")}<span>Add to Quick Launcher</span></button>
     <button data-context-action="copy-target">${icon("copy")}<span>Copy hostname / IP</span></button>
     <button data-context-action="edit">${icon("pencil")}<span>Edit</span></button>`;
   document.body.append(menu);
@@ -597,6 +718,11 @@ function showConnectionContextMenu(root, state, connection, x, y) {
   };
   window.setTimeout(() => window.addEventListener("pointerdown", close), 0);
   window.addEventListener("blur", close);
+  menu.querySelector('[data-context-action="quick-launch"]').addEventListener("click", async () => {
+    close();
+    try { await pinQuickLaunchItem(connection.id); }
+    catch (cause) { state.error = String(cause); render(root, state); }
+  });
   menu.querySelector('[data-context-action="copy-target"]').addEventListener("click", async () => {
     close();
     try {
@@ -625,6 +751,7 @@ function showContextMenu(root, state, folder, x, y) {
   menu.className = "connection-context-menu";
   menu.innerHTML = folder ? `
     <button data-context-action="new">${icon("folder-plus")}<span>New subfolder</span></button>
+    <button data-context-action="account">${icon("pencil")}<span>KeePass account…</span></button>
     <button data-context-action="rename">${icon("pencil")}<span>Rename</span></button>
     <button class="is-danger" data-context-action="delete">${icon("trash")}<span>Delete</span></button>
     <div class="connection-context-separator"></div>
@@ -660,6 +787,10 @@ function showContextMenu(root, state, folder, x, y) {
   menu.querySelector('[data-context-action="new"]').addEventListener("click", () => {
     close();
     showCreate(root, state, folder?.id ?? null);
+  });
+  menu.querySelector('[data-context-action="account"]')?.addEventListener("click", () => {
+    close(); state.selectedId = folder.id; state.selectedConnectionId = null; state.creatingConnection = null; state.terminalSession = null;
+    render(root, state); root.querySelector('[data-role="connection-account"]')?.focus();
   });
   menu.querySelector('[data-context-action="rename"]')?.addEventListener("click", () => {
     close();
@@ -926,13 +1057,4 @@ function icon(name) {
     copy: "<rect x='8' y='8' width='11' height='11' rx='1.5'/><path d='M16 8V5H5v11h3'/>",
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
-}
-
-function connectionIcon(type) {
-  const paths = {
-    ssh: "<path d='M4 5h16v14H4zM7 9l3 3-3 3M12 15h5'/>",
-    rdp: "<rect x='3.5' y='5' width='17' height='12' rx='1.5'/><path d='M9 20h6M12 17v3'/>",
-    url: "<path d='M8.5 8.5 6 11a3.5 3.5 0 0 0 5 5l2.5-2.5M15.5 15.5 18 13a3.5 3.5 0 0 0-5-5l-2.5 2.5M9 15l6-6'/>",
-  };
-  return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[type]}</svg>`;
 }

@@ -1,21 +1,21 @@
 [package]
-name = "pharos"
-version = "0.1.4"
-description = "Persistent Host Access & Remote Operations Suite"
+name = "gatetree-ops"
+version = "0.1.15"
+description = "Remote access and deployment operations workspace"
 authors = ["Zsolt Karman"]
 edition = "2024"
-default-run = "pharos"
+default-run = "gatetree-ops"
 
 [workspace]
 members = ["agent", "agent-core"]
 resolver = "3"
 
 [[bin]]
-name = "pharos"
+name = "gatetree-ops"
 path = "src/main.rs"
 
 [lib]
-name = "pharos_lib"
+name = "gatetree_ops_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -25,14 +25,16 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 getrandom = "0.3"
 pbkdf2 = "0.12"
-pharos-agent-core = { path = "agent-core" }
-rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+portable-pty = "0.9"
+gatetree-ops-agent-core = { path = "agent-core" }
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 url = "2"

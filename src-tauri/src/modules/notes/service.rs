@@ -79,7 +79,6 @@ impl NotesService {
         state: &WorkspaceState,
         folder_id: Option<String>,
     ) -> Result<Note, NotesError> {
-        let folder_id = folder_id.ok_or(NotesError::FolderRequired)?;
         let id = Uuid::new_v4().to_string();
         state.with_connection(|connection| {
             connection.execute(
@@ -113,7 +112,6 @@ impl NotesService {
         id: String,
         folder_id: Option<String>,
     ) -> Result<Note, NotesError> {
-        let folder_id = folder_id.ok_or(NotesError::FolderRequired)?;
         state
             .with_connection(|connection| {
                 let changed = connection.execute(
@@ -210,8 +208,6 @@ fn note_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
 pub enum NotesError {
     #[error("Folder name cannot be empty.")]
     EmptyFolderName,
-    #[error("Create or select a folder before adding a note.")]
-    FolderRequired,
     #[error("Delete the notes in this folder before deleting the folder.")]
     FolderNotEmpty,
     #[error(transparent)]
@@ -235,8 +231,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("pharos-notes-test-{}-{unique}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "gatetree-ops-notes-test-{}-{unique}",
+            std::process::id()
+        ));
         fs::create_dir_all(&directory).expect("create test directory");
         let state = WorkspaceState::default();
         WorkspaceService::create(
@@ -249,7 +247,7 @@ mod tests {
         let folder =
             NotesService::create_folder(&state, "Operations".to_owned()).expect("create folder");
         let note = NotesService::create_note(&state, Some(folder.id.clone())).expect("create note");
-        let body = "kubectl get pods\nssh host.example.com\n------";
+        let body = "kubectl get pods\nssh host.test\n------";
         NotesService::update_note(
             &state,
             note.id.clone(),
@@ -267,6 +265,16 @@ mod tests {
             NotesService::delete_folder(&state, folder.id.clone()),
             Err(NotesError::FolderNotEmpty)
         ));
+        let root_note = NotesService::create_note(&state, None).expect("create root note");
+        assert!(root_note.folder_id.is_none());
+        let moved =
+            NotesService::move_note(&state, note.id.clone(), None).expect("move note to root");
+        assert!(moved.folder_id.is_none());
+        assert_eq!(moved.body, body);
+        let moved = NotesService::move_note(&state, note.id.clone(), Some(folder.id.clone()))
+            .expect("move note into folder");
+        assert_eq!(moved.folder_id.as_deref(), Some(folder.id.as_str()));
+        NotesService::delete_note(&state, root_note.id).expect("delete root note");
         NotesService::delete_note(&state, note.id).expect("delete note");
         NotesService::delete_folder(&state, folder.id).expect("delete empty folder");
         assert!(

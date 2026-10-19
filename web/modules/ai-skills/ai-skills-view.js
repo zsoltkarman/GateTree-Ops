@@ -49,6 +49,13 @@ export async function mountAiSkillsView(root, detail = {}, { onCatalogChange = (
     if (state.selectedId) state.document = await readAiSkill(state.selectedId);
     state.onCatalogChange(state.libraries, state.skills, state.groups);
     render(root, state);
+    if (detail.libraryId) {
+      const row = root.querySelector(`[data-library-id="${CSS.escape(detail.libraryId)}"]`)?.closest(".skill-library-row");
+      if (row) {
+        row.classList.add("is-search-target");
+        row.scrollIntoView({ block: "center" });
+      }
+    }
   } catch (cause) {
     root.innerHTML = `<div class="ai-skills-error">${escapeHtml(cause)}</div>`;
   }
@@ -171,7 +178,7 @@ function bindEvents(root, state) {
   root.querySelectorAll('[data-action="delete-library"]').forEach((button) => {
     button.addEventListener("click", async () => {
       const library = state.libraries.find((item) => item.id === button.dataset.libraryId);
-      if (!window.confirm(`Delete skill folder “${library.name}” from PHAROS?`)) return;
+      if (!window.confirm(`Delete skill folder “${library.name}” from GateTree-Ops?`)) return;
       await runAction(root, state, async () => {
         await deleteAiSkillLibrary(library.id);
         state.libraries = state.libraries.filter((item) => item.id !== library.id);

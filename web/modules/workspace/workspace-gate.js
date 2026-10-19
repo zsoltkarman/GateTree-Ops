@@ -1,3 +1,4 @@
+import { APP_NAME } from "../../shared/branding.js";
 import { beacon } from "../../shared/ui.js";
 import {
   biometricStatus,
@@ -8,7 +9,7 @@ import {
   unlockWorkspaceWithBiometrics,
 } from "./workspace-api.js";
 
-const LAST_WORKSPACE_KEY = "pharos.workspace.lastPath";
+const LAST_WORKSPACE_KEY = "gatetree-ops.workspace.lastPath";
 
 export function mountWorkspaceGate(root, onUnlocked) {
   let workspace = null;
@@ -20,15 +21,8 @@ export function mountWorkspaceGate(root, onUnlocked) {
         <div class="brand brand--welcome">
           ${beacon()}
           <div>
-            <strong>PHAROS</strong>
-            <small class="acronym-expansion">
-              <span><b>P</b>ersistent</span>
-              <span><b>H</b>ost</span>
-              <span><b>A</b>ccess &amp;</span>
-              <span><b>R</b>emote</span>
-              <span><b>O</b>perations</span>
-              <span><b>S</b>uite</span>
-            </small>
+            <strong>${APP_NAME}</strong>
+            <small class="product-tagline">Remote access and deployment operations</small>
           </div>
         </div>
       </section>
@@ -36,7 +30,7 @@ export function mountWorkspaceGate(root, onUnlocked) {
         <div class="panel-heading"><p class="eyebrow">Workspace</p><h2 data-role="title">Choose a location</h2></div>
         <button class="workspace-picker" type="button" data-action="choose">
           <span class="folder-icon" aria-hidden="true"></span>
-          <span><strong data-role="name">Select workspace folder</strong><small data-role="path">An empty folder or an existing PHAROS workspace</small></span>
+          <span><strong data-role="name">Select workspace folder</strong><small data-role="path">An empty folder or an existing GateTree-Ops workspace</small></span>
           <b>Choose</b>
         </button>
         <button class="biometric-unlock" type="button" data-action="biometric-unlock" hidden>
@@ -150,7 +144,7 @@ export function mountWorkspaceGate(root, onUnlocked) {
 
   chooseButton.addEventListener("click", async () => {
     error.hidden = true;
-    const selected = await window.__TAURI__.dialog.open({ directory: true, multiple: false, canCreateDirectories: true, title: "Choose a PHAROS workspace" });
+    const selected = await window.__TAURI__.dialog.open({ directory: true, multiple: false, canCreateDirectories: true, title: "Choose a GateTree-Ops workspace" });
     if (!selected) return;
     try {
       await loadWorkspace(selected);

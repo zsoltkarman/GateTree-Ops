@@ -62,29 +62,59 @@ pub fn control_deployment_queue_item(
         match action.as_str() {
             "start" | "restart" => {
                 agent_ipc::start().map_err(|error| error.to_string())?;
+                QueueService::synchronize_agent(&state).map_err(|error| error.to_string())?;
+                QueueService::prepare_plan_start(&state, &id, action == "restart")
+                    .map_err(|error| error.to_string())?;
                 let submission = QueueService::agent_submission(
                     &state,
                     &id,
                     keepass_password.as_deref().map(String::as_str),
                 )
                 .map_err(|error| error.to_string())?;
-                if submission.jobs.iter().any(|job| {
-                    (matches!(job.driver.as_str(), "jira" | "cx") && job.action == "validate")
-                        || (job.driver == "olam" && job.action == "deploy")
-                }) && submission.credentials.is_empty()
+                if submission
+                    .jobs
+                    .iter()
+                    .any(|job| matches!(job.driver.as_str(), "jira" | "cx" | "olam"))
+                    && submission.credentials.is_empty()
                 {
                     return Err(
                         "KeePass master password is required for validation and deployment.".into(),
                     );
                 }
-                agent_ipc::submit_job_set(submission, action == "restart")
+                let submitted = agent_ipc::submit_job_set(submission, action == "restart")
                     .map_err(|error| error.to_string())?;
+                QueueService::synchronize_job_sets(&state, &[submitted])
+                    .map_err(|error| error.to_string())?;
+                return QueueService::snapshot(&state).map_err(|error| error.to_string());
             }
             "stop" => {
-                let _ = agent_ipc::stop_job_set(id.clone());
+                let stopped =
+                    agent_ipc::stop_job_set(id.clone()).map_err(|error| error.to_string())?;
+                QueueService::synchronize_job_sets(&state, &[stopped])
+                    .map_err(|error| error.to_string())?;
+                return QueueService::snapshot(&state).map_err(|error| error.to_string());
             }
             _ => {}
         }
+    }
+    if item_type == "job" && matches!(action.as_str(), "disable" | "enable") {
+        // Existing Agent jobs are authoritative, including queued jobs in a running Plan.
+        let status = agent_ipc::status().map_err(|error| error.to_string())?;
+        if status.running {
+            let sets = agent_ipc::list_job_sets().map_err(|error| error.to_string())?;
+            if sets
+                .iter()
+                .any(|set| set.jobs.iter().any(|job| job.id == id))
+            {
+                let updated = agent_ipc::set_job_enabled(id, action == "enable")
+                    .map_err(|error| error.to_string())?;
+                QueueService::synchronize_job_sets(&state, &[updated])
+                    .map_err(|error| error.to_string())?;
+                return QueueService::snapshot(&state).map_err(|error| error.to_string());
+            }
+        }
+        QueueService::control(&state, "job", &id, &action).map_err(|error| error.to_string())?;
+        return QueueService::snapshot(&state).map_err(|error| error.to_string());
     }
     if item_type == "job" && matches!(action.as_str(), "start" | "restart" | "stop") {
         let snapshot = QueueService::snapshot(&state).map_err(|error| error.to_string())?;
@@ -114,7 +144,10 @@ pub fn control_deployment_queue_item(
         return QueueService::snapshot(&state).map_err(|error| error.to_string());
     }
     if item_type == "job" && action == "approve" {
-        agent_ipc::approve_job(id.clone()).map_err(|error| error.to_string())?;
+        let approved = agent_ipc::approve_job(id).map_err(|error| error.to_string())?;
+        QueueService::synchronize_job_sets(&state, &[approved])
+            .map_err(|error| error.to_string())?;
+        return QueueService::snapshot(&state).map_err(|error| error.to_string());
     }
     QueueService::control(&state, &item_type, &id, &action).map_err(|error| error.to_string())?;
     QueueService::snapshot(&state).map_err(|error| error.to_string())

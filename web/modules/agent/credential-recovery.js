@@ -38,7 +38,8 @@ export function monitorAgentCredentials(showMessage) {
     }
     const key = `${status.running ? status.pid : "startup"}:${vault.databasePath}`;
     if (unlockedKey === key) return true;
-    if (dismissedKey === key) return false;
+    if (dismissedKey === key && !forJob) return false;
+    if (forJob) dismissedKey = null;
     let error = "";
     while (!controller.signal.aborted) {
       let password = await requestKeePassPassword(document.body, { signal: controller.signal, restoring: true, error });

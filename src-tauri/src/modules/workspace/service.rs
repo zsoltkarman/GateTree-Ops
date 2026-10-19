@@ -13,11 +13,14 @@ use crate::storage::{EncryptedDatabase, StorageError, derive_key};
 
 use super::model::{WorkspaceInspection, WorkspaceKind, WorkspaceSessionView};
 
-const DATABASE_FILE: &str = "pharos.sqlite";
-const SALT_FILE: &str = "pharos.sqlite.salt";
+const DATABASE_FILE: &str = "gatetree-ops.sqlite";
+const SALT_FILE: &str = "gatetree-ops.sqlite.salt";
+// Legacy workspace files stay in place; never mix a database with a different salt.
+const LEGACY_DATABASE_FILE: &str = "pharos.sqlite";
+const LEGACY_SALT_FILE: &str = "pharos.sqlite.salt";
 const SALT_SIZE: usize = 16;
 #[cfg(debug_assertions)]
-const DEVELOPMENT_KEY_FILE: &str = ".pharos-dev-unlock";
+const DEVELOPMENT_KEY_FILE: &str = ".gatetree-ops-dev-unlock";
 
 #[derive(Default)]
 pub struct WorkspaceState {
@@ -114,6 +117,21 @@ impl WorkspaceState {
         let active = active.as_ref().ok_or(WorkspaceError::NotUnlocked)?;
         let _keep_database_alive = &active.database;
         Ok((active.path.clone(), Zeroizing::new(active.key.to_vec())))
+    }
+
+    pub(crate) fn backup_before_update(&self) -> Result<Option<PathBuf>, WorkspaceError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| WorkspaceError::StatePoisoned)?;
+        let Some(active) = active.as_ref() else {
+            return Ok(None);
+        };
+        active
+            .database
+            .backup(&database_path(&active.path), &active.key, "before-update")
+            .map(Some)
+            .map_err(WorkspaceError::from)
     }
 
     pub fn with_connection<T>(
@@ -244,7 +262,7 @@ impl WorkspaceService {
     #[cfg(debug_assertions)]
     pub fn cache_development_key(state: &WorkspaceState) -> Result<(), WorkspaceError> {
         let (path, key) = state.biometric_material()?;
-        let key_file = path.join(DEVELOPMENT_KEY_FILE);
+        let key_file = development_key_path(&path);
         fs::write(&key_file, key.as_slice())?;
         restrict_file_permissions(&key_file)
     }
@@ -255,7 +273,7 @@ impl WorkspaceService {
         path: String,
     ) -> Result<WorkspaceSessionView, WorkspaceError> {
         let inspection = Self::inspect(path)?;
-        let key = fs::read(Path::new(&inspection.path).join(DEVELOPMENT_KEY_FILE))?;
+        let key = fs::read(development_key_path(Path::new(&inspection.path)))?;
         Self::unlock_with_key(state, inspection.path, key)
     }
 }
@@ -266,12 +284,12 @@ fn validate_directory(path: &str) -> Result<PathBuf, WorkspaceError> {
         return Err(WorkspaceError::DirectoryUnavailable);
     }
     let directory = candidate.canonicalize()?;
-    let probe = directory.join(".pharos-write-test");
+    let probe = directory.join(".gatetree-ops-write-test");
     OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&probe)?
-        .write_all(b"pharos")?;
+        .write_all(b"gatetree-ops")?;
     fs::remove_file(probe)?;
     Ok(directory)
 }
@@ -308,17 +326,41 @@ fn restrict_file_permissions(_path: &Path) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
+fn uses_legacy_files(directory: &Path) -> bool {
+    !directory.join(DATABASE_FILE).exists()
+        && !directory.join(SALT_FILE).exists()
+        && (directory.join(LEGACY_DATABASE_FILE).exists()
+            || directory.join(LEGACY_SALT_FILE).exists())
+}
 fn database_path(directory: &Path) -> PathBuf {
-    directory.join(DATABASE_FILE)
+    directory.join(if uses_legacy_files(directory) {
+        LEGACY_DATABASE_FILE
+    } else {
+        DATABASE_FILE
+    })
 }
 fn salt_path(directory: &Path) -> PathBuf {
-    directory.join(SALT_FILE)
+    directory.join(if uses_legacy_files(directory) {
+        LEGACY_SALT_FILE
+    } else {
+        SALT_FILE
+    })
+}
+#[cfg(debug_assertions)]
+fn development_key_path(directory: &Path) -> PathBuf {
+    let current = directory.join(DEVELOPMENT_KEY_FILE);
+    let legacy = directory.join(".pharos-dev-unlock");
+    if !current.exists() && legacy.is_file() {
+        legacy
+    } else {
+        current
+    }
 }
 fn workspace_name(directory: &Path) -> String {
     directory
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("PHAROS Workspace")
+        .unwrap_or("GateTree-Ops Workspace")
         .to_owned()
 }
 
@@ -327,16 +369,16 @@ pub enum WorkspaceError {
     #[error("The selected workspace folder is unavailable.")]
     DirectoryUnavailable,
     #[error(
-        "This folder contains an incomplete PHAROS workspace. Restore both pharos.sqlite and pharos.sqlite.salt, or choose an empty folder."
+        "This folder contains an incomplete GateTree-Ops workspace. Restore the matching database and salt files, or choose an empty folder."
     )]
     IncompleteWorkspace,
     #[error("The workspace database is invalid or empty.")]
     InvalidDatabase,
     #[error("The workspace encryption salt is invalid.")]
     InvalidSalt,
-    #[error("A PHAROS workspace already exists in this folder.")]
+    #[error("A GateTree-Ops workspace already exists in this folder.")]
     AlreadyExists,
-    #[error("No PHAROS workspace exists in this folder.")]
+    #[error("No GateTree-Ops workspace exists in this folder.")]
     DoesNotExist,
     #[error("Use a master password containing at least 12 characters.")]
     WeakPassword,
@@ -369,11 +411,92 @@ mod tests {
             .as_nanos();
         let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let directory = std::env::temp_dir().join(format!(
-            "pharos-workspace-test-{}-{unique}-{sequence}",
+            "gatetree-ops-workspace-test-{}-{unique}-{sequence}",
             std::process::id()
         ));
         fs::create_dir_all(&directory).expect("create test workspace");
         directory
+    }
+
+    #[test]
+    fn opens_legacy_encrypted_workspace_and_debug_key_without_renaming_or_mixing_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "gatetree-ops-legacy-workspace-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let state = WorkspaceState::default();
+        WorkspaceService::create(
+            &state,
+            directory.to_string_lossy().into_owned(),
+            "correct horse battery staple",
+        )
+        .unwrap();
+        state
+            .with_connection(|c| {
+                c.execute(
+                    "INSERT INTO workspace_metadata(key,value) VALUES ('rename-probe','preserved')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        #[cfg(debug_assertions)]
+        WorkspaceService::cache_development_key(&state).unwrap();
+        state.lock().unwrap();
+        assert!(directory.join(DATABASE_FILE).is_file());
+        fs::rename(
+            directory.join(DATABASE_FILE),
+            directory.join(LEGACY_DATABASE_FILE),
+        )
+        .unwrap();
+        fs::rename(directory.join(SALT_FILE), directory.join(LEGACY_SALT_FILE)).unwrap();
+        #[cfg(debug_assertions)]
+        fs::rename(
+            directory.join(DEVELOPMENT_KEY_FILE),
+            directory.join(".pharos-dev-unlock"),
+        )
+        .unwrap();
+        assert!(matches!(
+            WorkspaceService::inspect(directory.to_string_lossy().into_owned())
+                .unwrap()
+                .kind,
+            WorkspaceKind::Existing
+        ));
+        WorkspaceService::unlock(
+            &state,
+            directory.to_string_lossy().into_owned(),
+            "correct horse battery staple",
+        )
+        .unwrap();
+        let value: String = state
+            .with_connection(|c| {
+                c.query_row(
+                    "SELECT value FROM workspace_metadata WHERE key='rename-probe'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(value, "preserved");
+        assert!(!directory.join(DATABASE_FILE).exists());
+        state.lock().unwrap();
+        #[cfg(debug_assertions)]
+        {
+            WorkspaceService::unlock_for_development(
+                &state,
+                directory.to_string_lossy().into_owned(),
+            )
+            .unwrap();
+            state.lock().unwrap();
+        }
+        // A partial new-format pair must never borrow the legacy database or salt.
+        fs::write(directory.join(SALT_FILE), [0_u8; SALT_SIZE]).unwrap();
+        assert!(matches!(
+            WorkspaceService::inspect(directory.to_string_lossy().into_owned()),
+            Err(WorkspaceError::IncompleteWorkspace)
+        ));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

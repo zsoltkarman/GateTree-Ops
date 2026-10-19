@@ -1,7 +1,10 @@
+import { mountTerminalLauncher, terminalLauncherMarkup } from "../local-terminal/launcher.js";
+import { mountQuickLauncher } from "../quick-launcher/quick-launcher-view.js";
 import { bindThemePicker, themePickerMarkup } from "../appearance/theme-picker.js";
+import { mountGlobalSearch } from "../search/global-search.js";
 
-const SIDEBAR_STATE_KEY = "pharos.shell.sidebarCollapsed";
-const SIDEBAR_WIDTH_KEY = "pharos.shell.sidebarWidth";
+const SIDEBAR_STATE_KEY = "gatetree-ops.shell.sidebarCollapsed";
+const SIDEBAR_WIDTH_KEY = "gatetree-ops.shell.sidebarWidth";
 const SIDEBAR_MIN_WIDTH = 150;
 const SIDEBAR_MAX_WIDTH = 420;
 
@@ -22,12 +25,12 @@ function icon(path) {
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"]/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;",
+    "&": "&amp;", "<": "&lt;", ">": "&#62;", '"': "&quot;",
   })[character]);
 }
 
 function navigationMarkup(id, label, iconPath, index) {
-  const hasModuleNavigation = ["connections", "deployments", "ai-skills", "notes"].includes(id);
+  const hasModuleNavigation = ["connections", "deployments", "ai-skills", "notes", "help"].includes(id);
   const item = `
     <button class="navigation-item${index === 0 ? " is-active" : ""}" data-module="${id}" title="${label}">
       ${icon(iconPath)}
@@ -39,7 +42,12 @@ function navigationMarkup(id, label, iconPath, index) {
     <div class="navigation-group" data-navigation-group="${id}">
       ${item}
       <div class="navigation-children" data-role="${id}-navigation" hidden>
-        ${id === "ai-skills" ? `
+        ${id === "help" ? `
+          <button data-help-check-updates>${icon("<path d='M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 11-2l3 3M4 16l3 3a7 7 0 0 0 11-2'/>")}<span>Check for Updates</span></button>
+          <button data-help-module="deployments" aria-expanded="false">${icon("<path d='M5 6.5h14v4H5zM5 13.5h14v4H5zM8 8.5h.01M8 15.5h.01'/>")}<span>Deployments</span>${icon("<path d='m9 7 5 5-5 5'/>")}</button>
+          <div class="help-navigation-topics" data-role="help-deployment-topics" hidden>
+            <button data-help-section="config">${icon("<path d='M5 5h4v4H5zM15 5h4v4h-4zM10 7h5M17 9v5M15 14h4v4h-4zM9 16h6M5 14h4v4H5zM7 9v5'/>")}<span>Config</span></button>
+          </div>` : id === "ai-skills" ? `
           <button data-ai-section="skills">${icon("<path d='m9 7 5 5-5 5'/>")}<span>Skills</span></button>
           <div data-role="ai-skill-links"></div>
           <button data-ai-section="config">${icon("<path d='M3.5 7.5h6l2-2h9v13h-17zM15 10v5M12.5 12.5h5'/>")}<span>Config</span></button>` : id === "deployments" ? `
@@ -51,17 +59,19 @@ function navigationMarkup(id, label, iconPath, index) {
     </div>`;
 }
 
-export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
+export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onCheckUpdates = () => {}, onOpenLocalTerminal = () => {} }) {
   root.innerHTML = `
     <main class="shell">
       <header class="shell-header">
         <button class="shell-menu-toggle" data-action="toggle-sidebar" aria-label="Hide menu" title="Hide menu">
           ${icon("<path d='M4 7h16M4 12h16M4 17h16' />")}
         </button>
-        <label class="global-search">
+        <div class="global-search">
           ${icon("<circle cx='10.5' cy='10.5' r='5.5' /><path d='m15 15 4 4' />")}
           <input type="search" placeholder="Search" aria-label="Search" autocomplete="off" />
-        </label>
+        </div>
+        ${terminalLauncherMarkup()}
+        <nav class="quick-launcher" aria-label="Quick Launcher" data-role="quick-launcher"></nav>
         <p class="shell-message" data-role="shell-message" role="status" hidden></p>
         <div class="shell-actions">
           ${themePickerMarkup()}
@@ -81,6 +91,7 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
         </aside>
         <div class="sidebar-resizer" data-role="sidebar-resizer" role="separator" aria-label="Resize menu" aria-orientation="vertical" tabindex="0"></div>
         <section class="work-area" aria-label="Workspace content">
+          <nav data-role="workspace-tabs" aria-label="Workspace tabs"></nav>
           <div class="module-content" data-role="module-content"></div>
         </section>
       </div>
@@ -113,16 +124,17 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
   };
   setSidebarCollapsed(localStorage.getItem(SIDEBAR_STATE_KEY) === "true");
   bindThemePicker(root);
+  const destroyTerminalLauncher = mountTerminalLauncher(root, onOpenLocalTerminal, cause => showMessage(String(cause), true));
 
   const aiChildren = root.querySelector('[data-role="ai-skills-navigation"]');
   const aiLinks = root.querySelector('[data-role="ai-skill-links"]');
   let aiCatalog = { libraries: [], skills: [], groups: [] };
-  let aiSkillsExpanded = true;
+  let aiSkillsExpanded = false;
   const expandedAiGroups = new Set();
-  const knownAiGroups = new Set();
   let deploymentCatalog = { plans: [], processes: [], section: "queue", selectedId: null, selectedPlanId: null };
-  let deploymentQueueExpanded = true;
-  let deploymentConfigExpanded = true;
+  let deploymentQueueExpanded = false;
+  let deploymentConfigExpanded = false;
+  let helpDeploymentsExpanded = false;
 
   const setModuleExpanded = (module, expanded) => {
     const group = root.querySelector(`[data-navigation-group="${module}"]`);
@@ -165,12 +177,6 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
   };
 
   const renderAiCatalog = () => {
-    aiCatalog.groups.forEach((group) => {
-      if (!knownAiGroups.has(group.id)) {
-        knownAiGroups.add(group.id);
-        expandedAiGroups.add(group.id);
-      }
-    });
     aiLinks.hidden = !aiSkillsExpanded;
     aiLinks.innerHTML = aiCatalog.groups.map((group) => {
       const expanded = expandedAiGroups.has(group.id);
@@ -213,8 +219,8 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
     queueLinks.hidden = !hasPlans || !deploymentQueueExpanded;
     queueLinks.innerHTML = deploymentCatalog.plans.map((plan) => `
       <button class="deployment-navigation-resource${deploymentCatalog.section === "queue" && deploymentCatalog.selectedPlanId === plan.id ? " is-active" : ""}"
-              data-queue-plan="${escapeHtml(plan.id)}" title="${escapeHtml(plan.name)}">
-        ${icon("<path d='M6 4h12v16H6zM9 8h6M9 12h6M9 16h4'/>")}<span>${escapeHtml(plan.name)}</span>
+              data-queue-plan="${escapeHtml(plan.id)}" title="#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}">
+        ${icon("<path d='M6 4h12v16H6zM9 8h6M9 12h6M9 16h4'/>")}<span>#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</span>
       </button>`).join("");
     queueLinks.querySelectorAll("[data-queue-plan]").forEach((button) => {
       button.addEventListener("click", () => navigate("deployments", { section: "queue", planId: button.dataset.queuePlan }));
@@ -298,15 +304,23 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
     const width = Number.parseFloat(getComputedStyle(shell).getPropertyValue("--sidebar-width"));
     setSidebarWidth(width + (event.key === "ArrowRight" ? 12 : -12));
   });
-  const navigate = (module, detail = null) => {
+  const selectNavigation = (module, detail = null) => {
     const item = root.querySelector(`.navigation-item[data-module="${module}"]`);
-    if (!item) return;
     root.querySelector(".navigation-item.is-active")?.classList.remove("is-active");
-    item.classList.add("is-active");
+    item?.classList.add("is-active");
     root.querySelectorAll("[data-navigation-group]").forEach((group) => {
       setModuleExpanded(group.dataset.navigationGroup, group.dataset.navigationGroup === module);
     });
-    if (module === "ai-skills") {
+    if (module === "help") {
+      const configSelected = detail?.module === "deployments" && detail?.section === "config";
+      if (configSelected) helpDeploymentsExpanded = true;
+      const parent = root.querySelector('[data-help-module="deployments"]');
+      parent.classList.toggle("is-expanded", helpDeploymentsExpanded);
+      parent.setAttribute("aria-expanded", String(helpDeploymentsExpanded));
+      parent.classList.toggle("is-active", detail?.module === "deployments" && !detail?.section);
+      root.querySelector('[data-role="help-deployment-topics"]').hidden = !helpDeploymentsExpanded;
+      root.querySelector('[data-help-section="config"]').classList.toggle("is-active", configSelected);
+    } else if (module === "ai-skills") {
       selectAiChild(detail ?? { section: "skills" });
     } else if (module === "deployments") {
       deploymentCatalog.section = detail?.section || null;
@@ -317,6 +331,9 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
       });
       renderDeploymentCatalog();
     }
+  };
+  const navigate = (module, detail = null) => {
+    selectNavigation(module, detail);
     onNavigate(module, root.querySelector('[data-role="module-content"]'), detail);
   };
   root.querySelectorAll(".navigation-item").forEach((item) => {
@@ -337,6 +354,18 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
     });
   });
   bindAiChildren();
+  root.querySelector('[data-help-check-updates]').addEventListener("click", onCheckUpdates);
+  root.querySelector('[data-help-module="deployments"]').addEventListener("click", () => {
+    helpDeploymentsExpanded = !helpDeploymentsExpanded;
+    const parent = root.querySelector('[data-help-module="deployments"]');
+    parent.classList.toggle("is-expanded", helpDeploymentsExpanded);
+    parent.setAttribute("aria-expanded", String(helpDeploymentsExpanded));
+    root.querySelector('[data-role="help-deployment-topics"]').hidden = !helpDeploymentsExpanded;
+    if (helpDeploymentsExpanded) navigate("help", { module: "deployments" });
+  });
+  root.querySelector('[data-help-section="config"]').addEventListener("click", () => {
+    navigate("help", { module: "deployments", section: "config" });
+  });
   root.querySelectorAll("[data-deployment-section]").forEach((button) => {
     button.addEventListener("click", () => {
       if (button.dataset.deploymentSection === "queue" && deploymentCatalog.plans.length > 0) {
@@ -356,9 +385,23 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
   root.querySelector('[data-action="lock"]').addEventListener("click", onLock);
   biometricButton.addEventListener("click", onBiometricToggle);
 
+  const destroySearch = mountGlobalSearch(shell, { onNavigate: navigate });
+  const showMessage = (text, isError = false) => {
+    window.clearTimeout(messageTimer);
+    message.textContent = text;
+    message.classList.toggle("is-error", isError);
+    message.hidden = false;
+    messageTimer = window.setTimeout(() => { message.hidden = true; }, 5000);
+  };
+  const destroyLauncher = mountQuickLauncher(root.querySelector('[data-role="quick-launcher"]'), {
+    onNavigate: navigate, showMessage,
+  });
+
   return {
+    destroy() { destroyTerminalLauncher(); destroySearch(); destroyLauncher(); window.clearTimeout(messageTimer); },
     biometricButton,
     navigate,
+    selectNavigation,
     setAiSkillsNavigation(libraries, skills, groups) {
       aiCatalog = { libraries, skills, groups };
       renderAiCatalog();
@@ -379,16 +422,8 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate }) {
       renderDeploymentCatalog();
     },
     navigationHost(module) {
-      const host = root.querySelector(`[data-role="${module}-navigation-host"]`);
-      if (host) setModuleExpanded(module, true);
-      return host;
+      return root.querySelector(`[data-role="${module}-navigation-host"]`);
     },
-    showMessage(text, isError = false) {
-      window.clearTimeout(messageTimer);
-      message.textContent = text;
-      message.classList.toggle("is-error", isError);
-      message.hidden = false;
-      messageTimer = window.setTimeout(() => { message.hidden = true; }, 5000);
-    },
+    showMessage,
   };
 }

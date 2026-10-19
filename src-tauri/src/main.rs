@@ -1,3 +1,3 @@
 fn main() {
-    pharos_lib::run();
+    gatetree_ops_lib::run();
 }

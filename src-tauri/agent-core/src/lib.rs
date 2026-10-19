@@ -24,7 +24,7 @@ pub use ssh::{
     SshAuthentication, SshConnectRequest, SshHostKey, SshSessionStatus, SshTerminalChunk,
 };
 
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 16;
 const ENDPOINT_FILE: &str = "agent-endpoint.json";
 const LOCK_FILE: &str = "agent.lock";
 const JOB_SETS_FILE: &str = "agent-job-sets.json";
@@ -33,6 +33,8 @@ const MAX_MESSAGE_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentJobSubmission {
+    #[serde(default)]
+    pub disabled: bool,
     pub id: String,
     pub sequence: i64,
     pub name: String,
@@ -81,11 +83,21 @@ pub struct AgentJobStatus {
     pub log: String,
     #[serde(default)]
     pub phase: Option<String>,
+    #[serde(default)]
+    pub validation_job_id: Option<i64>,
+    #[serde(default)]
+    pub deployment_job_id: Option<i64>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    #[serde(default)]
+    pub report_progress: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentJobSetStatus {
+    #[serde(default)]
+    pub execution_revision: u32,
     #[serde(default)]
     pub credentials_required: bool,
     pub id: String,
@@ -121,6 +133,9 @@ struct AgentRequest {
 enum AgentAction {
     Ping,
     Shutdown,
+    PrepareUpdate,
+    RefreshUpdate,
+    CancelUpdate,
     ScanSshHostKey {
         host: String,
         port: u16,
@@ -153,6 +168,10 @@ enum AgentAction {
     RetryJob {
         job_id: String,
         credentials: Vec<AgentCredential>,
+    },
+    SetJobEnabled {
+        job_id: String,
+        enabled: bool,
     },
     ListJobSets,
     RestoreJobSetCredentials {
@@ -204,6 +223,14 @@ impl AgentProcessStatus {
             protocol_version: None,
         }
     }
+}
+
+pub fn validate_jira_update_report(report: &serde_json::Value) -> Result<(), String> {
+    drivers::jira_update::validate_report(report)
+}
+
+pub fn validate_cx_update_report(report: &serde_json::Value) -> Result<(), String> {
+    drivers::cx_update::validate_report(report)
 }
 
 pub fn status() -> Result<AgentProcessStatus, AgentIpcError> {
@@ -285,6 +312,66 @@ pub fn stop() -> Result<AgentProcessStatus, AgentIpcError> {
     Err(AgentIpcError::ShutdownTimeout)
 }
 
+/// Atomically reserve an idle Agent for application replacement. While reserved,
+/// every mutating operation except shutdown/cancellation is rejected.
+pub fn prepare_update() -> Result<bool, AgentIpcError> {
+    let paths = AgentPaths::discover()?;
+    let endpoint = match read_endpoint(&paths) {
+        Ok(endpoint) => endpoint,
+        Err(AgentIpcError::NotRunning) => {
+            start()?;
+            read_endpoint(&paths)?
+        }
+        Err(error) => return Err(error),
+    };
+    reserve_update(&endpoint)?;
+    Ok(true)
+}
+
+fn reserve_update(endpoint: &AgentEndpoint) -> Result<(), AgentIpcError> {
+    let response = request(endpoint, AgentAction::PrepareUpdate)?;
+    if !response.ok {
+        return Err(AgentIpcError::Rejected(
+            response
+                .error
+                .unwrap_or_else(|| "Agent update reservation failed.".into()),
+        ));
+    }
+    Ok(())
+}
+
+pub fn refresh_update_reservation() -> Result<(), AgentIpcError> {
+    let endpoint = read_endpoint(&AgentPaths::discover()?)?;
+    let response = request(&endpoint, AgentAction::RefreshUpdate)?;
+    if !response.ok {
+        return Err(AgentIpcError::Rejected(response.error.unwrap_or_else(
+            || "Update reservation expired; check for updates again.".into(),
+        )));
+    }
+    Ok(())
+}
+
+pub fn cancel_update() -> Result<(), AgentIpcError> {
+    let endpoint = read_endpoint(&AgentPaths::discover()?)?;
+    let response = request(&endpoint, AgentAction::CancelUpdate)?;
+    if !response.ok {
+        return Err(AgentIpcError::Rejected(
+            response
+                .error
+                .unwrap_or_else(|| "Agent update cancellation failed.".into()),
+        ));
+    }
+    Ok(())
+}
+
+pub fn backup_update_state(destination: &Path) -> Result<(), AgentIpcError> {
+    let paths = AgentPaths::discover()?;
+    if paths.job_sets.exists() {
+        fs::copy(&paths.job_sets, destination.join(JOB_SETS_FILE))?;
+    }
+    Ok(())
+}
+
 pub fn kill() -> Result<AgentProcessStatus, AgentIpcError> {
     kill_at(&AgentPaths::discover()?)
 }
@@ -318,7 +405,7 @@ fn kill_at(paths: &AgentPaths) -> Result<AgentProcessStatus, AgentIpcError> {
         if Path::new(name.trim())
             .file_name()
             .and_then(|name| name.to_str())
-            != Some("pharos-agent")
+            != Some("gatetree-ops-agent")
         {
             return Err(AgentIpcError::InvalidEndpoint);
         }
@@ -330,11 +417,17 @@ fn kill_at(paths: &AgentPaths) -> Result<AgentProcessStatus, AgentIpcError> {
     #[cfg(target_os = "windows")]
     {
         let result = Command::new("taskkill")
-            .args(["/PID", &pid, "/F", "/FI", "IMAGENAME eq pharos-agent.exe"])
+            .args([
+                "/PID",
+                &pid,
+                "/F",
+                "/FI",
+                "IMAGENAME eq gatetree-ops-agent.exe",
+            ])
             .output()?;
         if !result.status.success() {
             return Err(AgentIpcError::Rejected(
-                "Could not kill the PHAROS Agent process".into(),
+                "Could not kill the GateTree-Ops Agent process".into(),
             ));
         }
     }
@@ -471,6 +564,12 @@ pub fn stop_job_set(job_set_id: String) -> Result<AgentJobSetStatus, AgentIpcErr
     response_value(response, |response| response.job_set, "Agent job set")
 }
 
+pub fn set_job_enabled(job_id: String, enabled: bool) -> Result<AgentJobSetStatus, AgentIpcError> {
+    let endpoint = read_endpoint(&AgentPaths::discover()?)?;
+    let response = request(&endpoint, AgentAction::SetJobEnabled { job_id, enabled })?;
+    response_value(response, |response| response.job_set, "Agent job set")
+}
+
 pub fn deny_job(job_id: String) -> Result<(), AgentIpcError> {
     simple_request(AgentAction::DenyJob { job_id })
 }
@@ -495,6 +594,7 @@ struct JobSetManager {
     path: PathBuf,
     job_sets: Vec<AgentJobSetStatus>,
     credentials: HashMap<String, Vec<AgentCredential>>,
+    execution_generations: HashMap<String, u64>,
 }
 
 impl JobSetManager {
@@ -521,18 +621,6 @@ impl JobSetManager {
         });
         job_sets.reverse();
         for set in &mut job_sets {
-            let previous_len = set.jobs.len();
-            set.jobs
-                .retain(|job| !(job.driver == "olam" && job.action == "validate"));
-            if set.jobs.len() != previous_len {
-                changed = true;
-            }
-            for job in &mut set.jobs {
-                if job.driver == "olam" && job.action == "deploy" && job.phase.is_none() {
-                    job.phase = Some("validation".into());
-                    changed = true;
-                }
-            }
             if !matches!(set.status.as_str(), "running" | "awaiting_approval") {
                 continue;
             }
@@ -546,7 +634,7 @@ impl JobSetManager {
                 job.status = "stopped".into();
                 append_job_log(
                     &mut job.log,
-                    "Agent restarted. Unlock KeePass to restore credentials, then start the Deployment Plan to validate again.",
+                    "Agent restarted. Unlock KeePass to restore credentials, then restart the Plan to run its configured steps.",
                 );
             }
         }
@@ -554,6 +642,7 @@ impl JobSetManager {
             path,
             job_sets,
             credentials: HashMap::new(),
+            execution_generations: HashMap::new(),
         };
         if changed {
             manager.persist()?;
@@ -571,7 +660,18 @@ impl JobSetManager {
                 "a job set must contain at least one job".into(),
             ));
         }
+        if self
+            .job_sets
+            .iter()
+            .any(|set| set.id == submission.id && set.status == "running")
+            && restart
+        {
+            return Err(AgentIpcError::InvalidJobSet(
+                "Stop the Plan before restarting it".into(),
+            ));
+        }
         let mut job_set = AgentJobSetStatus {
+            execution_revision: 3,
             credentials_required: false,
             id: submission.id,
             plan_number: submission.plan_number,
@@ -584,8 +684,13 @@ impl JobSetManager {
                 .jobs
                 .into_iter()
                 .map(|job| {
-                    let phase = (job.driver == "olam" && job.action == "deploy")
-                        .then(|| "validation".into());
+                    let phase = (job.driver == "olam" && job.action != "validate").then(|| {
+                        if job.action == "deploy" {
+                            "deployment".into()
+                        } else {
+                            "validation".into()
+                        }
+                    });
                     AgentJobStatus {
                         id: job.id,
                         sequence: job.sequence,
@@ -595,9 +700,13 @@ impl JobSetManager {
                         target: job.target,
                         details: job.details,
                         payload: job.payload,
-                        status: "queued".into(),
+                        status: if job.disabled { "disabled" } else { "queued" }.into(),
                         log: String::new(),
                         phase,
+                        validation_job_id: None,
+                        deployment_job_id: None,
+                        finished_at: None,
+                        report_progress: Default::default(),
                     }
                 })
                 .collect(),
@@ -617,18 +726,20 @@ impl JobSetManager {
                     .iter()
                     .map(|job| &job.id)
                     .eq(job_set.jobs.iter().map(|job| &job.id));
-            if !restart && unchanged {
+            // Starting a stopped Plan always reruns every step, including completed checks.
+            if !restart && unchanged && self.job_sets[existing].status != "stopped" {
                 let current = &mut self.job_sets[existing];
-                if current.status == "running" {
+                if matches!(current.status.as_str(), "running" | "awaiting_approval") {
                     return Ok(current.clone());
                 }
-                current.status = "running".into();
-                if let Some(job) = current
+                if let Some(index) = current
                     .jobs
-                    .iter_mut()
-                    .find(|job| job.status != "completed")
+                    .iter()
+                    .position(|job| !matches!(job.status.as_str(), "completed" | "disabled"))
                 {
-                    job.status = "running".into();
+                    activate_job(current, index);
+                } else {
+                    current.status = "completed".into();
                 }
                 let result = current.clone();
                 self.persist()?;
@@ -637,9 +748,7 @@ impl JobSetManager {
             self.job_sets.remove(existing);
         }
 
-        if let Some(first) = job_set.jobs.first_mut() {
-            first.status = "running".into();
-        }
+        activate_job(&mut job_set, 0);
         self.job_sets.push(job_set.clone());
         self.persist()?;
         Ok(job_set)
@@ -655,11 +764,21 @@ impl JobSetManager {
             .iter_mut()
             .find(|set| set.jobs.iter().any(|job| job.id == job_id))
             .ok_or_else(|| AgentIpcError::InvalidJobSet("job was not found".into()))?;
+        if set.execution_revision != 3 {
+            return Err(AgentIpcError::InvalidJobSet(
+                "Restart the Plan to regenerate jobs from Process steps.".into(),
+            ));
+        }
         let index = set.jobs.iter().position(|job| job.id == job_id).unwrap();
+        if set.jobs[index].status == "disabled" {
+            return Err(AgentIpcError::InvalidJobSet(
+                "Enable this job before retrying it.".into(),
+            ));
+        }
         if set.status == "running"
             || set.jobs[..index]
                 .iter()
-                .any(|job| job.status != "completed")
+                .any(|job| !matches!(job.status.as_str(), "completed" | "disabled"))
         {
             return Err(AgentIpcError::InvalidJobSet(
                 "Stop the Plan and complete preceding jobs before retrying".into(),
@@ -681,19 +800,34 @@ impl JobSetManager {
         if !credentials.is_empty() {
             self.credentials.insert(set.id.clone(), credentials);
         }
+        let retried_id = set.jobs[index].id.clone();
         for job in &mut set.jobs[index..] {
-            job.status = "queued".into();
-            job.log.clear();
-            if job.driver == "olam" && job.action == "deploy" {
-                job.phase = Some("validation".into());
+            if job.status == "disabled" {
+                continue;
             }
+            job.status = "queued".into();
+            job.finished_at = None;
+            if job.id != retried_id {
+                job.report_progress.clear();
+            }
+            job.log.clear();
+            job.validation_job_id = None;
+            job.deployment_job_id = None;
+            job.phase = if job.driver == "olam" && job.action != "validate" {
+                Some(
+                    if job.action == "deploy" {
+                        "deployment"
+                    } else {
+                        "validation"
+                    }
+                    .into(),
+                )
+            } else {
+                None
+            };
         }
-        set.jobs[index].status = "running".into();
-        append_job_log(
-            &mut set.jobs[index].log,
-            "Retry requested by the operator; starting a new validation run.",
-        );
-        set.status = "running".into();
+        activate_job(set, index);
+        append_job_log(&mut set.jobs[index].log, "Retry requested by the operator.");
         let result = set.clone();
         self.persist()?;
         Ok(result)
@@ -706,10 +840,10 @@ impl JobSetManager {
             .map(|mut set| {
                 set.credentials_required = !self.credentials.contains_key(&set.id)
                     && set.status != "completed"
-                    && set.jobs.iter().any(|job| {
-                        (matches!(job.driver.as_str(), "jira" | "cx") && job.action == "validate")
-                            || (job.driver == "olam" && job.action == "deploy")
-                    });
+                    && set
+                        .jobs
+                        .iter()
+                        .any(|job| matches!(job.driver.as_str(), "jira" | "cx" | "olam"));
                 set
             })
             .collect()
@@ -754,25 +888,69 @@ impl JobSetManager {
         self.persist()
     }
 
+    fn set_job_enabled(
+        &mut self,
+        job_id: &str,
+        enabled: bool,
+    ) -> Result<AgentJobSetStatus, AgentIpcError> {
+        let set = self
+            .job_sets
+            .iter_mut()
+            .find(|set| set.jobs.iter().any(|job| job.id == job_id))
+            .ok_or_else(|| AgentIpcError::InvalidJobSet("job was not found".into()))?;
+        let index = set.jobs.iter().position(|job| job.id == job_id).unwrap();
+        let status = set.jobs[index].status.as_str();
+        if (enabled && status != "disabled")
+            || (!enabled && !matches!(status, "queued" | "stopped"))
+        {
+            return Err(AgentIpcError::InvalidJobSet(
+                "Only queued or stopped jobs can be disabled; only disabled jobs can be enabled."
+                    .into(),
+            ));
+        }
+        if enabled
+            && matches!(set.status.as_str(), "running" | "awaiting_approval")
+            && set.jobs[index + 1..]
+                .iter()
+                .any(|job| !matches!(job.status.as_str(), "queued" | "disabled"))
+        {
+            return Err(AgentIpcError::InvalidJobSet(
+                "Stop the Plan before enabling a job whose position has already passed.".into(),
+            ));
+        }
+        set.jobs[index].status = if enabled { "queued" } else { "disabled" }.into();
+        let result = set.clone();
+        self.persist()?;
+        Ok(result)
+    }
+
     fn approve(&mut self, job_id: &str) -> Result<AgentJobSetStatus, AgentIpcError> {
         let job_set = self
             .job_sets
             .iter_mut()
             .find(|set| set.jobs.iter().any(|job| job.id == job_id))
             .ok_or_else(|| AgentIpcError::InvalidJobSet("job was not found".into()))?;
+        if job_set.execution_revision != 3 {
+            return Err(AgentIpcError::InvalidJobSet(
+                "Restart the Plan to regenerate jobs from Process steps.".into(),
+            ));
+        }
         let job = job_set
             .jobs
             .iter_mut()
             .find(|job| job.id == job_id)
             .expect("job was located above");
-        if job.status != "awaiting_approval" {
+        if job.status != "awaiting_approval"
+            || job.driver != "olam"
+            || !matches!(job.action.as_str(), "deploy" | "validate_deploy")
+        {
             return Err(AgentIpcError::InvalidJobSet(
-                "only a successfully validated job can be approved".into(),
+                "only an OLAM deployment awaiting approval can be approved".into(),
             ));
         }
         if !self.credentials.contains_key(&job_set.id) {
             return Err(AgentIpcError::InvalidJobSet(
-                "Agent credentials are no longer in memory; restart the Plan and validate again"
+                "Agent credentials are no longer in memory; restart the Plan to run its configured steps"
                     .into(),
             ));
         }
@@ -792,10 +970,15 @@ impl JobSetManager {
             .find(|job_set| job_set.id == id)
             .ok_or_else(|| AgentIpcError::InvalidJobSet("job set was not found".into()))?;
         job_set.status = "stopped".into();
-        if let Some(job) = job_set.jobs.iter_mut().find(|job| job.status == "running") {
+        if let Some(job) = job_set
+            .jobs
+            .iter_mut()
+            .find(|job| matches!(job.status.as_str(), "running" | "awaiting_approval"))
+        {
             job.status = "stopped".into();
         }
         let result = job_set.clone();
+        *self.execution_generations.entry(id.into()).or_default() += 1;
         self.persist()?;
         Ok(result)
     }
@@ -871,6 +1054,8 @@ fn serve(
     ssh_sessions: &mut ssh::SshSessionManager,
     job_sets: Arc<Mutex<JobSetManager>>,
 ) -> Result<(), AgentIpcError> {
+    let mut update_reserved = false;
+    let mut reservation_deadline = Instant::now();
     for incoming in listener.incoming() {
         let mut stream = incoming?;
         if !stream.peer_addr()?.ip().is_loopback() {
@@ -879,179 +1064,270 @@ fn serve(
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let request = read_request(&mut stream);
+        if update_reserved && Instant::now() >= reservation_deadline {
+            update_reserved = false;
+        }
         let (response, shutdown) = match request {
             Ok(request)
                 if request.protocol_version == PROTOCOL_VERSION
                     && request.token == endpoint.token =>
             {
-                match request.action {
-                    AgentAction::Ping => (success_response(), false),
-                    AgentAction::Shutdown => {
-                        ssh_sessions.disconnect_all();
-                        (success_response(), true)
-                    }
-                    AgentAction::ScanSshHostKey { host, port } => {
-                        match ssh_sessions.scan_host_key(host, port) {
-                            Ok(host_key) => {
-                                let mut response = success_response();
-                                response.ssh_host_key = Some(host_key);
-                                (response, false)
-                            }
-                            Err(error) => (error_response(&error.to_string()), false),
-                        }
-                    }
-                    AgentAction::ConnectSsh { request } => match ssh_sessions.connect(request) {
-                        Ok(session) => {
-                            let mut response = success_response();
-                            response.ssh_session = Some(session);
-                            (response, false)
-                        }
-                        Err(error) => (error_response(&error.to_string()), false),
-                    },
-                    AgentAction::ListSshSessions => {
-                        let mut response = success_response();
-                        response.ssh_sessions = Some(ssh_sessions.list());
-                        (response, false)
-                    }
-                    AgentAction::DisconnectSsh { session_id } => {
-                        match ssh_sessions.disconnect(&session_id) {
-                            Ok(()) => (success_response(), false),
-                            Err(error) => (error_response(&error.to_string()), false),
-                        }
-                    }
-                    AgentAction::ReadSshTerminal {
-                        session_id,
-                        offset,
-                        maximum_bytes,
-                    } => match ssh_sessions.read_terminal(&session_id, offset, maximum_bytes) {
-                        Ok(chunk) => {
-                            let mut response = success_response();
-                            response.ssh_terminal_chunk = Some(chunk);
-                            (response, false)
-                        }
-                        Err(error) => (error_response(&error.to_string()), false),
-                    },
-                    AgentAction::WriteSshTerminal { session_id, data } => {
-                        match ssh_sessions.write_terminal(&session_id, data) {
-                            Ok(()) => (success_response(), false),
-                            Err(error) => (error_response(&error.to_string()), false),
-                        }
-                    }
-                    AgentAction::ResizeSshTerminal {
-                        session_id,
-                        columns,
-                        rows,
-                    } => match ssh_sessions.resize_terminal(&session_id, columns, rows) {
-                        Ok(()) => (success_response(), false),
-                        Err(error) => (error_response(&error.to_string()), false),
-                    },
-                    AgentAction::SubmitJobSet {
-                        submission,
-                        restart,
-                    } => {
-                        let credentials = submission.credentials.clone();
-                        let job_set_id = submission.id.clone();
-                        let submitted = {
-                            let mut manager = job_sets.lock().expect("job set lock");
-                            let result = manager.submit(submission, restart);
-                            if result.is_ok() {
-                                manager
-                                    .credentials
-                                    .insert(job_set_id.clone(), credentials.clone());
-                            }
-                            result
-                        };
-                        match submitted {
-                            Ok(job_set) => {
-                                spawn_job_set_execution(job_sets.clone(), job_set_id, credentials);
-                                let mut response = success_response();
-                                response.job_set = Some(job_set);
-                                (response, false)
-                            }
-                            Err(error) => (error_response(&error.to_string()), false),
-                        }
-                    }
-                    AgentAction::RetryJob {
-                        job_id,
-                        credentials,
-                    } => {
-                        let retried = {
-                            let mut manager = job_sets.lock().expect("job set lock");
-                            manager.retry(&job_id, credentials).map(|set| {
-                                let credentials = manager
-                                    .credentials
-                                    .get(&set.id)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                (set, credentials)
-                            })
-                        };
-                        match retried {
-                            Ok((set, credentials)) => {
-                                spawn_job_set_execution(job_sets.clone(), set.id, credentials);
+                if update_reserved
+                    && !matches!(
+                        &request.action,
+                        AgentAction::Ping
+                            | AgentAction::ListSshSessions
+                            | AgentAction::ListJobSets
+                            | AgentAction::ReadSshTerminal { .. }
+                            | AgentAction::Shutdown
+                            | AgentAction::CancelUpdate
+                            | AgentAction::RefreshUpdate
+                    )
+                {
+                    (
+                        error_response(
+                            "Application update is in progress. Try again after restart.",
+                        ),
+                        false,
+                    )
+                } else {
+                    match request.action {
+                        AgentAction::PrepareUpdate => {
+                            let manager = job_sets.lock().expect("job set lock");
+                            let busy = manager.job_sets.iter().any(|set| {
+                                matches!(set.status.as_str(), "running" | "awaiting_approval")
+                                    || set.jobs.iter().any(|job| {
+                                        matches!(
+                                            job.status.as_str(),
+                                            "running" | "awaiting_approval"
+                                        )
+                                    })
+                            });
+                            if busy || !ssh_sessions.list().is_empty() {
+                                (
+                                    error_response(
+                                        "Finish or stop active deployments and close SSH sessions before installing the update.",
+                                    ),
+                                    false,
+                                )
+                            } else {
+                                update_reserved = true;
+                                reservation_deadline = Instant::now() + Duration::from_secs(600);
                                 (success_response(), false)
                             }
-                            Err(error) => (error_response(&error.to_string()), false),
                         }
-                    }
-                    AgentAction::RestoreJobSetCredentials {
-                        job_set_id,
-                        credentials,
-                    } => {
-                        match job_sets
-                            .lock()
-                            .expect("job set lock")
-                            .restore_credentials(&job_set_id, credentials)
-                        {
-                            Ok(()) => (success_response(), false),
-                            Err(error) => (error_response(&error.to_string()), false),
+                        AgentAction::RefreshUpdate => {
+                            if update_reserved {
+                                reservation_deadline = Instant::now() + Duration::from_secs(600);
+                                (success_response(), false)
+                            } else {
+                                (
+                                    error_response(
+                                        "Update reservation expired. Check for updates again.",
+                                    ),
+                                    false,
+                                )
+                            }
                         }
-                    }
-                    AgentAction::ListJobSets => {
-                        let mut response = success_response();
-                        response.job_sets = Some(job_sets.lock().expect("job set lock").list());
-                        (response, false)
-                    }
-                    AgentAction::StopJobSet { job_set_id } => {
-                        match job_sets.lock().expect("job set lock").stop(&job_set_id) {
-                            Ok(job_set) => {
+                        AgentAction::CancelUpdate => {
+                            update_reserved = false;
+                            (success_response(), false)
+                        }
+                        AgentAction::Ping => (success_response(), false),
+                        AgentAction::Shutdown => {
+                            ssh_sessions.disconnect_all();
+                            (success_response(), true)
+                        }
+                        AgentAction::ScanSshHostKey { host, port } => {
+                            match ssh_sessions.scan_host_key(host, port) {
+                                Ok(host_key) => {
+                                    let mut response = success_response();
+                                    response.ssh_host_key = Some(host_key);
+                                    (response, false)
+                                }
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::ConnectSsh { request } => {
+                            match ssh_sessions.connect(request) {
+                                Ok(session) => {
+                                    let mut response = success_response();
+                                    response.ssh_session = Some(session);
+                                    (response, false)
+                                }
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::ListSshSessions => {
+                            let mut response = success_response();
+                            response.ssh_sessions = Some(ssh_sessions.list());
+                            (response, false)
+                        }
+                        AgentAction::DisconnectSsh { session_id } => {
+                            match ssh_sessions.disconnect(&session_id) {
+                                Ok(()) => (success_response(), false),
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::ReadSshTerminal {
+                            session_id,
+                            offset,
+                            maximum_bytes,
+                        } => match ssh_sessions.read_terminal(&session_id, offset, maximum_bytes) {
+                            Ok(chunk) => {
                                 let mut response = success_response();
-                                response.job_set = Some(job_set);
+                                response.ssh_terminal_chunk = Some(chunk);
                                 (response, false)
                             }
                             Err(error) => (error_response(&error.to_string()), false),
+                        },
+                        AgentAction::WriteSshTerminal { session_id, data } => {
+                            match ssh_sessions.write_terminal(&session_id, data) {
+                                Ok(()) => (success_response(), false),
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
                         }
-                    }
-                    AgentAction::DenyJob { job_id } => {
-                        match job_sets.lock().expect("job set lock").deny(&job_id) {
+                        AgentAction::ResizeSshTerminal {
+                            session_id,
+                            columns,
+                            rows,
+                        } => match ssh_sessions.resize_terminal(&session_id, columns, rows) {
                             Ok(()) => (success_response(), false),
                             Err(error) => (error_response(&error.to_string()), false),
-                        }
-                    }
-                    AgentAction::ApproveJob { job_id } => {
-                        let approved = {
-                            let mut manager = job_sets.lock().expect("job set lock");
-                            manager.approve(&job_id).map(|set| {
-                                let credentials = manager
-                                    .credentials
-                                    .get(&set.id)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                (set, credentials)
-                            })
-                        };
-                        match approved {
-                            Ok((job_set, credentials)) => {
-                                spawn_job_set_execution(
-                                    job_sets.clone(),
-                                    job_set.id.clone(),
-                                    credentials,
-                                );
-                                let mut response = success_response();
-                                response.job_set = Some(job_set);
-                                (response, false)
+                        },
+                        AgentAction::SubmitJobSet {
+                            submission,
+                            restart,
+                        } => {
+                            let credentials = submission.credentials.clone();
+                            let job_set_id = submission.id.clone();
+                            let (submitted, already_running) = {
+                                let mut manager = job_sets.lock().expect("job set lock");
+                                let already_running = !restart
+                                    && manager
+                                        .job_sets
+                                        .iter()
+                                        .any(|set| set.id == job_set_id && set.status == "running");
+                                let result = manager.submit(submission, restart);
+                                if result.is_ok() {
+                                    manager
+                                        .credentials
+                                        .insert(job_set_id.clone(), credentials.clone());
+                                }
+                                (result, already_running)
+                            };
+                            match submitted {
+                                Ok(job_set) => {
+                                    if !already_running {
+                                        spawn_job_set_execution(
+                                            job_sets.clone(),
+                                            job_set_id,
+                                            credentials,
+                                        );
+                                    }
+                                    let mut response = success_response();
+                                    response.job_set = Some(job_set);
+                                    (response, false)
+                                }
+                                Err(error) => (error_response(&error.to_string()), false),
                             }
-                            Err(error) => (error_response(&error.to_string()), false),
+                        }
+                        AgentAction::RetryJob {
+                            job_id,
+                            credentials,
+                        } => {
+                            let retried = {
+                                let mut manager = job_sets.lock().expect("job set lock");
+                                manager.retry(&job_id, credentials).map(|set| {
+                                    let credentials = manager
+                                        .credentials
+                                        .get(&set.id)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    (set, credentials)
+                                })
+                            };
+                            match retried {
+                                Ok((set, credentials)) => {
+                                    spawn_job_set_execution(job_sets.clone(), set.id, credentials);
+                                    (success_response(), false)
+                                }
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::RestoreJobSetCredentials {
+                            job_set_id,
+                            credentials,
+                        } => {
+                            match job_sets
+                                .lock()
+                                .expect("job set lock")
+                                .restore_credentials(&job_set_id, credentials)
+                            {
+                                Ok(()) => (success_response(), false),
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::SetJobEnabled { job_id, enabled } => {
+                            match job_sets
+                                .lock()
+                                .expect("job set lock")
+                                .set_job_enabled(&job_id, enabled)
+                            {
+                                Ok(set) => {
+                                    let mut response = success_response();
+                                    response.job_set = Some(set);
+                                    (response, false)
+                                }
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::ListJobSets => {
+                            let mut response = success_response();
+                            response.job_sets = Some(job_sets.lock().expect("job set lock").list());
+                            (response, false)
+                        }
+                        AgentAction::StopJobSet { job_set_id } => {
+                            match job_sets.lock().expect("job set lock").stop(&job_set_id) {
+                                Ok(job_set) => {
+                                    let mut response = success_response();
+                                    response.job_set = Some(job_set);
+                                    (response, false)
+                                }
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::DenyJob { job_id } => {
+                            match job_sets.lock().expect("job set lock").deny(&job_id) {
+                                Ok(()) => (success_response(), false),
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::ApproveJob { job_id } => {
+                            let approved = {
+                                let mut manager = job_sets.lock().expect("job set lock");
+                                manager.approve(&job_id).map(|set| {
+                                    let credentials = manager
+                                        .credentials
+                                        .get(&set.id)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    (set, credentials)
+                                })
+                            };
+                            match approved {
+                                Ok((job_set, credentials)) => {
+                                    spawn_job_set_execution(
+                                        job_sets.clone(),
+                                        job_set.id.clone(),
+                                        credentials,
+                                    );
+                                    let mut response = success_response();
+                                    response.job_set = Some(job_set);
+                                    (response, false)
+                                }
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
                         }
                     }
                 }
@@ -1072,10 +1348,22 @@ fn spawn_job_set_execution(
     job_set_id: String,
     credentials: Vec<AgentCredential>,
 ) {
+    let generation = {
+        let mut manager = job_sets.lock().expect("job set lock");
+        let generation = manager
+            .execution_generations
+            .entry(job_set_id.clone())
+            .or_default();
+        *generation += 1;
+        *generation
+    };
     thread::spawn(move || {
         loop {
             let current = {
                 let manager = job_sets.lock().expect("job set lock");
+                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                    return;
+                }
                 manager
                     .job_sets
                     .iter()
@@ -1090,18 +1378,30 @@ fn spawn_job_set_execution(
                                     set.process_definition.clone(),
                                     set.plan_definition.clone(),
                                     job,
+                                    set.clone(),
                                 )
                             })
                     })
             };
-            let Some((process_definition, plan_definition, job)) = current else {
+            let Some((process_definition, plan_definition, job, report_context)) = current else {
                 return;
             };
             {
                 let mut manager = job_sets.lock().expect("job set lock");
+                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                    return;
+                }
                 if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
                     && let Some(active) = set.jobs.iter_mut().find(|item| item.id == job.id)
                 {
+                    if job.driver == "olam" && job.action == "deploy" {
+                        if job.phase.as_deref() == Some("deployment") {
+                            active.deployment_job_id = None;
+                        } else {
+                            active.validation_job_id = None;
+                            active.deployment_job_id = None;
+                        }
+                    }
                     append_job_log(
                         &mut active.log,
                         &format!(
@@ -1114,12 +1414,82 @@ fn spawn_job_set_execution(
                     let _ = manager.persist();
                 }
             }
-            let Some(result) =
-                drivers::execute(&process_definition, &plan_definition, &job, &credentials)
-            else {
-                return;
+            let on_started = |phase: &str, external_id: i64| {
+                let mut manager = job_sets.lock().expect("job set lock");
+                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                    return;
+                }
+                if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
+                    && set.status == "running"
+                    && let Some(active) = set.jobs.iter_mut().find(|active| active.id == job.id)
+                    && active.status == "running"
+                    && active.phase.as_deref() == Some(phase)
+                {
+                    record_olam_launch(active, phase, external_id);
+                    let _ = manager.persist();
+                }
+            };
+            let log_prefix = std::cell::RefCell::new(None::<String>);
+            let on_output = |output: &str| {
+                let mut manager = job_sets.lock().expect("job set lock");
+                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                    return;
+                }
+                if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
+                    && set.status == "running"
+                    && let Some(active) = set.jobs.iter_mut().find(|active| active.id == job.id)
+                    && active.status == "running"
+                    && active.phase == job.phase
+                {
+                    let mut prefix = log_prefix.borrow_mut();
+                    let prefix = prefix.get_or_insert_with(|| active.log.clone());
+                    active.log.clone_from(prefix);
+                    append_job_log(&mut active.log, output);
+                    let _ = manager.persist();
+                }
+            };
+            let checkpoint = |key: &str, value: &str| -> Result<(), String> {
+                let mut manager = job_sets.lock().map_err(|_| "Agent job set lock failed.")?;
+                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                    return Err("Update report stopped before the next operation.".into());
+                }
+                let set = manager
+                    .job_sets
+                    .iter_mut()
+                    .find(|set| set.id == job_set_id && set.status == "running")
+                    .ok_or("Update report is no longer running.")?;
+                let active = set
+                    .jobs
+                    .iter_mut()
+                    .find(|active| active.id == job.id && active.status == "running")
+                    .ok_or("Update report job is no longer running.")?;
+                active.report_progress.insert(key.into(), value.into());
+                manager
+                    .persist()
+                    .map_err(|e| format!("Could not persist update report progress: {e}"))
+            };
+            let result = if matches!(job.driver.as_str(), "jira" | "cx") && job.action == "update" {
+                let update = if job.driver == "cx" {
+                    drivers::cx_update::update
+                } else {
+                    drivers::jira_update::update
+                };
+                update(&report_context, &job, &credentials, &checkpoint, &on_output)
+                    .map(drivers::DriverOutcome::Completed)
+            } else {
+                drivers::execute(
+                    &process_definition,
+                    &plan_definition,
+                    &job,
+                    &credentials,
+                    &on_started,
+                    &on_output,
+                )
             };
             let mut manager = job_sets.lock().expect("job set lock");
+            if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                return;
+            }
             let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id) else {
                 return;
             };
@@ -1129,12 +1499,17 @@ fn spawn_job_set_execution(
             let Some(index) = set.jobs.iter().position(|item| item.id == job.id) else {
                 return;
             };
+            // Replace the live snapshot with the final output rather than duplicating it.
+            if let Some(prefix) = log_prefix.into_inner() {
+                set.jobs[index].log = prefix;
+            }
             match result {
                 Ok(drivers::DriverOutcome::Completed(log)) => {
                     set.jobs[index].status = "completed".into();
+                    set.jobs[index].finished_at = Some(chrono::Utc::now().to_rfc3339());
                     append_job_log(&mut set.jobs[index].log, &log);
-                    if let Some(next) = set.jobs.get_mut(index + 1) {
-                        next.status = "running".into();
+                    if index + 1 < set.jobs.len() {
+                        activate_job(set, index + 1);
                     } else {
                         set.status = "completed".into();
                     }
@@ -1166,6 +1541,66 @@ fn spawn_job_set_execution(
             }
         }
     });
+}
+
+// Activation is the only place that gates a deployment. Approve starts the
+// already selected deploy action; it never launches an implicit validation.
+fn activate_job(set: &mut AgentJobSetStatus, index: usize) {
+    let Some(index) = (index..set.jobs.len()).find(|&i| set.jobs[i].status != "disabled") else {
+        set.status = "completed".into();
+        return;
+    };
+    if set.jobs[index].driver == "olam" && set.jobs[index].action == "deploy" {
+        let deployment = &set.jobs[index];
+        let validation = set.jobs[..index]
+            .iter()
+            .rev()
+            .find(|candidate| {
+                candidate.driver == "olam"
+                    && candidate.action == "validate_deployment"
+                    && candidate.status == "completed"
+                    && candidate.target == deployment.target
+                    && candidate
+                        .payload
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                        .zip(deployment.payload.as_deref().and_then(|value| {
+                            serde_json::from_str::<serde_json::Value>(value).ok()
+                        }))
+                        .is_some_and(|(a, b)| a == b)
+            })
+            .map(|validation| (validation.validation_job_id, validation.log.clone()));
+        let job = &mut set.jobs[index];
+        job.status = "awaiting_approval".into();
+        job.phase = Some("deployment".into());
+        job.validation_job_id = None;
+        if let Some((id, log)) = validation {
+            job.validation_job_id = id;
+            job.log = log;
+        } else {
+            job.log = "No preceding matching validation was configured or completed. Review the deployment target and payload before approval.".into();
+        }
+        append_job_log(&mut job.log, "Deployment awaiting operator approval.");
+        set.status = "awaiting_approval".into();
+    } else {
+        set.jobs[index].status = "running".into();
+        set.status = "running".into();
+    }
+}
+
+fn record_olam_launch(job: &mut AgentJobStatus, phase: &str, external_id: i64) {
+    if external_id <= 0 {
+        return;
+    }
+    match phase {
+        "validation" => job.validation_job_id = Some(external_id),
+        "deployment" => job.deployment_job_id = Some(external_id),
+        _ => return,
+    }
+    append_job_log(
+        &mut job.log,
+        &format!("OLAM {phase} started as Ansible job {external_id}."),
+    );
 }
 
 fn append_job_log(current: &mut String, message: &str) {
@@ -1346,11 +1781,15 @@ struct AgentPaths {
 
 impl AgentPaths {
     fn discover() -> Result<Self, AgentIpcError> {
-        let runtime_dir = if let Some(value) = env::var_os("PHAROS_AGENT_RUNTIME_DIR") {
-            PathBuf::from(value)
-        } else {
-            default_runtime_dir()?
-        };
+        if let Some(value) = env::var_os("GATETREE_OPS_AGENT_RUNTIME_DIR")
+            .or_else(|| env::var_os("PHAROS_AGENT_RUNTIME_DIR"))
+        {
+            return Ok(Self::at(PathBuf::from(value)));
+        }
+        let runtime_dir = default_runtime_dir()?;
+        if let Some(base) = runtime_dir.parent().and_then(Path::parent) {
+            migrate_legacy_runtime(&base.join("PHAROS").join("runtime"), &runtime_dir)?;
+        }
         Ok(Self::at(runtime_dir))
     }
 
@@ -1362,6 +1801,51 @@ impl AgentPaths {
             runtime_dir,
         }
     }
+}
+
+// Import persisted plans once, without copying a live endpoint, token or credentials.
+fn migrate_legacy_runtime(legacy: &Path, current: &Path) -> Result<(), AgentIpcError> {
+    let source = legacy.join(JOB_SETS_FILE);
+    let destination = current.join(JOB_SETS_FILE);
+    if destination.exists() || !source.is_file() {
+        return Ok(());
+    }
+    let old_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(legacy.join(LOCK_FILE))?;
+    old_lock.try_lock_exclusive().map_err(|_| {
+        AgentIpcError::Rejected(
+            "The legacy PHAROS Agent is running. Stop it before migrating to GateTree-Ops.".into(),
+        )
+    })?;
+    fs::create_dir_all(current)?;
+    restrict_directory(current)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(current.join(LOCK_FILE))?;
+    lock.lock_exclusive()?;
+    if destination.exists() {
+        return Ok(());
+    }
+    let bytes = fs::read(source)?;
+    let _: Vec<AgentJobSetStatus> = serde_json::from_slice(&bytes)?;
+    let temporary = current.join(format!("migration-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    fs::rename(temporary, destination)?;
+    Ok(())
 }
 
 fn default_runtime_dir() -> Result<PathBuf, AgentIpcError> {
@@ -1379,12 +1863,14 @@ fn default_runtime_dir() -> Result<PathBuf, AgentIpcError> {
                 .map(PathBuf::from)
                 .map(|path| path.join(".local/state"))
         });
-    base.map(|path| path.join("PHAROS").join("runtime"))
+    base.map(|path| path.join("GateTree-Ops").join("runtime"))
         .ok_or(AgentIpcError::RuntimeDirectoryUnavailable)
 }
 
 fn agent_executable() -> Result<PathBuf, AgentIpcError> {
-    if let Some(path) = env::var_os("PHAROS_AGENT_BIN") {
+    if let Some(path) =
+        env::var_os("GATETREE_OPS_AGENT_BIN").or_else(|| env::var_os("PHAROS_AGENT_BIN"))
+    {
         return Ok(PathBuf::from(path));
     }
     let current = env::current_exe()?;
@@ -1392,9 +1878,9 @@ fn agent_executable() -> Result<PathBuf, AgentIpcError> {
         .parent()
         .ok_or(AgentIpcError::ExecutableDirectoryUnavailable)?;
     Ok(directory.join(if cfg!(target_os = "windows") {
-        "pharos-agent.exe"
+        "gatetree-ops-agent.exe"
     } else {
-        "pharos-agent"
+        "gatetree-ops-agent"
     }))
 }
 
@@ -1437,39 +1923,39 @@ fn restrict_directory(_path: &Path) -> Result<(), AgentIpcError> {
 
 #[derive(Debug, Error)]
 pub enum AgentIpcError {
-    #[error("PHAROS Agent is not running")]
+    #[error("GateTree-Ops Agent is not running")]
     NotRunning,
-    #[error("PHAROS Agent is already running")]
+    #[error("GateTree-Ops Agent is already running")]
     AlreadyRunning,
-    #[error("PHAROS Agent executable was not found at {0}")]
+    #[error("GateTree-Ops Agent executable was not found at {0}")]
     ExecutableNotFound(PathBuf),
-    #[error("could not determine the PHAROS Agent executable directory")]
+    #[error("could not determine the GateTree-Ops Agent executable directory")]
     ExecutableDirectoryUnavailable,
-    #[error("could not determine the PHAROS Agent runtime directory")]
+    #[error("could not determine the GateTree-Ops Agent runtime directory")]
     RuntimeDirectoryUnavailable,
-    #[error("PHAROS Agent did not start in time")]
+    #[error("GateTree-Ops Agent did not start in time")]
     StartupTimeout,
-    #[error("PHAROS Agent did not stop in time")]
+    #[error("GateTree-Ops Agent did not stop in time")]
     ShutdownTimeout,
-    #[error("PHAROS Agent IPC endpoint is invalid")]
+    #[error("GateTree-Ops Agent IPC endpoint is invalid")]
     InvalidEndpoint,
     #[error(
-        "An incompatible PHAROS Agent is running. Stop it (or use Kill Agent), then Start the rebuilt Agent."
+        "An incompatible GateTree-Ops Agent is running. Stop it (or use Kill Agent), then Start the rebuilt Agent."
     )]
     ProtocolMismatch,
     #[error(
-        "A different PHAROS Agent version is running. Stop it (or use Kill Agent), then Start the rebuilt Agent."
+        "A different GateTree-Ops Agent version is running. Stop it (or use Kill Agent), then Start the rebuilt Agent."
     )]
     AgentVersionMismatch,
-    #[error("PHAROS Agent rejected the request: {0}")]
+    #[error("GateTree-Ops Agent rejected the request: {0}")]
     Rejected(String),
-    #[error("PHAROS Agent IPC message is too large")]
+    #[error("GateTree-Ops Agent IPC message is too large")]
     MessageTooLarge,
-    #[error("PHAROS Agent response did not contain {0}")]
+    #[error("GateTree-Ops Agent response did not contain {0}")]
     InvalidResponse(String),
-    #[error("PHAROS Agent SSH manager failed: {0}")]
+    #[error("GateTree-Ops Agent SSH manager failed: {0}")]
     Ssh(String),
-    #[error("PHAROS Agent job set is invalid: {0}")]
+    #[error("GateTree-Ops Agent job set is invalid: {0}")]
     InvalidJobSet(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -1484,8 +1970,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn migrates_legacy_plan_state_once_without_endpoints_or_active_legacy_agents() {
+        let directory = std::env::temp_dir().join(format!(
+            "gatetree-ops-runtime-migration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let legacy = directory.join("PHAROS/runtime");
+        let current = directory.join("GateTree-Ops/runtime");
+        fs::create_dir_all(&legacy).unwrap();
+        let mut manager = JobSetManager::load(legacy.join(JOB_SETS_FILE)).unwrap();
+        manager.submit(olam_submission(&["deploy"]), false).unwrap();
+        fs::write(legacy.join(ENDPOINT_FILE), "do not copy").unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(legacy.join(LOCK_FILE))
+            .unwrap();
+        lock.try_lock_exclusive().unwrap();
+        assert!(migrate_legacy_runtime(&legacy, &current).is_err());
+        assert!(!current.exists());
+        drop(lock);
+        migrate_legacy_runtime(&legacy, &current).unwrap();
+        assert!(!current.join(ENDPOINT_FILE).exists());
+        assert_eq!(
+            fs::read(legacy.join(JOB_SETS_FILE)).unwrap(),
+            fs::read(current.join(JOB_SETS_FILE)).unwrap()
+        );
+        let loaded = JobSetManager::load(current.join(JOB_SETS_FILE)).unwrap();
+        assert_eq!(loaded.job_sets.len(), 1);
+        assert_eq!(loaded.job_sets[0].status, "stopped");
+        let migrated = fs::read(current.join(JOB_SETS_FILE)).unwrap();
+        migrate_legacy_runtime(&legacy, &current).unwrap();
+        assert_eq!(fs::read(current.join(JOB_SETS_FILE)).unwrap(), migrated);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn inspects_and_stops_a_legacy_agent_but_rejects_job_requests() {
-        let runtime = env::temp_dir().join(format!("pharos-legacy-{}", uuid::Uuid::new_v4()));
+        let runtime = env::temp_dir().join(format!("gatetree-ops-legacy-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&runtime).unwrap();
         let paths = AgentPaths::at(runtime.clone());
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -1526,9 +2049,571 @@ mod tests {
         fs::remove_dir_all(runtime).unwrap();
     }
 
+    fn olam_submission(actions: &[&str]) -> AgentJobSetSubmission {
+        AgentJobSetSubmission {
+            id: "plan".into(),
+            plan_number: 1,
+            name: "Plan".into(),
+            process_name: "Process".into(),
+            plan_definition: "inputs:\n  olam:\n    account: deploy".into(),
+            process_definition: "{}".into(),
+            credentials: vec![],
+            jobs: actions
+                .iter()
+                .enumerate()
+                .map(|(index, action)| AgentJobSubmission {
+                    disabled: false,
+                    id: format!("job-{index}"),
+                    sequence: index as i64,
+                    name: format!("Step {index}"),
+                    driver: "olam".into(),
+                    action: (*action).into(),
+                    target: Some("host-1".into()),
+                    details: String::new(),
+                    payload: Some(r#"{"playbook_name":"service","VERSION":"1"}"#.into()),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn cx_update_requires_plan_context_without_an_external_request() {
+        let mut job = olam_submission(&["deploy"]).jobs.remove(0);
+        for driver in ["cx"] {
+            job.driver = driver.into();
+            job.action = "update".into();
+            let job = AgentJobStatus {
+                id: job.id.clone(),
+                sequence: job.sequence,
+                name: job.name.clone(),
+                driver: job.driver.clone(),
+                action: job.action.clone(),
+                target: job.target.clone(),
+                details: job.details.clone(),
+                payload: None,
+                status: "running".into(),
+                log: String::new(),
+                phase: None,
+                validation_job_id: None,
+                deployment_job_id: None,
+                finished_at: None,
+                report_progress: Default::default(),
+            };
+            let error = drivers::execute(
+                "{}",
+                "{}",
+                &job,
+                &[],
+                &|_, _| panic!("must not launch"),
+                &|_| panic!("must not execute"),
+            );
+            match error {
+                Err(error) => {
+                    assert!(error.contains("Plan report context"))
+                }
+                _ => panic!("update without Plan context must fail"),
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_jobs_are_persisted_skipped_reenabled_and_preserved_during_retry() {
+        let path = env::temp_dir().join(format!(
+            "gatetree-ops-disabled-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let mut submission =
+            olam_submission(&["validate_deployment", "deploy", "deploy", "deploy"]);
+        submission.jobs[0].disabled = true;
+        submission.jobs[2].disabled = true;
+        let set = manager.submit(submission.clone(), false).unwrap();
+        assert_eq!(set.jobs[0].status, "disabled");
+        assert_eq!(set.jobs[1].status, "awaiting_approval");
+        assert!(manager.set_job_enabled("job-1", false).is_err());
+        assert!(manager.set_job_enabled("job-0", true).is_err()); // Already passed.
+        manager.set_job_enabled("job-3", false).unwrap(); // Future queued job.
+        manager.stop("plan").unwrap();
+        manager.set_job_enabled("job-0", true).unwrap();
+        manager.set_job_enabled("job-0", false).unwrap();
+        let mut loaded = JobSetManager::load(path.clone()).unwrap();
+        assert_eq!(loaded.job_sets[0].jobs[0].status, "disabled");
+        loaded
+            .retry(
+                "job-1",
+                vec![AgentCredential {
+                    reference: "test".into(),
+                    username: "u".into(),
+                    password: "p".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(loaded.job_sets[0].jobs[2].status, "disabled");
+        assert_eq!(loaded.job_sets[0].jobs[3].status, "disabled");
+        assert!(loaded.retry("job-2", vec![]).is_err());
+        // A completed enabled row followed only by disabled rows completes the Plan.
+        loaded.job_sets[0].jobs[1].status = "completed".into();
+        activate_job(&mut loaded.job_sets[0], 2);
+        assert_eq!(loaded.job_sets[0].status, "completed");
+        for job in &mut submission.jobs {
+            job.disabled = true;
+        }
+        let all_disabled = manager.submit(submission, true).unwrap();
+        assert_eq!(all_disabled.status, "completed");
+        assert!(all_disabled.jobs.iter().all(|job| job.status == "disabled"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn deploy_only_requires_approval_and_never_inserts_validation() {
+        let path = env::temp_dir().join(format!(
+            "gatetree-ops-deploy-only-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let set = manager.submit(olam_submission(&["deploy"]), false).unwrap();
+        assert_eq!(set.jobs.len(), 1);
+        assert_eq!(set.status, "awaiting_approval");
+        assert_eq!(set.jobs[0].phase.as_deref(), Some("deployment"));
+        assert_eq!(set.jobs[0].validation_job_id, None);
+        assert!(set.jobs[0].log.contains("No preceding matching validation"));
+        assert!(manager.approve("job-0").is_err());
+        manager
+            .restore_credentials(
+                "plan",
+                vec![AgentCredential {
+                    reference: "deploy".into(),
+                    username: "user".into(),
+                    password: "test-only".into(),
+                }],
+            )
+            .unwrap();
+        let approved = manager.approve("job-0").unwrap();
+        assert_eq!(approved.status, "running");
+        assert_eq!(approved.jobs[0].action, "deploy");
+        assert_eq!(approved.jobs[0].phase.as_deref(), Some("deployment"));
+        assert_eq!(approved.jobs[0].validation_job_id, None);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn approval_reuses_only_matching_completed_validation_and_keeps_legacy_jobs() {
+        let path = env::temp_dir().join(format!(
+            "gatetree-ops-validation-match-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let mut set = manager
+            .submit(olam_submission(&["validate_deployment", "deploy"]), false)
+            .unwrap();
+        set.jobs[0].status = "completed".into();
+        set.jobs[0].validation_job_id = Some(111);
+        set.jobs[0].log = "validated result".into();
+        let original = set.clone();
+        for difference in ["none", "target", "payload", "status"] {
+            let mut set = original.clone();
+            match difference {
+                "target" => set.jobs[0].target = Some("host-2".into()),
+                "payload" => {
+                    set.jobs[0].payload =
+                        Some(r#"{"playbook_name":"service","VERSION":"2"}"#.into())
+                }
+                "status" => set.jobs[0].status = "failed".into(),
+                _ => {}
+            }
+            activate_job(&mut set, 1);
+            assert_eq!(set.status, "awaiting_approval");
+            assert_eq!(
+                set.jobs[1].validation_job_id,
+                if difference == "none" {
+                    Some(111)
+                } else {
+                    None
+                }
+            );
+            assert_eq!(
+                set.jobs[1].log.contains("validated result"),
+                difference == "none"
+            );
+        }
+        manager.job_sets[0] = original;
+        manager.job_sets[0].jobs[0].action = "validate".into(); // Legacy per-target validation.
+        manager.job_sets[0].status = "stopped".into();
+        manager.persist().unwrap();
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        persisted[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("executionRevision");
+        fs::write(&path, persisted.to_string()).unwrap();
+        let mut loaded = JobSetManager::load(path.clone()).unwrap();
+        assert_eq!(loaded.job_sets[0].jobs.len(), 2);
+        assert_eq!(loaded.job_sets[0].jobs[0].action, "validate");
+        assert_eq!(loaded.job_sets[0].jobs[0].log, "validated result");
+        assert!(
+            loaded
+                .retry("job-1", vec![])
+                .unwrap_err()
+                .to_string()
+                .contains("Restart the Plan")
+        );
+        assert!(
+            loaded
+                .approve("job-1")
+                .unwrap_err()
+                .to_string()
+                .contains("Restart the Plan")
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn separate_validation_then_approved_deploy_launches_exactly_the_two_configured_templates() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let server = thread::spawn(move || {
+            for index in 0..8 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                let template = if index < 4 { 1 } else { 2 };
+                let external_id = if index < 4 { 111 } else { 222 };
+                let body = match index % 4 {
+                    0 => {
+                        assert!(
+                            request.starts_with(&format!(
+                                "GET /api/v2/job_templates/{template}/ HTTP/"
+                            ))
+                        );
+                        serde_json::json!({"name": if template == 1 { "Validate" } else { "Deploy" }}).to_string()
+                    }
+                    1 => {
+                        assert!(request.starts_with(&format!(
+                            "POST /api/v2/job_templates/{template}/launch/ HTTP/"
+                        )));
+                        serde_json::json!({"id": external_id}).to_string()
+                    }
+                    2 => {
+                        assert!(
+                            request.starts_with(&format!("GET /api/v2/jobs/{external_id}/ HTTP/"))
+                        );
+                        r#"{"status":"successful"}"#.into()
+                    }
+                    _ => {
+                        assert!(request.starts_with(&format!(
+                            "GET /api/v2/jobs/{external_id}/stdout/?format=txt HTTP/"
+                        )));
+                        "ok: [host-1]".into()
+                    }
+                };
+                observed.fetch_add(1, Ordering::SeqCst);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let path = env::temp_dir().join(format!(
+            "gatetree-ops-explicit-actions-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let mut submission = olam_submission(&["validate_deployment", "deploy"]);
+        submission.process_definition = serde_json::json!({"details":{"olam":{
+            "url": format!("http://{address}"), "account":"api", "payload_defaults":{"ENVIRONMENT":"test"},
+            "validation_template_id":1, "validation_template_job":"Validate",
+            "deployment_template_id":2, "deployment_template_job":"Deploy"
+        }}}).to_string();
+        let credentials: Vec<_> = ["api", "deploy"]
+            .iter()
+            .map(|reference| AgentCredential {
+                reference: (*reference).into(),
+                username: "user".into(),
+                password: "test-only".into(),
+            })
+            .collect();
+        manager.submit(submission, false).unwrap();
+        manager
+            .credentials
+            .insert("plan".into(), credentials.clone());
+        let manager = Arc::new(Mutex::new(manager));
+        spawn_job_set_execution(manager.clone(), "plan".into(), credentials.clone());
+        let await_status = |expected: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let set = manager.lock().unwrap().job_sets[0].clone();
+                if set.status == expected {
+                    return set;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "unexpected state: {}",
+                    set.status
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let awaiting = await_status("awaiting_approval");
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
+        assert_eq!(awaiting.jobs[0].status, "completed");
+        assert_eq!(awaiting.jobs[0].validation_job_id, Some(111));
+        assert_eq!(awaiting.jobs[0].deployment_job_id, None);
+        assert_eq!(awaiting.jobs[1].validation_job_id, Some(111));
+        assert!(awaiting.jobs[1].log.contains("ok: [host-1]"));
+        manager.lock().unwrap().approve("job-1").unwrap();
+        spawn_job_set_execution(manager.clone(), "plan".into(), credentials);
+        let completed = await_status("completed");
+        assert_eq!(requests.load(Ordering::SeqCst), 8);
+        assert_eq!(completed.jobs.len(), 2);
+        assert_eq!(completed.jobs[1].deployment_job_id, Some(222));
+        server.join().unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn combined_workflow_finishes_each_host_before_validating_the_next() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let server = thread::spawn(move || {
+            for index in 0..16 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                let template = if index % 8 < 4 { 1 } else { 2 };
+                let external_id = 111 + index / 4;
+                let body = match index % 4 {
+                    0 => {
+                        assert!(
+                            request.starts_with(&format!(
+                                "GET /api/v2/job_templates/{template}/ HTTP/"
+                            ))
+                        );
+                        serde_json::json!({"name": if template == 1 { "Validate" } else { "Deploy" }}).to_string()
+                    }
+                    1 => {
+                        assert!(request.starts_with(&format!(
+                            "POST /api/v2/job_templates/{template}/launch/ HTTP/"
+                        )));
+                        serde_json::json!({"id": external_id}).to_string()
+                    }
+                    2 => {
+                        assert!(
+                            request.starts_with(&format!("GET /api/v2/jobs/{external_id}/ HTTP/"))
+                        );
+                        r#"{"status":"successful"}"#.into()
+                    }
+                    _ => {
+                        assert!(request.starts_with(&format!(
+                            "GET /api/v2/jobs/{external_id}/stdout/?format=txt HTTP/"
+                        )));
+                        "ok: [host-1]".into()
+                    }
+                };
+                observed.fetch_add(1, Ordering::SeqCst);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let path = env::temp_dir().join(format!(
+            "gatetree-ops-explicit-actions-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let mut submission = olam_submission(&[
+            "validate_deploy",
+            "validate_deploy",
+            "validate_deploy",
+            "validate_deploy",
+        ]);
+        submission.jobs[1].disabled = true;
+        submission.jobs[3].disabled = true;
+        submission.jobs[2].target = Some("host-2".into());
+        submission.jobs[2].payload =
+            Some(r#"{"ansible_limit":["host-2"],"playbook_name":"service"}"#.into());
+        submission.process_definition = serde_json::json!({"details":{"olam":{
+            "url": format!("http://{address}"), "account":"api", "payload_defaults":{"ENVIRONMENT":"test"},
+            "validation_template_id":1, "validation_template_job":"Validate",
+            "deployment_template_id":2, "deployment_template_job":"Deploy"
+        }}}).to_string();
+        let credentials: Vec<_> = ["api", "deploy"]
+            .iter()
+            .map(|reference| AgentCredential {
+                reference: (*reference).into(),
+                username: "user".into(),
+                password: "test-only".into(),
+            })
+            .collect();
+        manager.submit(submission, false).unwrap();
+        manager
+            .credentials
+            .insert("plan".into(), credentials.clone());
+        let manager = Arc::new(Mutex::new(manager));
+        spawn_job_set_execution(manager.clone(), "plan".into(), credentials.clone());
+        let await_status = |expected: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let set = manager.lock().unwrap().job_sets[0].clone();
+                if set.status == expected {
+                    return set;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "unexpected state: {}",
+                    set.status
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let awaiting = await_status("awaiting_approval");
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
+        assert_eq!(awaiting.jobs.len(), 4);
+        assert_eq!(awaiting.jobs[0].status, "awaiting_approval");
+        assert_eq!(awaiting.jobs[0].validation_job_id, Some(111));
+        assert_eq!(awaiting.jobs[0].deployment_job_id, None);
+        assert_eq!(awaiting.jobs[2].status, "queued");
+        assert_eq!(awaiting.jobs[2].validation_job_id, None);
+        manager.lock().unwrap().approve("job-0").unwrap();
+        spawn_job_set_execution(manager.clone(), "plan".into(), credentials.clone());
+        // Wait for the second host's approval, not the first host's old state.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let second = loop {
+            let set = manager.lock().unwrap().job_sets[0].clone();
+            if set.jobs[2].status == "awaiting_approval" {
+                break set;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "second host did not reach approval"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(requests.load(Ordering::SeqCst), 12);
+        assert_eq!(second.jobs[0].status, "completed");
+        assert_eq!(second.jobs[0].deployment_job_id, Some(112));
+        assert_eq!(second.jobs[2].validation_job_id, Some(113));
+        assert_eq!(second.jobs[2].deployment_job_id, None);
+        manager.lock().unwrap().approve("job-2").unwrap();
+        spawn_job_set_execution(manager.clone(), "plan".into(), credentials);
+        let completed = await_status("completed");
+        assert_eq!(requests.load(Ordering::SeqCst), 16);
+        assert_eq!(completed.jobs.len(), 4);
+        assert_eq!(completed.jobs[2].deployment_job_id, Some(114));
+        assert_eq!(completed.jobs[1].status, "disabled");
+        assert_eq!(completed.jobs[3].status, "disabled");
+        server.join().unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn starting_a_stopped_plan_reruns_completed_checks_and_clears_old_runs() {
+        let path = env::temp_dir().join(format!(
+            "gatetree-ops-restart-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let submission = AgentJobSetSubmission {
+            id: "plan".into(),
+            plan_number: 3,
+            name: "Plan".into(),
+            process_name: "Process".into(),
+            plan_definition: "{}".into(),
+            process_definition: "{}".into(),
+            credentials: vec![],
+            jobs: (0..4)
+                .map(|index| AgentJobSubmission {
+                    disabled: false,
+                    id: format!("job-{index}"),
+                    sequence: index,
+                    name: format!("Step {index}"),
+                    driver: if index < 2 { "jira" } else { "olam" }.into(),
+                    action: if index < 2 { "validate" } else { "deploy" }.into(),
+                    target: None,
+                    details: String::new(),
+                    payload: None,
+                })
+                .collect(),
+        };
+        manager.submit(submission.clone(), false).unwrap();
+        manager.job_sets[0].jobs[0].status = "completed".into();
+        manager.job_sets[0].jobs[1].status = "completed".into();
+        manager.job_sets[0].jobs[2].status = "running".into();
+        manager.job_sets[0].jobs[2].phase = Some("deployment".into());
+        manager.job_sets[0].jobs[2].validation_job_id = Some(162);
+        manager.job_sets[0].jobs[2].deployment_job_id = Some(166);
+        for job in &mut manager.job_sets[0].jobs {
+            job.log = "Previous run".into();
+        }
+        manager.execution_generations.insert("plan".into(), 1);
+        manager.stop("plan").unwrap();
+        // Stopping invalidates the old worker even before a new run starts.
+        assert_eq!(manager.execution_generations["plan"], 2);
+        let restarted = manager.submit(submission, false).unwrap();
+        assert_eq!(restarted.status, "running");
+        assert_eq!(restarted.jobs[0].status, "running");
+        assert!(restarted.jobs[1..].iter().all(|job| job.status == "queued"));
+        assert!(restarted.jobs.iter().all(|job| job.log.is_empty()
+            && job.validation_job_id.is_none()
+            && job.deployment_job_id.is_none()));
+        assert_eq!(restarted.jobs[2].phase.as_deref(), Some("deployment"));
+        let saved: Vec<AgentJobSetStatus> =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved[0].jobs[0].status, "running");
+        assert_eq!(saved[0].jobs[1].status, "queued");
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn denying_validation_stops_the_plan_until_an_explicit_retry() {
-        let path = env::temp_dir().join(format!("pharos-deny-{}.json", uuid::Uuid::new_v4()));
+        let path = env::temp_dir().join(format!("gatetree-ops-deny-{}.json", uuid::Uuid::new_v4()));
         let mut manager = JobSetManager::load(path.clone()).unwrap();
         manager
             .submit(
@@ -1542,6 +2627,7 @@ mod tests {
                     credentials: vec![],
                     jobs: (0..2)
                         .map(|index| AgentJobSubmission {
+                            disabled: false,
                             id: format!("job-{index}"),
                             sequence: index,
                             name: format!("Step {index}"),
@@ -1556,7 +2642,7 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert!(manager.deny("job-0").is_err());
+        assert!(manager.deny("job-1").is_err());
         manager.job_sets[0].status = "awaiting_approval".into();
         manager.job_sets[0].jobs[0].status = "awaiting_approval".into();
         manager.job_sets[0].jobs[0].log = "Validation passed".into();
@@ -1566,7 +2652,7 @@ mod tests {
         assert_eq!(manager.job_sets[0].jobs[0].status, "denied");
         assert_eq!(
             manager.job_sets[0].jobs[0].phase.as_deref(),
-            Some("validation")
+            Some("deployment")
         );
         assert_eq!(manager.job_sets[0].jobs[1].status, "queued");
         assert!(
@@ -1591,18 +2677,20 @@ mod tests {
                 }],
             )
             .unwrap();
-        assert_eq!(retried.jobs[0].phase.as_deref(), Some("validation"));
-        assert_eq!(retried.jobs[0].status, "running");
+        assert_eq!(retried.jobs[0].phase.as_deref(), Some("deployment"));
+        assert_eq!(retried.jobs[0].status, "awaiting_approval");
         assert_eq!(retried.jobs[1].status, "queued");
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn restores_credentials_after_restart_and_retries_only_from_failed_job() {
-        let path = env::temp_dir().join(format!("pharos-retry-{}.json", uuid::Uuid::new_v4()));
+        let path =
+            env::temp_dir().join(format!("gatetree-ops-retry-{}.json", uuid::Uuid::new_v4()));
         let mut manager = JobSetManager::load(path.clone()).unwrap();
         let jobs = (0..3)
             .map(|index| AgentJobSubmission {
+                disabled: false,
                 id: format!("job-{index}"),
                 sequence: index,
                 name: format!("Step {index}"),
@@ -1631,6 +2719,10 @@ mod tests {
         manager.job_sets[0].jobs[0].status = "completed".into();
         manager.job_sets[0].jobs[1].status = "failed".into();
         manager.job_sets[0].jobs[1].phase = Some("deployment".into());
+        manager.job_sets[0].jobs[0].validation_job_id = Some(101);
+        manager.job_sets[0].jobs[0].deployment_job_id = Some(102);
+        manager.job_sets[0].jobs[1].validation_job_id = Some(103);
+        manager.job_sets[0].jobs[1].deployment_job_id = Some(108);
         manager.job_sets[0].jobs[0].log = "Previous successful step".into();
         manager.job_sets[0].jobs[1].log = "OLAM job 108 failed: UNREACHABLE".into();
         manager.job_sets[0].jobs[2].log = "Output from an earlier run".into();
@@ -1649,15 +2741,24 @@ mod tests {
         assert_eq!(manager.job_sets[0].status, "failed");
         assert!(manager.retry("job-2", vec![]).is_err());
         let retried = manager.retry("job-1", vec![]).unwrap();
-        assert_eq!(retried.status, "running");
+        assert_eq!(retried.status, "awaiting_approval");
         assert_eq!(retried.jobs[0].status, "completed");
-        assert_eq!(retried.jobs[1].status, "running");
-        assert_eq!(retried.jobs[1].phase.as_deref(), Some("validation"));
+        assert_eq!(retried.jobs[1].status, "awaiting_approval");
+        assert_eq!(retried.jobs[1].phase.as_deref(), Some("deployment"));
+        assert_eq!(retried.jobs[0].deployment_job_id, Some(102));
+        assert_eq!(retried.jobs[1].validation_job_id, None);
+        assert_eq!(retried.jobs[1].deployment_job_id, None);
         assert_eq!(retried.jobs[2].status, "queued");
         assert_eq!(retried.jobs[0].log, "Previous successful step");
-        assert_eq!(
-            retried.jobs[1].log,
-            "Retry requested by the operator; starting a new validation run."
+        assert!(
+            retried.jobs[1]
+                .log
+                .contains("No preceding matching validation")
+        );
+        assert!(
+            retried.jobs[1]
+                .log
+                .contains("Retry requested by the operator.")
         );
         assert!(retried.jobs[2].log.is_empty());
         let saved: Vec<AgentJobSetStatus> =
@@ -1677,8 +2778,80 @@ mod tests {
     }
 
     #[test]
+    fn update_reservation_rejects_active_plans_and_blocks_new_work_until_cancelled() {
+        let runtime = env::temp_dir().join(format!(
+            "gatetree-ops-update-agent-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AgentPaths::at(runtime.clone());
+        let server_paths = paths.clone();
+        let server = thread::spawn(move || run_server_at(server_paths));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let endpoint = loop {
+            if status_at(&paths).is_ok() {
+                break read_endpoint(&paths).unwrap();
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        };
+        reserve_update(&endpoint).unwrap();
+        let blocked = request(
+            &endpoint,
+            AgentAction::SubmitJobSet {
+                submission: olam_submission(&["deploy"]),
+                restart: false,
+            },
+        )
+        .unwrap();
+        assert!(!blocked.ok && blocked.error.unwrap().contains("update is in progress"));
+        assert!(
+            request(&endpoint, AgentAction::ListJobSets)
+                .unwrap()
+                .job_sets
+                .unwrap()
+                .is_empty()
+        );
+        assert!(request(&endpoint, AgentAction::CancelUpdate).unwrap().ok);
+        let submitted = request(
+            &endpoint,
+            AgentAction::SubmitJobSet {
+                submission: olam_submission(&["deploy"]),
+                restart: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(submitted.job_set.unwrap().status, "awaiting_approval");
+        assert!(
+            reserve_update(&endpoint)
+                .unwrap_err()
+                .to_string()
+                .contains("active deployments")
+        );
+        let sets = request(&endpoint, AgentAction::ListJobSets)
+            .unwrap()
+            .job_sets
+            .unwrap();
+        assert_eq!(sets[0].status, "awaiting_approval");
+        assert!(
+            request(
+                &endpoint,
+                AgentAction::StopJobSet {
+                    job_set_id: "plan".into()
+                }
+            )
+            .unwrap()
+            .ok
+        );
+        reserve_update(&endpoint).unwrap();
+        assert!(request(&endpoint, AgentAction::Shutdown).unwrap().ok);
+        server.join().unwrap().unwrap();
+        fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[test]
     fn serves_authenticated_status_and_shutdown_requests() {
-        let runtime = env::temp_dir().join(format!("pharos-agent-test-{}", uuid::Uuid::new_v4()));
+        let runtime =
+            env::temp_dir().join(format!("gatetree-ops-agent-test-{}", uuid::Uuid::new_v4()));
         let paths = AgentPaths::at(runtime.clone());
         let server_paths = paths.clone();
         let server = thread::spawn(move || run_server_at(server_paths));
@@ -1709,6 +2882,7 @@ mod tests {
             plan_definition: "plan_name: Test plan".into(),
             process_definition: "{}".into(),
             jobs: vec![AgentJobSubmission {
+                disabled: false,
                 id: "job-1".into(),
                 sequence: 1,
                 name: "Validate".into(),
@@ -1778,12 +2952,25 @@ mod tests {
             .unwrap()
             .ok
         );
-        let retried = request(&endpoint, AgentAction::ListJobSets)
-            .unwrap()
-            .job_sets
-            .unwrap();
-        assert_eq!(retried[0].status, "running");
-        assert_eq!(retried[0].jobs[0].status, "running");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let retried = loop {
+            let sets = request(&endpoint, AgentAction::ListJobSets)
+                .unwrap()
+                .job_sets
+                .unwrap();
+            if sets[0].status != "running" {
+                break sets;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(retried[0].status, "failed");
+        assert_eq!(retried[0].jobs[0].status, "failed");
+        assert!(
+            retried[0].jobs[0]
+                .log
+                .contains("Action test/validate is not implemented")
+        );
         assert!(paths.job_sets.is_file());
         let persisted = fs::read_to_string(&paths.job_sets).unwrap();
         assert!(!persisted.contains("must-never-be-persisted"));

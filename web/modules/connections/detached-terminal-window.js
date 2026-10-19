@@ -1,3 +1,4 @@
+import { APP_NAME } from "../../shared/branding.js";
 import { listAgentSshSessions } from "../agent/agent-api.js";
 import { mountSshTerminal } from "./terminal-view.js";
 
@@ -14,7 +15,7 @@ export async function openDetachedTerminalWindow(session) {
 
   const detached = new WebviewWindow(label, {
     url: `index.html?detachedTerminal=${encodeURIComponent(session.id)}`,
-    title: `PHAROS · ${session.name}`,
+    title: `${APP_NAME} · ${session.name}`,
     width: 960,
     height: 620,
     minWidth: 560,
@@ -26,6 +27,10 @@ export async function openDetachedTerminalWindow(session) {
     detached.once("tauri://created", resolve);
     detached.once("tauri://error", (event) => reject(new Error(String(event.payload))));
   });
+}
+
+export async function hasDetachedTerminalWindow(session) {
+  return Boolean(await WebviewWindow.getByLabel(`terminal-${session.id}`));
 }
 
 export async function focusDetachedTerminalWindow(session) {

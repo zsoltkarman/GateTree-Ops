@@ -115,12 +115,15 @@ impl ConnectionsService {
         authentication: Option<String>,
         credential_reference: Option<String>,
         ssh_transport: Option<String>,
+        icon: Option<String>,
+        credential_mode: Option<String>,
     ) -> Result<ConnectionItem, ConnectionsError> {
         validate_parent(state, Some(&folder_id))?;
         let connection_type = validated_connection_type(connection_type)?;
         let name = validated_connection_value(name, ConnectionsError::EmptyConnectionName)?;
         let target = validated_connection_value(target, ConnectionsError::EmptyConnectionTarget)?;
         let tag = tag.trim().to_owned();
+        let icon = validated_icon(icon)?;
         let (username, authentication, credential_reference, ssh_transport) = validate_ssh_fields(
             state,
             &connection_type,
@@ -129,6 +132,8 @@ impl ConnectionsService {
             credential_reference,
             ssh_transport,
         )?;
+        let (credential_mode, credential_reference) =
+            super::credentials::validate_binding(state, credential_mode, credential_reference)?;
         let duplicate = state
             .with_connection(|connection| {
                 connection.query_row(
@@ -151,8 +156,8 @@ impl ConnectionsService {
                 connection.execute(
                     "INSERT INTO connections(
                         id, folder_id, connection_type, name, target, port, tag,
-                        username, authentication, credential_reference, ssh_transport
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        username, authentication, credential_reference, ssh_transport, icon, credential_mode
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         id,
                         folder_id,
@@ -164,7 +169,9 @@ impl ConnectionsService {
                         username,
                         authentication,
                         credential_reference,
-                        ssh_transport
+                        ssh_transport,
+                        icon,
+                        credential_mode
                     ],
                 )?;
                 connection_by_id(connection, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -217,11 +224,14 @@ impl ConnectionsService {
         authentication: Option<String>,
         credential_reference: Option<String>,
         ssh_transport: Option<String>,
+        icon: Option<String>,
+        credential_mode: Option<String>,
     ) -> Result<ConnectionItem, ConnectionsError> {
         let item = get_connection(state, &id)?;
         let name = validated_connection_value(name, ConnectionsError::EmptyConnectionName)?;
         let target = validated_connection_value(target, ConnectionsError::EmptyConnectionTarget)?;
         let tag = tag.trim().to_owned();
+        let icon = validated_icon(icon.or(Some(item.icon.clone())))?;
         let (username, authentication, credential_reference, ssh_transport) = validate_ssh_fields(
             state,
             &item.connection_type,
@@ -230,6 +240,8 @@ impl ConnectionsService {
             credential_reference,
             ssh_transport,
         )?;
+        let (credential_mode, credential_reference) =
+            super::credentials::validate_binding(state, credential_mode, credential_reference)?;
         let duplicate = state
             .with_connection(|connection| {
                 connection.query_row(
@@ -251,7 +263,7 @@ impl ConnectionsService {
                     "UPDATE connections
                      SET name = ?2, target = ?3, port = ?4, tag = ?5,
                          username = ?6, authentication = ?7, credential_reference = ?8,
-                         ssh_transport = ?9,
+                         ssh_transport = ?9, icon = ?10, credential_mode = ?11,
                          updated_at = CURRENT_TIMESTAMP
                      WHERE id = ?1",
                     params![
@@ -263,7 +275,9 @@ impl ConnectionsService {
                         username,
                         authentication,
                         credential_reference,
-                        ssh_transport
+                        ssh_transport,
+                        icon,
+                        credential_mode
                     ],
                 )?;
                 connection_by_id(connection, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -281,6 +295,15 @@ fn validated_connection_type(value: String) -> Result<String, ConnectionsError> 
     }
 }
 
+fn validated_icon(icon: Option<String>) -> Result<String, ConnectionsError> {
+    let icon = icon.unwrap_or_else(|| "icon12".into());
+    if (1..=12).any(|n| icon == format!("icon{n}")) {
+        Ok(icon)
+    } else {
+        Err(ConnectionsError::InvalidIcon)
+    }
+}
+
 fn validate_ssh_fields(
     state: &WorkspaceState,
     connection_type: &str,
@@ -289,13 +312,14 @@ fn validate_ssh_fields(
     credential_reference: Option<String>,
     ssh_transport: Option<String>,
 ) -> Result<(Option<String>, Option<String>, Option<String>, String), ConnectionsError> {
-    if connection_type != "ssh" {
+    if !matches!(connection_type, "ssh" | "rdp") {
         return Ok((None, None, None, "embedded".into()));
     }
 
     let username = optional_trimmed(username);
-    let authentication =
-        optional_trimmed(authentication).ok_or(ConnectionsError::InvalidSshAuthentication)?;
+    let authentication = optional_trimmed(authentication)
+        .or_else(|| (connection_type == "rdp").then(|| "password".into()))
+        .ok_or(ConnectionsError::InvalidSshAuthentication)?;
     if !matches!(
         authentication.as_str(),
         "password" | "private-key" | "keyboard-interactive" | "ssh-agent"
@@ -431,7 +455,10 @@ fn is_descendant(
         .map_err(ConnectionsError::from)
 }
 
-fn get_folder(state: &WorkspaceState, id: &str) -> Result<ConnectionFolder, ConnectionsError> {
+pub(super) fn get_folder(
+    state: &WorkspaceState,
+    id: &str,
+) -> Result<ConnectionFolder, ConnectionsError> {
     state
         .with_connection(|connection| folder_by_id(connection, id))
         .map_err(ConnectionsError::from)?
@@ -440,7 +467,7 @@ fn get_folder(state: &WorkspaceState, id: &str) -> Result<ConnectionFolder, Conn
 
 fn load_folders(connection: &Connection) -> rusqlite::Result<Vec<ConnectionFolder>> {
     let mut statement = connection.prepare(
-        "SELECT id, name, parent_id, created_at, updated_at
+        "SELECT id, name, parent_id, created_at, updated_at, credential_reference, credential_mode
          FROM connection_folders ORDER BY name COLLATE NOCASE",
     )?;
     statement
@@ -451,7 +478,7 @@ fn load_folders(connection: &Connection) -> rusqlite::Result<Vec<ConnectionFolde
 fn folder_by_id(connection: &Connection, id: &str) -> rusqlite::Result<Option<ConnectionFolder>> {
     connection
         .query_row(
-            "SELECT id, name, parent_id, created_at, updated_at
+            "SELECT id, name, parent_id, created_at, updated_at, credential_reference, credential_mode
              FROM connection_folders WHERE id = ?1",
             [id],
             folder_from_row,
@@ -464,6 +491,8 @@ fn folder_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionFolder
         id: row.get(0)?,
         name: row.get(1)?,
         parent_id: row.get(2)?,
+        credential_reference: row.get(5)?,
+        credential_mode: row.get(6)?,
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
     })
@@ -472,7 +501,7 @@ fn folder_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionFolder
 fn load_connections(connection: &Connection) -> rusqlite::Result<Vec<ConnectionItem>> {
     let mut statement = connection.prepare(
         "SELECT id, folder_id, connection_type, name, target, port, tag,
-                username, authentication, credential_reference, ssh_transport, created_at, updated_at
+                username, authentication, credential_reference, ssh_transport, created_at, updated_at, icon, credential_mode
          FROM connections ORDER BY name COLLATE NOCASE",
     )?;
     statement
@@ -480,11 +509,14 @@ fn load_connections(connection: &Connection) -> rusqlite::Result<Vec<ConnectionI
         .collect::<rusqlite::Result<Vec<_>>>()
 }
 
-fn connection_by_id(connection: &Connection, id: &str) -> rusqlite::Result<Option<ConnectionItem>> {
+pub(super) fn connection_by_id(
+    connection: &Connection,
+    id: &str,
+) -> rusqlite::Result<Option<ConnectionItem>> {
     connection
         .query_row(
             "SELECT id, folder_id, connection_type, name, target, port, tag,
-                    username, authentication, credential_reference, ssh_transport, created_at, updated_at
+                    username, authentication, credential_reference, ssh_transport, created_at, updated_at, icon, credential_mode
              FROM connections WHERE id = ?1",
             [id],
             connection_from_row,
@@ -514,11 +546,15 @@ fn connection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionIt
         ssh_transport: row.get(10)?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        icon: row.get(13)?,
+        credential_mode: row.get(14)?,
     })
 }
 
 #[derive(Debug, Error)]
 pub enum ConnectionsError {
+    #[error("Choose a supported connection icon.")]
+    InvalidIcon,
     #[error("Folder name cannot be empty.")]
     EmptyFolderName,
     #[error("Folder name cannot be longer than 120 characters.")]
@@ -539,6 +575,10 @@ pub enum ConnectionsError {
     InvalidSshAuthentication,
     #[error("Choose embedded SSH or the local OpenSSH configuration.")]
     InvalidSshTransport,
+    #[error("Choose inherit, manual, or KeePass credentials.")]
+    InvalidCredentialMode,
+    #[error("Choose a KeePass account.")]
+    CredentialRequired,
     #[error("The selected credential reference was not found.")]
     CredentialReferenceNotFound,
     #[error("Connection type must be SSH, RDP, or URL.")]
@@ -560,8 +600,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn url_icons_persist_and_invalid_icons_cannot_change_a_connection() {
+        let directory = std::env::temp_dir().join(format!("gatetree-ops-icons-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let state = WorkspaceState::default();
+        WorkspaceService::create(
+            &state,
+            directory.to_string_lossy().into_owned(),
+            "a-valid-test-password",
+        )
+        .unwrap();
+        let folder = ConnectionsService::create_folder(&state, "Tools".into(), None).unwrap();
+        let item = ConnectionsService::create_connection(
+            &state,
+            folder.id,
+            "url".into(),
+            "Dashboard".into(),
+            "https://dashboard.test".into(),
+            None,
+            "".into(),
+            None,
+            None,
+            None,
+            None,
+            Some("icon9".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(item.icon, "icon9");
+        let edit = |icon| {
+            ConnectionsService::update_connection(
+                &state,
+                item.id.clone(),
+                item.name.clone(),
+                item.target.clone(),
+                None,
+                item.tag.clone(),
+                None,
+                None,
+                None,
+                None,
+                icon,
+                None,
+            )
+        };
+        assert_eq!(edit(None).unwrap().icon, "icon9");
+        assert!(matches!(
+            edit(Some("<svg>".into())),
+            Err(ConnectionsError::InvalidIcon)
+        ));
+        assert_eq!(edit(Some("icon7".into())).unwrap().icon, "icon7");
+        state.lock().unwrap();
+        WorkspaceService::unlock(
+            &state,
+            directory.to_string_lossy().into_owned(),
+            "a-valid-test-password",
+        )
+        .unwrap();
+        assert_eq!(
+            ConnectionsService::list_connections(&state).unwrap()[0].icon,
+            "icon7"
+        );
+        state.lock().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn manages_nested_connection_folders_and_rejects_cycles() {
-        let directory = std::env::temp_dir().join(format!("pharos-connections-{}", Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("gatetree-ops-connections-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).expect("create test directory");
         let state = WorkspaceState::default();
         WorkspaceService::create(
@@ -587,12 +694,14 @@ mod tests {
             child.id.clone(),
             "ssh".into(),
             "Database host".into(),
-            "db.example.com".into(),
+            "db.test".into(),
             Some(22),
             "production".into(),
             Some("database".into()),
             Some("password".into()),
             Some(credential.id.clone()),
+            None,
+            None,
             None,
         )
         .expect("create connection");
@@ -611,28 +720,32 @@ mod tests {
             &state,
             moved.id,
             "Primary database".into(),
-            "db.internal.example.com".into(),
+            "db.internal.test".into(),
             Some(2222),
             "critical".into(),
-            Some("opc".into()),
+            Some("admin".into()),
             Some("ssh-agent".into()),
             Some(credential.id),
+            None,
+            None,
             None,
         )
         .expect("update connection");
         assert_eq!(updated.tag, "critical");
-        assert_eq!(updated.username.as_deref(), Some("opc"));
+        assert_eq!(updated.username.as_deref(), Some("admin"));
         assert_eq!(updated.authentication.as_deref(), Some("ssh-agent"));
         let draft = ConnectionsService::create_connection(
             &state,
             archive.id.clone(),
             "ssh".into(),
             "Incomplete SSH host".into(),
-            "pending.example.com".into(),
+            "pending.test".into(),
             Some(22),
             "".into(),
             None,
             Some("password".into()),
+            None,
+            None,
             None,
             None,
         )
@@ -647,6 +760,8 @@ mod tests {
             "draft".into(),
             None,
             draft.authentication,
+            None,
+            None,
             None,
             None,
         )

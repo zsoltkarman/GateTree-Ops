@@ -1,5 +1,6 @@
 import { escapeHtml } from "../../shared/ui.js";
 import { createModuleRoot } from "../../shared/module-root.js";
+import { focusNavigationItem } from "../../shared/focus-navigation.js";
 import {
   createNote,
   createNoteFolder,
@@ -31,11 +32,17 @@ export async function mountNotesView(contentRoot, options = {}) {
     const snapshot = await listNotes();
     state.folders = snapshot.folders;
     state.notes = snapshot.notes;
-    state.folderId = state.folders[0]?.id ?? null;
-    state.noteId = notesInFolder(state)[0]?.id ?? null;
-    if (state.folderId) state.expandedFolderIds.add(state.folderId);
+    const searchedNote = state.notes.find((note) => note.id === options.noteId);
+    state.folderId = searchedNote ? searchedNote.folderId : state.folders.find((folder) => folder.id === options.folderId)?.id ?? (state.notes.some((note) => !note.folderId) ? null : state.folders[0]?.id ?? null);
+    state.noteId = searchedNote?.id ?? notesInFolder(state)[0]?.id ?? null;
+    if ((searchedNote || options.folderId) && state.folderId) state.expandedFolderIds.add(state.folderId);
     loadDraft(state);
     render(root, state);
+    if (searchedNote) {
+      focusNavigationItem(root, `.note-row[data-note-id="${CSS.escape(searchedNote.id)}"]`);
+    } else if (options.folderId && state.folderId) {
+      focusNavigationItem(root, `.folder-main[data-folder-id="${CSS.escape(state.folderId)}"]`);
+    }
   } catch (cause) {
     root.innerHTML = `<div class="notes-error">${escapeHtml(cause)}</div>`;
   }
@@ -47,8 +54,9 @@ function render(root, state) {
     <div class="notes-module${state.navigationRoot ? " is-main-navigation-layout" : ""}">
       <aside class="notes-browser">
         <div class="note-folders">
+          ${state.notes.filter((note) => !note.folderId).map((note) => noteRow(note, state)).join("")}
           ${state.folders.map((folder) => folderTree(folder, state)).join("")}
-          ${state.folders.length === 0 ? '<p class="notes-empty-list">Create your first folder</p>' : ""}
+          ${!state.folders.length && !state.notes.length ? '<p class="notes-empty-list">Right-click to create a note or folder</p>' : ""}
         </div>
       </aside>
       <section class="note-editor">
@@ -56,6 +64,7 @@ function render(root, state) {
           <div class="note-editor-toolbar">
             <input class="note-title" data-role="note-title" value="${escapeHtml(state.draftTitle)}" placeholder="Untitled note" />
             <select data-role="note-folder" aria-label="Note folder">
+              <option value=""${!selected.folderId ? " selected" : ""}>Notes</option>
               ${state.folders.map((folder) => `<option value="${folder.id}"${selected.folderId === folder.id ? " selected" : ""}>${escapeHtml(folder.name)}</option>`).join("")}
             </select>
             <span class="unsaved-indicator" data-role="unsaved" ${state.dirty ? "" : "hidden"}>Unsaved</span>
@@ -163,16 +172,16 @@ function bindEvents(root, state) {
   });
   root.querySelector('[data-role="note-folder"]')?.addEventListener("change", async (event) => {
     if (state.dirty && !window.confirm("Move this note without saving the current changes?")) {
-      event.target.value = selectedNote(state).folderId;
+      event.target.value = selectedNote(state).folderId ?? "";
       return;
     }
-    const folderId = event.target.value;
+    const folderId = event.target.value || null;
     await runAction(root, state, async () => {
       const updated = await moveNote(state.noteId, folderId);
       replaceNote(state, updated);
       state.folderId = folderId;
       state.noteId = updated.id;
-      state.expandedFolderIds.add(folderId);
+      if (folderId) state.expandedFolderIds.add(folderId);
       loadDraft(state);
     });
   });
@@ -190,11 +199,12 @@ function bindEvents(root, state) {
 function bindNotesContextMenu(root, state) {
   const open = (event) => {
     event.preventDefault();
+    event.stopPropagation();
     const folderRow = event.target.closest(".folder-row");
     const noteRow = event.target.closest("[data-note-id]");
-    const folderId = folderRow?.querySelector("[data-folder-id]")?.dataset.folderId
-      ?? (noteRow ? state.notes.find((note) => note.id === noteRow.dataset.noteId)?.folderId : null)
-      ?? state.folderId;
+    const folderId = folderRow ? folderRow.querySelector("[data-folder-id]")?.dataset.folderId
+      : noteRow ? state.notes.find((note) => note.id === noteRow.dataset.noteId)?.folderId ?? null
+      : event.currentTarget.classList.contains("notes-browser") ? null : state.folderId;
     showNotesContextMenu(root, state, event.clientX, event.clientY, folderId);
   };
   root.querySelector(".notes-browser")?.addEventListener("contextmenu", open);
@@ -207,7 +217,7 @@ function showNotesContextMenu(root, state, x, y, targetFolderId) {
   menu.className = "connection-context-menu notes-context-menu";
   menu.innerHTML = `
     <button data-notes-context="folder">${icon("folder-plus")}<span>New folder</span></button>
-    <button data-notes-context="note" ${targetFolderId ? "" : "disabled"}>${icon("note")}<span>New note</span></button>`;
+    <button data-notes-context="note">${icon("note")}<span>New note</span></button>`;
   document.body.append(menu);
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8))}px`;
@@ -242,13 +252,13 @@ function showNotesContextMenu(root, state, x, y, targetFolderId) {
   });
   menu.querySelector('[data-notes-context="note"]').addEventListener("click", async () => {
     close();
-    if (!targetFolderId || !confirmDiscard(state)) return;
+    if (!confirmDiscard(state)) return;
     await runAction(root, state, async () => {
       state.folderId = targetFolderId;
       const note = await createNote(targetFolderId);
       state.notes.unshift(note);
       state.noteId = note.id;
-      state.expandedFolderIds.add(state.folderId);
+      if (state.folderId) state.expandedFolderIds.add(state.folderId);
       loadDraft(state);
     });
   });
@@ -330,15 +340,15 @@ function folderTree(folder, state) {
         </span>
       </div>
       <div class="folder-notes" ${expanded && folderNotes.length ? "" : "hidden"}>
-        ${folderNotes.map((note) => `
-          <button class="note-row${note.id === state.noteId ? " is-active" : ""}" data-note-id="${note.id}">
-            ${icon("note")}
-            <span>
-              <strong>${escapeHtml(note.title || "Untitled note")}</strong>
-            </span>
-          </button>`).join("")}
+        ${folderNotes.map((note) => noteRow(note, state)).join("")}
       </div>
     </div>`;
+}
+
+function noteRow(note, state) {
+  return `<button class="note-row${note.id === state.noteId ? " is-active" : ""}" data-note-id="${note.id}">
+    ${icon("note")}<span><strong>${escapeHtml(note.title || "Untitled note")}</strong></span>
+  </button>`;
 }
 
 function notesInFolder(state) {

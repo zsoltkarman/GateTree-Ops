@@ -7,12 +7,12 @@ const read = (path) => readFile(new URL(path, root), "utf8");
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const previewUrl = moduleUrl(await read("web/modules/deployments/validation-preview.js"));
 const { parseValidationPreview } = await import(previewUrl);
-const escapeUrl = moduleUrl(`export const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);`);
+const escapeUrl = moduleUrl(`export const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&#62;",'"':"&quot;","'":"&#39;"})[c]);`);
 const dialogSource = (await read("web/modules/deployments/approval-dialog.js"))
   .replace("../../shared/ui.js", escapeUrl).replace("./validation-preview.js", previewUrl);
 const { approvalDialogMarkup } = await import(moduleUrl(dialogSource));
 const debug = (host, msg) => `ok: [${host}] => ${JSON.stringify({ msg })}\n`;
-const output = debug("host-1", ["Deployment target", "Role name: kafka", "Environment: test", "Location: region-a", "Strategy: linear", "Running User: deploy", "Ansible ssh host: 192.0.2.10", "Ansible hostname: host-1", "IMAGE_VERSION: 2026.9.3", "Galaxy version: 0.12.251", "AF Docker host: registry.example:5000"])
+const output = debug("host-1", ["Deployment target", "Role name: kafka", "Environment: test", "Location: region-a", "Strategy: linear", "Running User: deploy", "Ansible ssh host: 192.0.2.10", "Ansible hostname: host-1", "IMAGE_VERSION: 2026.9.3", "Galaxy version: 0.12.251", "AF Docker host: registry.test:5000"])
   + debug("host-1", ["KAFKA_VERSION: 3.9.2", "JDK_VERSION: jdk-21.0.1"]);
 
 test("preview arrays merge deployment settings and role variables by host", () => {
@@ -21,7 +21,7 @@ test("preview arrays merge deployment settings and role variables by host", () =
   assert.equal(target["Ansible ssh host"], "192.0.2.10");
   assert.equal(target.IMAGE_VERSION, "2026.9.3");
   assert.equal(target.KAFKA_VERSION, "3.9.2");
-  assert.equal(target["AF Docker host"], "registry.example:5000");
+  assert.equal(target["AF Docker host"], "registry.test:5000");
 });
 
 test("escaped debug strings support wrapped values and older separate version tasks", () => {
@@ -105,4 +105,52 @@ test("a step no longer awaiting approval cannot be reviewed or approved", async 
   assert.equal(calls.controls.length, 0);
   assert.equal(calls.reviews, 0);
   assert(state.error);
+});
+
+
+test("a stopped Plan offers Restart while a stopped job can be retried separately", () => {
+  const source = queueSource.slice(queueSource.indexOf("function planMarkup("), queueSource.indexOf("function planInfoMarkup("));
+  const markup = new Function("escapeHtml", "controlAction", "actionLabel", "icon", "planInfoMarkup", "planLogMarkup", "jobMarkup", `return ${source}`)(
+    String, status => status === "running" ? "stop" : "start", action => action, () => "", () => "", () => "", () => ""
+  );
+  const state = {};
+  const stopped = markup({ ...plan, status: "stopped" }, state);
+  assert.match(stopped, /data-control-action="restart"/);
+  assert.match(stopped, /title="restart Plan"/);
+  assert.match(markup({ ...plan, status: "queued" }, state), /data-control-action="start"/);
+  assert.match(markup({ ...plan, status: "running" }, state), /data-control-action="stop"/);
+});
+
+
+test("queue refresh keeps the selected job log open and preserves reading position", () => {
+  const source = queueSource.slice(queueSource.indexOf("function render("), queueSource.indexOf("function editorMarkup("));
+  const renderQueue = new Function("editorMarkup", "queueMarkup", "bindEditor", "bindQueue", `return ${source}`)(
+    () => "editor", () => "updated queue", () => {}, () => {}
+  );
+  for (const top of [35, 200]) {
+    const oldPre = { scrollTop: top, scrollHeight: 300, clientHeight: 100 };
+    const newPre = { scrollTop: 0, scrollHeight: 500, clientHeight: 100 };
+    const makePanel = (key, pre) => ({ dataset: { infoPanel: key }, hidden: true, querySelector: () => pre });
+    const selected = makePanel("job-log:job", newPre);
+    const other = makePanel("job-log:other", { scrollTop: 0 });
+    const root = {
+      querySelectorAll: selector => selector === ".queue-log-panel" ? [makePanel("job-log:job", oldPre)] : [selected, other],
+      innerHTML: "old queue"
+    };
+    renderQueue(root, { adding: false, infoKey: "job-log:job" });
+    assert.equal(root.innerHTML, "updated queue");
+    assert.equal(selected.hidden, false);
+    assert.equal(other.hidden, true);
+    assert.equal(newPre.scrollTop, top === 200 ? 500 : top);
+  }
+});
+
+
+test("an explicitly configured deploy without validation can review its target and payload", () => {
+  const markup = approvalDialogMarkup(plan, { ...job, log: "No preceding matching validation was configured or completed. Review the deployment target and payload before approval." });
+  assert(markup.includes("Review deployment"));
+  assert(markup.includes("No matching validation preview is available"));
+  assert(markup.includes("Deployment payload"));
+  assert(markup.includes("host-1"));
+  assert(!markup.includes('data-decision="approve" disabled'));
 });

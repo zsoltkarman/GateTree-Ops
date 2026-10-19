@@ -14,24 +14,43 @@ import {
 
 export async function mountAgentView(root, options = {}) {
   const state = {
-    status: null, activities: [], sshSessions: [], jobSets: [], busy: false, error: "",
+    status: null, activities: [], sshSessions: [], jobSets: [], filter: "all", busy: false, error: "",
     mountId: crypto.randomUUID(), onAttachSshSession: options.onAttachSshSession,
     onFocusDeploymentPlan: options.onFocusDeploymentPlan,
+    overview: Boolean(options.overview), onSnapshot: options.onSnapshot,
   };
   root.dataset.agentMountId = state.mountId;
   root.innerHTML = '<div class="agent-loading">Loading Agent status…</div>';
   await refresh(root, state);
+  if (!root.isConnected || root.dataset.agentMountId !== state.mountId) return;
+  if (options.activityId) {
+    const row = root.querySelector(`[data-activity-id="${CSS.escape(options.activityId)}"]`)?.closest(".agent-table-row");
+    if (row) {
+      row.classList.add("is-search-target");
+      row.scrollIntoView({ block: "center" });
+    }
+  }
   scheduleStatusPoll(root, state);
 }
 
 function render(root, state) {
+  state.onSnapshot?.({ sshSessions: state.sshSessions, jobSets: state.jobSets });
+  const filters = activityFilters(state);
+  if (!filters.some((filter) => filter.id === state.filter)) state.filter = "all";
+  const filtered = {
+    ...state,
+    jobSets: ["all", "deploy"].includes(state.filter) ? state.jobSets : [],
+    sshSessions: ["all", "ssh"].includes(state.filter) ? state.sshSessions : [],
+    activities: state.activities.filter((activity) => state.filter === "all" || activityType(activity) === state.filter),
+  };
+  const visibleCount = filtered.jobSets.length + filtered.sshSessions.length + filtered.activities.length;
   const running = Boolean(state.status?.running);
   const statusLabel = running && state.status?.pid
     ? `${state.status.label} - PID: ${state.status.pid}`
     : (state.status?.label ?? "Unknown");
   root.innerHTML = `
     <div class="agent-module">
-      <section class="agent-controls">
+      ${state.overview ? '<header class="workspace-overview-heading"><h2>Overview</h2><p>Open sessions, deployment Plans and browser activity.</p></header>' : `<section class="agent-controls">
         <div class="agent-summary">
           <span class="agent-state${running ? " is-running" : ""}"><i></i>${escapeHtml(statusLabel)}</span>
           <span class="agent-version">Agent: ${escapeHtml(state.status?.version ?? "—")} · Protocol: ${escapeHtml(state.status?.protocolVersion ?? "—")} · GUI expects: ${escapeHtml(state.status?.expectedVersion ?? "—")} / protocol ${escapeHtml(state.status?.expectedProtocolVersion ?? "—")}${versionWarning(state.status)}</span>
@@ -41,17 +60,40 @@ function render(root, state) {
           <button data-action="stop-agent" ${!running || state.busy ? "disabled" : ""}>Stop</button>
           <button data-action="kill-agent" ${state.busy ? "disabled" : ""}>Kill Agent</button>
         </div>
-      </section>
+      </section>`}
       ${state.error ? `<p class="agent-error">${escapeHtml(state.error)}</p>` : ""}
+      <nav class="agent-activity-filters" aria-label="Filter activity by type">
+        ${filters.map((filter) => `<button type="button" data-agent-filter="${escapeHtml(filter.id)}" aria-pressed="${state.filter === filter.id}">${escapeHtml(filter.label)}<span>${filter.count}</span></button>`).join("")}
+      </nav>
       <section class="agent-activity-table">
         <div class="agent-table-header"><span>Name</span><span>Type</span><span>Target</span><span>Opened</span><span>Status</span><span></span></div>
-        ${jobSetRows(state)}
-        ${sessionRows(state)}
-        ${activityRows(state)}
-        ${state.jobSets.length || state.sshSessions.length || state.activities.length ? "" : '<p class="agent-empty">No active sessions or remembered activity.</p>'}
+        ${jobSetRows(filtered)}
+        ${sessionRows(filtered)}
+        ${activityRows(filtered)}
+        ${visibleCount ? "" : `<p class="agent-empty">${state.filter === "all" ? "No active sessions or remembered activity." : `No ${escapeHtml(filters.find((filter) => filter.id === state.filter)?.label ?? state.filter)} activity.`}</p>`}
       </section>
     </div>`;
   bindEvents(root, state);
+}
+
+function activityType(activity) {
+  const type = String(activity.resourceType ?? "other").toLowerCase();
+  return type === "deployment" ? "deploy" : type;
+}
+
+function activityFilters(state) {
+  const counts = new Map();
+  if (state.jobSets.length) counts.set("deploy", state.jobSets.length);
+  if (state.sshSessions.length) counts.set("ssh", state.sshSessions.length);
+  for (const activity of state.activities) {
+    const type = activityType(activity);
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  const labels = { url: "URL", deploy: "Deploy", ssh: "SSH" };
+  return [
+    { id: "all", label: "All", count: state.jobSets.length + state.sshSessions.length + state.activities.length },
+    ...[...counts].map(([id, count]) => ({ id, label: labels[id] ?? id.toUpperCase(), count })),
+  ];
 }
 
 function jobSetRows(state) {
@@ -100,17 +142,24 @@ function activityRows(state) {
 }
 
 function bindEvents(root, state) {
-  root.querySelector('[data-action="kill-agent"]').addEventListener("click", () => run(root, state, async () => {
+  root.querySelectorAll("[data-agent-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.filter = button.dataset.agentFilter;
+      render(root, state);
+      [...root.querySelectorAll("[data-agent-filter]")].find((item) => item.dataset.agentFilter === state.filter)?.focus();
+    });
+  });
+  root.querySelector('[data-action="kill-agent"]')?.addEventListener("click", () => run(root, state, async () => {
     state.status = await killAgent();
     state.sshSessions = [];
     state.jobSets = [];
   }));
-  root.querySelector('[data-action="start-agent"]').addEventListener("click", () => run(root, state, async () => {
+  root.querySelector('[data-action="start-agent"]')?.addEventListener("click", () => run(root, state, async () => {
     state.status = await startAgent();
     state.sshSessions = await listSessionsIfRunning(state.status);
     state.jobSets = await listJobSetsIfRunning(state.status);
   }));
-  root.querySelector('[data-action="stop-agent"]').addEventListener("click", () => run(root, state, async () => {
+  root.querySelector('[data-action="stop-agent"]')?.addEventListener("click", () => run(root, state, async () => {
     state.status = await stopAgent();
     state.sshSessions = [];
     state.jobSets = [];
@@ -152,19 +201,21 @@ async function refresh(root, state) {
 
 function scheduleStatusPoll(root, state) {
   window.setTimeout(async () => {
-    if (root.dataset.agentMountId !== state.mountId || !root.querySelector(".agent-module")) return;
+    if (!root.isConnected || root.dataset.agentMountId !== state.mountId || !root.querySelector(".agent-module")) return;
     if (!state.busy) {
       try {
         const status = await getAgentStatus();
-        const [sshSessions, jobSets] = await Promise.all([
-          listSessionsIfRunning(status), listJobSetsIfRunning(status),
+        const [sshSessions, jobSets, activities] = await Promise.all([
+          listSessionsIfRunning(status), listJobSetsIfRunning(status), listAgentActivity(),
         ]);
         if (!sameStatus(status, state.status)
           || JSON.stringify(sshSessions) !== JSON.stringify(state.sshSessions)
-          || JSON.stringify(jobSets) !== JSON.stringify(state.jobSets)) {
+          || JSON.stringify(jobSets) !== JSON.stringify(state.jobSets)
+          || JSON.stringify(activities) !== JSON.stringify(state.activities)) {
           state.status = status;
           state.sshSessions = sshSessions;
           state.jobSets = jobSets;
+          state.activities = activities;
           state.error = "";
           render(root, state);
         }

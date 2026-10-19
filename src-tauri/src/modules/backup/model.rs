@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const BACKUP_FORMAT: &str = "pharos-workspace-backup";
+pub const BACKUP_FORMAT: &str = "gatetree-ops-workspace-backup";
+pub const LEGACY_BACKUP_FORMAT: &str = "pharos-workspace-backup";
 pub const BACKUP_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]

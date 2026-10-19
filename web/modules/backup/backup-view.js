@@ -20,7 +20,7 @@ function render(root, state) {
         <span class="backup-card-icon">${icon("import")}</span>
         <div>
           <strong>Import workspace</strong>
-          <p>Replace workspace content from a PHAROS JSON backup.</p>
+          <p>Replace workspace content from a GateTree-Ops JSON backup.</p>
         </div>
         <button data-action="import" ${state.busy ? "disabled" : ""}>Import JSON</button>
       </section>
@@ -35,8 +35,8 @@ async function exportWorkspace(root, state) {
   let path;
   try {
     path = await window.__TAURI__.dialog.save({
-      title: "Export PHAROS workspace",
-      defaultPath: "pharos-backup.json",
+      title: "Export GateTree-Ops workspace",
+      defaultPath: "gatetree-ops-backup.json",
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
   } catch (cause) {
@@ -56,7 +56,7 @@ async function importWorkspace(root, state) {
     path = await window.__TAURI__.dialog.open({
       directory: false,
       multiple: false,
-      title: "Import PHAROS workspace",
+      title: "Import GateTree-Ops workspace",
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
   } catch (cause) {

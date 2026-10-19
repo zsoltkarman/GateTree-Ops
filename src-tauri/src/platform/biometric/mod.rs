@@ -8,8 +8,9 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-const KEYRING_SERVICE: &str = "com.zsoltkarman.pharos.workspace";
-const CONFIGURED_MARKER: &str = ".pharos-biometric";
+const KEYRING_SERVICE: &str = "com.zsoltkarman.gatetreeops.workspace";
+const CONFIGURED_MARKER: &str = ".gatetree-ops-biometric";
+const LEGACY_MARKER: &str = ".pharos-biometric";
 
 #[derive(Debug)]
 pub struct PlatformBiometricStatus {
@@ -52,11 +53,22 @@ pub async fn delete(path: &Path) -> Result<(), BiometricError> {
 
 fn alias(path: &Path) -> String {
     let digest = Sha256::digest(path.to_string_lossy().as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    if configured_marker(path).file_name().and_then(|p| p.to_str()) == Some(LEGACY_MARKER) {
+        format!("legacy-pharos:{hash}")
+    } else {
+        hash
+    }
 }
 
 fn configured_marker(path: &Path) -> std::path::PathBuf {
-    path.join(CONFIGURED_MARKER)
+    let current = path.join(CONFIGURED_MARKER);
+    let legacy = path.join(LEGACY_MARKER);
+    if !current.exists() && legacy.is_file() {
+        legacy
+    } else {
+        current
+    }
 }
 
 fn write_configured_marker(path: &Path) -> Result<(), BiometricError> {
@@ -66,11 +78,14 @@ fn write_configured_marker(path: &Path) -> Result<(), BiometricError> {
 }
 
 fn remove_configured_marker(path: &Path) -> Result<(), BiometricError> {
-    match fs::remove_file(configured_marker(path)) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(BiometricError::Marker(error.to_string())),
+    for name in [CONFIGURED_MARKER, LEGACY_MARKER] {
+        match fs::remove_file(path.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(BiometricError::Marker(error.to_string())),
+        }
     }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -131,6 +146,35 @@ pub enum BiometricError {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(super) fn entry(alias: &str) -> Result<keyring::Entry, BiometricError> {
-    keyring::Entry::new(KEYRING_SERVICE, alias)
+    let (service, alias) = if let Some(legacy) = alias.strip_prefix("legacy-pharos:") {
+        ("com.zsoltkarman.pharos.workspace", legacy)
+    } else {
+        (KEYRING_SERVICE, alias)
+    };
+    keyring::Entry::new(service, alias)
         .map_err(|error| BiometricError::CredentialStore(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn legacy_marker_keeps_its_keyring_alias_and_new_enrollment_uses_new_namespace() {
+        let directory =
+            std::env::temp_dir().join(format!("gatetree-ops-biometric-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let new_alias = alias(&directory);
+        assert!(!new_alias.starts_with("legacy-pharos:"));
+        fs::write(directory.join(LEGACY_MARKER), "1").unwrap();
+        assert_eq!(alias(&directory), format!("legacy-pharos:{new_alias}"));
+        assert_eq!(configured_marker(&directory), directory.join(LEGACY_MARKER));
+        remove_configured_marker(&directory).unwrap();
+        write_configured_marker(&directory).unwrap();
+        assert_eq!(
+            configured_marker(&directory),
+            directory.join(CONFIGURED_MARKER)
+        );
+        assert_eq!(alias(&directory), new_alias);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

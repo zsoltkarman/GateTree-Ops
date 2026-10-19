@@ -29,3 +29,5 @@ export const focusUrlActivity = (activityId) => invoke("focus_url_activity", { a
 export const deleteAgentActivity = (activityId) => invoke("delete_agent_activity", { activityId });
 
 export const restoreDeploymentCredentials = (keepassPassword) => invoke("restore_deployment_credentials", { keepassPassword });
+
+export const connectAgentSshWithKeePass = (connectionId, columns = 120, rows = 32) => invoke("connect_agent_ssh_with_keepass", { connectionId, columns, rows });

@@ -178,7 +178,7 @@ mod tests {
             .expect("clock")
             .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "pharos-vaults-test-{}-{unique}",
+            "gatetree-ops-vaults-test-{}-{unique}",
             std::process::id()
         ));
         fs::create_dir_all(&directory).expect("create test directory");

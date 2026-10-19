@@ -13,13 +13,13 @@ export function approvalDialogMarkup(plan, job) {
     return fields.length ? `<h4>${escapeHtml(target["Ansible hostname"])}</h4><dl>${fields.map(([field, value]) => `<div><dt>${escapeHtml(field)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>` : "";
   }).join("");
   return `<header>
-      <h2 id="queue-approval-title">Review validation</h2>
+      <h2 id="queue-approval-title">Review deployment</h2>
       <p>Plan #${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)} · Step ${escapeHtml(job.sequence)}: ${escapeHtml(job.name)}</p>
       <p>Review this step before starting deployment. Deny stops the Plan.</p>
     </header>
     <div class="queue-approval-content">
       ${settings ? `<section><h3>Deployment settings</h3><dl>${settings}</dl></section>` : ""}
-      <section><h3>Validation targets</h3>${targets.length ? `<div class="queue-approval-targets"><table><thead><tr><th>Hostname</th><th>SSH / IP</th><th>Image version</th></tr></thead><tbody>${targets.map((target) => `<tr><td>${escapeHtml(target["Ansible hostname"])}</td><td>${escapeHtml(target["Ansible ssh host"] || "—")}</td><td>${escapeHtml(target.IMAGE_VERSION || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<p class="queue-approval-notice">No deployment preview block was found. Review the validation output for target ${escapeHtml(job.target || "—")}.</p>`}</section>
+      <section><h3>Validation targets</h3>${targets.length ? `<div class="queue-approval-targets"><table><thead><tr><th>Hostname</th><th>SSH / IP</th><th>Image version</th></tr></thead><tbody>${targets.map((target) => `<tr><td>${escapeHtml(target["Ansible hostname"])}</td><td>${escapeHtml(target["Ansible ssh host"] || "—")}</td><td>${escapeHtml(target.IMAGE_VERSION || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<p class="queue-approval-notice">No matching validation preview is available. Review the deployment payload for target ${escapeHtml(job.target || "—")}.</p>`}</section>
       ${variables ? `<details class="queue-approval-variables"><summary>Role variables</summary>${variables}</details>` : ""}
       <details open><summary>Validation output</summary><pre>${escapeHtml(job.log || "No validation output is available.")}</pre></details>
       <details><summary>Deployment payload</summary><pre>${escapeHtml(job.payload || "{}")}</pre></details>

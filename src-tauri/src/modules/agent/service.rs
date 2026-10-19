@@ -10,7 +10,7 @@ use crate::{
 };
 
 use super::model::{AgentActivity, AgentStatus, SshHostKeyInspection};
-use pharos_agent_core::{
+use gatetree_ops_agent_core::{
     AgentJobSetStatus, SshAuthentication, SshConnectRequest, SshHostKey, SshSessionStatus,
     SshTerminalChunk,
 };
@@ -153,43 +153,41 @@ impl AgentService {
         columns: u16,
         rows: u16,
     ) -> Result<SshSessionStatus, AgentError> {
-        let (name, host, port, username, authentication, trusted_host_key, ssh_transport) = state
-            .with_connection(|connection| {
-                connection
-                    .query_row(
-                        "SELECT c.name, c.target, COALESCE(c.port, 22), c.username,
+        let (name, host, port, _stored_username, authentication, trusted_host_key, ssh_transport) =
+            state
+                .with_connection(|connection| {
+                    connection
+                        .query_row(
+                            "SELECT c.name, c.target, COALESCE(c.port, 22), c.username,
                                 c.authentication, k.public_key, c.ssh_transport
                          FROM connections c
                          LEFT JOIN ssh_known_hosts k
                            ON k.host = c.target COLLATE NOCASE AND k.port = COALESCE(c.port, 22)
                          WHERE c.id = ?1 AND c.connection_type = 'ssh'",
-                        [&connection_id],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, u16>(2)?,
-                                row.get::<_, Option<String>>(3)?,
-                                row.get::<_, Option<String>>(4)?,
-                                row.get::<_, Option<String>>(5)?,
-                                row.get::<_, String>(6)?,
-                            ))
-                        },
-                    )
-                    .optional()
-            })
-            .map_err(AgentError::from)?
-            .ok_or(AgentError::SshConnectionNotFound)?;
-        let username = username_override
-            .or(username)
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_default();
+                            [&connection_id],
+                            |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, u16>(2)?,
+                                    row.get::<_, Option<String>>(3)?,
+                                    row.get::<_, Option<String>>(4)?,
+                                    row.get::<_, Option<String>>(5)?,
+                                    row.get::<_, String>(6)?,
+                                ))
+                            },
+                        )
+                        .optional()
+                })
+                .map_err(AgentError::from)?
+                .ok_or(AgentError::SshConnectionNotFound)?;
+        let username = username_override.unwrap_or_default().trim().to_owned();
+        if username.is_empty() {
+            return Err(AgentError::SshUsernameRequired);
+        }
         let (authentication, trusted_host_key) = if ssh_transport == "openssh" {
             (SshAuthentication::OpenSsh, String::new())
         } else {
-            if username.is_empty() {
-                return Err(AgentError::SshUsernameRequired);
-            }
             let trusted_host_key = trusted_host_key.ok_or(AgentError::SshHostKeyNotTrusted)?;
             let authentication = match authentication.as_deref().unwrap_or("password") {
                 "password" => SshAuthentication::Password {
@@ -223,7 +221,10 @@ impl AgentService {
     }
 
     pub fn disconnect_ssh(session_id: String) -> Result<(), AgentError> {
-        agent_ipc::disconnect_ssh(session_id).map_err(AgentError::from)
+        match agent_ipc::disconnect_ssh(session_id) {
+            Err(error) if missing_ssh_session(&error) => Ok(()),
+            result => result.map_err(AgentError::from),
+        }
     }
 
     pub fn read_ssh_terminal(
@@ -231,7 +232,10 @@ impl AgentService {
         offset: Option<u64>,
         maximum_bytes: usize,
     ) -> Result<SshTerminalChunk, AgentError> {
-        agent_ipc::read_ssh_terminal(session_id, offset, maximum_bytes).map_err(AgentError::from)
+        terminal_read_result(
+            agent_ipc::read_ssh_terminal(session_id, offset, maximum_bytes),
+            offset,
+        )
     }
 
     pub fn write_ssh_terminal(session_id: String, data: Vec<u8>) -> Result<(), AgentError> {
@@ -326,6 +330,27 @@ impl AgentService {
             return Err(AgentError::ActivityNotFound);
         }
         Ok(())
+    }
+}
+
+fn missing_ssh_session(error: &AgentIpcError) -> bool {
+    matches!(error, AgentIpcError::Rejected(message) if message == "SSH session was not found")
+}
+
+// Agent removes exited sessions while listing them. A terminal that was already
+// mounted should finish normally when its next read races that cleanup.
+fn terminal_read_result(
+    result: Result<SshTerminalChunk, AgentIpcError>,
+    offset: Option<u64>,
+) -> Result<SshTerminalChunk, AgentError> {
+    match result {
+        Err(error) if missing_ssh_session(&error) => Ok(SshTerminalChunk {
+            data: vec![],
+            closed: true,
+            next_offset: offset.unwrap_or(0),
+            truncated: false,
+        }),
+        result => result.map_err(AgentError::from),
     }
 }
 
@@ -482,4 +507,40 @@ pub enum AgentError {
     Browser(#[from] std::io::Error),
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    #[test]
+    fn reading_a_session_cleaned_up_by_agent_reports_closed_without_hiding_other_errors() {
+        let result = terminal_read_result(
+            Err(AgentIpcError::Rejected("SSH session was not found".into())),
+            Some(123),
+        )
+        .unwrap();
+        assert!(result.closed);
+        assert!(result.data.is_empty());
+        assert_eq!(result.next_offset, 123);
+        assert!(
+            terminal_read_result(
+                Err(AgentIpcError::Rejected("Permission denied".into())),
+                None
+            )
+            .is_err()
+        );
+        assert!(terminal_read_result(Err(AgentIpcError::NotRunning), None).is_err());
+        let live = terminal_read_result(
+            Ok(SshTerminalChunk {
+                data: b"output".to_vec(),
+                closed: false,
+                next_offset: 6,
+                truncated: false,
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(!live.closed);
+        assert_eq!(live.data, b"output");
+    }
 }

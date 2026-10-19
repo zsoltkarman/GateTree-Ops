@@ -46,7 +46,11 @@ pub fn unlock_workspace(
 }
 
 #[tauri::command]
-pub fn lock_workspace(state: State<'_, WorkspaceState>) -> Result<(), String> {
+pub fn lock_workspace(
+    state: State<'_, WorkspaceState>,
+    terminals: State<'_, crate::modules::local_terminal::LocalTerminals>,
+) -> Result<(), String> {
+    terminals.clear();
     state.lock().map_err(|error| error.to_string())
 }
 

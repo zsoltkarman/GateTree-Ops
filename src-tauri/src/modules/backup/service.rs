@@ -10,7 +10,8 @@ use thiserror::Error;
 use crate::modules::workspace::{WorkspaceError, WorkspaceState};
 
 use super::model::{
-    BACKUP_FORMAT, BACKUP_VERSION, BackupDocument, BackupSummary, BackupValue, TableBackup,
+    BACKUP_FORMAT, BACKUP_VERSION, BackupDocument, BackupSummary, BackupValue,
+    LEGACY_BACKUP_FORMAT, TableBackup,
 };
 
 const TECHNICAL_TABLES: &[&str] = &["schema_migrations", "workspace_metadata"];
@@ -110,7 +111,7 @@ fn validate_and_prepare(
     document: &BackupDocument,
     current_schema: &BTreeMap<String, Vec<String>>,
 ) -> Result<BTreeMap<String, PreparedTable>, BackupError> {
-    if document.format != BACKUP_FORMAT {
+    if document.format != BACKUP_FORMAT && document.format != LEGACY_BACKUP_FORMAT {
         return Err(BackupError::InvalidFormat);
     }
     if document.version != BACKUP_VERSION {
@@ -226,13 +227,15 @@ struct PreparedTable {
 
 #[derive(Debug, Error)]
 pub enum BackupError {
-    #[error("This is not a PHAROS backup file.")]
+    #[error("This is not a GateTree-Ops backup file.")]
     InvalidFormat,
-    #[error("PHAROS backup version {0} is not supported.")]
+    #[error("GateTree-Ops backup version {0} is not supported.")]
     UnsupportedVersion(u32),
-    #[error("The backup contains the unknown table '{0}'. Update PHAROS before importing it.")]
+    #[error(
+        "The backup contains the unknown table '{0}'. Update GateTree-Ops before importing it."
+    )]
     UnknownTable(String),
-    #[error("The backup schema for table '{0}' does not match this PHAROS version.")]
+    #[error("The backup schema for table '{0}' does not match this GateTree-Ops version.")]
     SchemaMismatch(String),
     #[error("The backup contains an invalid row in table '{0}'.")]
     InvalidRow(String),
@@ -252,8 +255,24 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn accepts_legacy_backup_format_but_keeps_gate_tree_formats_separate() {
+        let mut document = BackupDocument {
+            format: LEGACY_BACKUP_FORMAT.into(),
+            version: BACKUP_VERSION,
+            schema_version: "20".into(),
+            tables: BTreeMap::new(),
+        };
+        assert!(validate_and_prepare(&document, &BTreeMap::new()).is_ok());
+        document.format = BACKUP_FORMAT.into();
+        assert!(validate_and_prepare(&document, &BTreeMap::new()).is_ok());
+        document.format = "gatetree-configuration".into();
+        assert!(validate_and_prepare(&document, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
     fn automatically_exports_and_restores_new_content_tables() {
-        let directory = std::env::temp_dir().join(format!("pharos-backup-{}", Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("gatetree-ops-backup-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).expect("create test directory");
         let state = WorkspaceState::default();
         WorkspaceService::create(

@@ -9,6 +9,7 @@ export async function mountDeploymentQueueView(root, detail = {}, { onQueueChang
   root.innerHTML = '<div class="deployment-config-loading">Loading Queue…</div>';
   try {
     state.plans = (await getDeploymentQueue()).plans;
+    if (!root.isConnected || root.dataset.queueMountId !== state.mountId) return;
     notifyQueue(state);
     render(root, state);
     scheduleQueuePoll(root, state);
@@ -18,8 +19,18 @@ export async function mountDeploymentQueueView(root, detail = {}, { onQueueChang
 }
 
 function render(root, state) {
+  const logScroll = new Map([...root.querySelectorAll(".queue-log-panel")].map((panel) => {
+    const pre = panel.querySelector("pre");
+    return [panel.dataset.infoPanel, { top: pre.scrollTop, follow: pre.scrollHeight - pre.clientHeight - pre.scrollTop < 20 }];
+  }));
   root.innerHTML = state.adding ? editorMarkup(state) : queueMarkup(state);
   if (state.adding) bindEditor(root, state); else bindQueue(root, state);
+  root.querySelectorAll("[data-info-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.infoPanel !== state.infoKey;
+    const position = logScroll.get(panel.dataset.infoPanel);
+    const pre = panel.querySelector("pre");
+    if (position && pre) pre.scrollTop = position.follow ? pre.scrollHeight : position.top;
+  });
 }
 
 function editorMarkup(state) {
@@ -50,7 +61,7 @@ function queueMarkup(state) {
 }
 
 function planMarkup(plan, state) {
-  const planAction = plan.status === "awaiting_approval" ? "stop" : controlAction(plan.status);
+  const planAction = plan.status === "awaiting_approval" ? "stop" : plan.status === "stopped" ? "restart" : controlAction(plan.status);
   return `<article class="queue-plan-group">
     <header>
       <div><strong>Plan #${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</strong><span>${escapeHtml(plan.processName)}</span></div>
@@ -100,11 +111,12 @@ function planLogMarkup(plan, state) {
 
 function jobMarkup(plan, job, index) {
   const jobAction = controlAction(job.status);
-  const blocked = jobAction !== "stop" && plan.jobs.slice(0, index).some((previous) => previous.status !== "completed");
-  const blockedTitle = "Waiting for all previous jobs to complete successfully";
-  return `<div class="queue-job-row">
-      <span>${job.sequence}</span><strong>${escapeHtml(job.name)}</strong><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code><span class="queue-job-details" title="${escapeHtml(job.details)}">${escapeHtml(job.details || "—")}</span><span class="queue-status is-${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>
+  const blocked = job.status === "disabled" || jobAction !== "stop" && plan.jobs.slice(0, index).some((previous) => !["completed", "disabled"].includes(previous.status));
+  const blockedTitle = job.status === "disabled" ? "Enable this job before starting it" : "Waiting for previous enabled jobs to complete";
+  return `<div class="queue-job-row${job.status === "disabled" ? " is-disabled" : ""}">
+      <span>${job.sequence}</span><strong>${escapeHtml(job.name)}</strong><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code><span class="queue-job-details" title="${escapeHtml(job.details)}">${jobDetailsMarkup(job.status === "disabled" ? "Skipped during execution" : job.details)}</span><span class="queue-status is-${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>
       <div class="queue-row-actions">
+        <button data-control-job="${escapeHtml(job.id)}" data-control-action="${job.status === "disabled" ? "enable" : "disable"}" title="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-label="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-pressed="${job.status === "disabled"}" ${["queued", "stopped", "disabled"].includes(job.status) ? "" : "disabled"}>${icon(job.status === "disabled" ? "enable" : "disable")}</button>
         <button data-control-job="${escapeHtml(job.id)}" data-control-action="${jobAction}" title="${blocked ? blockedTitle : `${actionLabel(jobAction)} Job`}" aria-label="${actionLabel(jobAction)} Job" ${blocked ? "disabled" : ""}>${icon(jobAction)}</button>
         <button data-info="job-info:${escapeHtml(job.id)}" title="Job Info" aria-label="Job Info">${icon("info")}</button>
         <button data-info="job-log:${escapeHtml(job.id)}" title="Job Log" aria-label="Job Log">${icon("log")}</button>
@@ -114,7 +126,17 @@ function jobMarkup(plan, job, index) {
     ${jobLogMarkup(job)}`;
 }
 
+function jobDetailsMarkup(details = "") {
+  const match = /^(.*?)\s*·\s*(Job #\d+)$/u.exec(details);
+  return `<span>${escapeHtml(match ? match[1] : details || "—")}</span>${match ? `<span class="queue-job-id">${escapeHtml(match[2])}</span>` : ""}`;
+}
+
 function jobInfoMarkup(job) {
+  if (job.driver === "jira" && job.action === "update") {
+    return `<div class="queue-info queue-job-info queue-job-payload" data-info-panel="job-info:${escapeHtml(job.id)}" hidden>
+      <strong>Jira report configuration</strong><pre>${escapeHtml(job.payload || "{}")}</pre>
+    </div>`;
+  }
   if (job.driver === "olam") {
     return `<div class="queue-info queue-job-info queue-job-payload" data-info-panel="job-info:${escapeHtml(job.id)}" hidden>
       <strong>OLAM payload</strong>
@@ -157,6 +179,10 @@ function bindEditor(root, state) {
 }
 
 function bindQueue(root, state) {
+  root.querySelectorAll("button[title][aria-label]").forEach((button) => {
+    button.dataset.tooltip = button.title;
+    button.removeAttribute("title");
+  });
   root.querySelector('[data-action="add"]').addEventListener("click", () => { state.adding = true; state.draft = ""; render(root, state); });
   root.querySelectorAll("[data-control-plan]").forEach((button) => button.addEventListener("click", () => controlItem(root, state, "plan", button.dataset.controlPlan, button.dataset.controlAction)));
   root.querySelectorAll("[data-control-job]").forEach((button) => button.addEventListener("click", () => controlItem(root, state, "job", button.dataset.controlJob, button.dataset.controlAction)));
@@ -234,7 +260,7 @@ async function controlItem(root, state, itemType, id, action) {
       const job = current.plans.flatMap((plan) => plan.jobs).find((job) => job.id === id);
       if (JSON.stringify(job) !== reviewedJob) throw new Error("The validation changed while you were reviewing it. Open Approve again to review the latest result.");
     }
-    progressDialog = showQueueProgress(root, action === "deny" ? "Denying deployment…" : "Preparing Agent credentials…");
+    progressDialog = showQueueProgress(root, action === "deny" ? "Denying deployment…" : action === "disable" ? "Disabling job…" : action === "enable" ? "Enabling job…" : "Preparing Agent credentials…");
     state.plans = (await controlDeploymentQueueItem(itemType, id, action)).plans;
     notifyQueue(state);
     render(root, state);
@@ -261,7 +287,7 @@ function showQueueProgress(root, message) {
 
 function scheduleQueuePoll(root, state) {
   window.setTimeout(async () => {
-    if (root.dataset.queueMountId !== state.mountId || !root.querySelector(".queue-module, .queue-plan-editor")) return;
+    if (!root.isConnected || root.dataset.queueMountId !== state.mountId || !root.querySelector(".queue-module, .queue-plan-editor")) return;
     if (!state.adding && !state.busyKey) {
       try {
         const plans = (await getDeploymentQueue()).plans;
@@ -307,6 +333,8 @@ async function copyText(value) {
 
 function icon(name) {
   const paths = {
+    disable: "<circle cx='12' cy='12' r='9'/><path d='m6 6 12 12'/>",
+    enable: "<circle cx='12' cy='12' r='9'/><path d='m7 12 3 3 7-7'/>",
     plus: "<path d='M12 5v14M5 12h14'/>",
     close: "<path d='m6 6 12 12M18 6 6 18'/>",
     save: "<path d='M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6'/>",
