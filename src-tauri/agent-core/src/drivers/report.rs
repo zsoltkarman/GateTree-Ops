@@ -236,6 +236,7 @@ fn values(
         values.insert(
             "job_url".into(),
             job.deployment_job_id
+                .filter(|_| job.driver == "olam" && !url.is_empty())
                 .map(|id| format!("{url}/#/jobs/playbook/{id}/output"))
                 .unwrap_or_default(),
         );
@@ -315,7 +316,7 @@ pub(super) fn prepare(
         .iter()
         .copied()
         .filter(|job| {
-            job.driver == "olam"
+            matches!(job.driver.as_str(), "olam" | "container")
                 && matches!(job.action.as_str(), "deploy" | "validate_deploy")
                 && job.status == "completed"
                 && job.deployment_job_id.is_some()
@@ -362,10 +363,10 @@ pub(super) fn prepare(
                             .collect::<Vec<_>>()
                             .join("\n\n"),
                         "deployment_log" => {
-                            let log = &deployment
-                                .ok_or("Missing deployment for log attachment.")?
-                                .log;
-                            log.rfind("Starting OLAM deployment for ")
+                            let deployment = deployment.ok_or("Missing deployment for log attachment.")?;
+                            let log = &deployment.log;
+                            let marker = format!("Starting {} deployment for ", deployment.driver.to_uppercase());
+                            log.rfind(&marker)
                                 .map(|i| log[i..].to_owned())
                                 .unwrap_or_else(|| log.clone())
                         }
@@ -404,4 +405,20 @@ pub(super) fn prepare_reports(
     validate_report(&value)?;
     let report: Report = serde_json::from_value(value).map_err(|e| e.to_string())?;
     prepare(set, job, &report)
+}
+
+#[cfg(test)]
+mod container_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn container_reports_include_completed_jobs_without_fabricating_olam_links() {
+        let report=json!({"scope":"deployment","comment_template":"{{job_id}}|{{job_url}}","attachments":[{"source":"deployment_log","filename_template":"{{job_id}}.log"}]});
+        let (mut set,current,_)=super::super::jira_update::tests::context("https://jira.test",report.clone());
+        for job in &mut set.jobs[..3] {job.driver="container".into();job.log=job.log.replace("Starting OLAM deployment for ","Starting CONTAINER deployment for ");}
+        let reports=prepare(&set,&current,&serde_json::from_value(report).unwrap()).unwrap();
+        assert_eq!(reports.len(),2);assert_eq!(reports[0].comment.as_deref(),Some("200|"));
+        let attachment=String::from_utf8(reports[0].attachments[0].bytes.clone()).unwrap();
+        assert!(attachment.contains("deployment-output-0"));assert!(!attachment.contains("Ansible ssh host"));
+    }
 }

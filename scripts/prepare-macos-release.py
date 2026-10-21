@@ -26,7 +26,7 @@ def prepare(destination, version):
     selected = []
     for name in sorted(set(files)):
         path = Path(name)
-        if not name or path.parts[0] not in {'src-tauri', 'web', 'scripts'}:
+        if not name or (path.parts[0] not in {'src-tauri', 'web', 'scripts'} and name not in {'run-dev.sh', 'run-release.sh'}):
             continue
         if any(part.startswith('.env') or part in {'target', 'node_modules', '__pycache__', 'binaries'} for part in path.parts):
             continue

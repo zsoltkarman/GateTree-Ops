@@ -63,7 +63,7 @@ class LocalReleaseTests(unittest.TestCase):
         scripts = repo / 'scripts'
         scripts.mkdir(parents=True)
         bin_dir.mkdir()
-        for name in ['release-macos.sh', 'create-update-manifest.py']:
+        for name in ['release-macos.sh', 'create-update-manifest.py', 'ensure-updates-repository.sh']:
             shutil.copy2(ROOT / 'scripts' / name, scripts / name)
         (repo / 'RELEASE_NOTES.md').write_text('Reviewed release notes')
         assets = repo / 'dist/releases/0.1.16'
@@ -81,7 +81,7 @@ import json,os,sys
 args=sys.argv[1:]
 with open(os.environ['GH_CALLS'],'a') as out: out.write(json.dumps(args)+'\\n')
 if args[:2]==['auth','status']: pass
-elif args[:2]==['repo','view']: print('PUBLIC')
+elif args[:2]==['repo','view']: print('false' if 'isEmpty' in args else 'PUBLIC')
 elif args[:1]==['api']:
     if os.environ['RELEASE_STATE']: print('v0.1.16\\t'+os.environ['RELEASE_STATE'])
 elif args[:2]==['release','view']: print('https://github.com/owner/updates/releases/tag/v0.1.16')

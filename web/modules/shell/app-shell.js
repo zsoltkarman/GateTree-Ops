@@ -44,6 +44,32 @@ function escapeHtml(value) {
   })[character]);
 }
 
+function queuePlanGroup(plan) {
+  const jobs = plan?.jobs ?? [];
+  if (jobs.length && jobs.every(job => ["completed", "disabled"].includes(job.status))) return "success";
+  if (jobs.length && jobs.every(job => job.status === "queued")) return "queued";
+  return "running";
+}
+
+function queueNavigationMarkup(catalog, expandedGroups) {
+  return [["running", "Running"], ["queued", "Queued"], ["success", "Success"]].map(([id, label]) => {
+    const plans = catalog.plans.filter(plan => queuePlanGroup(plan) === id)
+      .sort((a, b) => (b.planNumber ?? 0) - (a.planNumber ?? 0));
+    const expanded = expandedGroups.has(id);
+    return `<div class="queue-navigation-group">
+      <button class="queue-navigation-group-toggle${expanded ? " is-expanded" : ""}" data-queue-group="${id}" aria-expanded="${expanded}" aria-controls="queue-navigation-${id}">
+        ${icon("<path d='m9 7 5 5-5 5'/>")}<span>${label}</span><span class="queue-navigation-count">${plans.length}</span>
+      </button>
+      <div class="queue-navigation-plans" id="queue-navigation-${id}" ${expanded ? "" : "hidden"}>
+        ${plans.map(plan => `<button class="deployment-navigation-resource${catalog.section === "queue" && catalog.selectedPlanId === plan.id ? " is-active" : ""}"
+            data-queue-plan="${escapeHtml(plan.id)}" title="#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)} · ${escapeHtml((plan.status ?? "queued").replaceAll("_", " "))}">
+          ${planStatusIcon(plan.status)}<span>#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</span>
+        </button>`).join("")}
+      </div>
+    </div>`;
+  }).join("");
+}
+
 function navigationMarkup(id, label, iconPath, index) {
   const hasModuleNavigation = ["connections", "deployments", "ai-skills", "notes", "help"].includes(id);
   const item = `
@@ -66,10 +92,13 @@ function navigationMarkup(id, label, iconPath, index) {
           <button data-ai-section="skills">${icon("<path d='m9 7 5 5-5 5'/>")}<span>Skills</span></button>
           <div data-role="ai-skill-links"></div>
           <button data-ai-section="config">${icon("<path d='M3.5 7.5h6l2-2h9v13h-17zM15 10v5M12.5 12.5h5'/>")}<span>Config</span></button>` : id === "deployments" ? `
+          <button data-deployment-tool="ansible" aria-expanded="false">${icon("<path d='m7 18 5-13 5 13M9 13l7 5'/>")}<span>Ansible</span>${icon("<path d='m9 7 5 5-5 5'/>")}</button>
+          <div class="deployment-tool-children" data-role="ansible-navigation" hidden>
           <button data-deployment-section="queue">${icon("<path d='M5 6h14M5 12h14M5 18h14M8 4v4M8 10v4M8 16v4'/>")}<span>Queue</span>${icon("<path d='m9 7 5 5-5 5'/>")}</button>
           <div data-role="deployment-queue-links"></div>
           <button data-deployment-section="config">${icon("<path d='M5 5h4v4H5zM15 5h4v4h-4zM10 7h5M17 9v5M15 14h4v4h-4zM9 16h6M5 14h4v4H5zM7 9v5'/>")}<span>Config</span>${icon("<path d='m9 7 5 5-5 5'/>")}</button>
-          <div data-role="deployment-process-links"></div>` : `<div class="module-navigation-host" data-role="${id}-navigation-host"></div>`}
+          <div data-role="deployment-process-links"></div>
+          </div>` : `<div class="module-navigation-host" data-role="${id}-navigation-host"></div>`}
       </div>
     </div>`;
 }
@@ -148,7 +177,9 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
   const expandedAiGroups = new Set();
   let deploymentCatalog = { plans: [], processes: [], section: "queue", selectedId: null, selectedPlanId: null };
   let deploymentQueueExpanded = false;
+  const expandedQueueGroups = new Set(["running", "queued"]);
   let deploymentConfigExpanded = false;
+  let ansibleExpanded = false;
   let helpDeploymentsExpanded = false;
 
   const setModuleExpanded = (module, expanded) => {
@@ -218,6 +249,10 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
   };
 
   const renderDeploymentCatalog = () => {
+    const toolButton = root.querySelector('[data-deployment-tool="ansible"]');
+    toolButton.classList.toggle("is-expanded", ansibleExpanded);
+    toolButton.setAttribute("aria-expanded", String(ansibleExpanded));
+    root.querySelector('[data-role="ansible-navigation"]').hidden = !ansibleExpanded;
     const renderLinks = (host, section, entries) => {
       host.innerHTML = entries.map((entry) => `
         <button class="deployment-navigation-resource${deploymentCatalog.section === section && deploymentCatalog.selectedId === entry.id ? " is-active" : ""}"
@@ -232,11 +267,15 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     queueButton.classList.toggle("is-expanded", hasPlans && deploymentQueueExpanded);
     queueButton.querySelector("svg:last-child").hidden = !hasPlans;
     queueLinks.hidden = !hasPlans || !deploymentQueueExpanded;
-    queueLinks.innerHTML = deploymentCatalog.plans.map((plan) => `
-      <button class="deployment-navigation-resource${deploymentCatalog.section === "queue" && deploymentCatalog.selectedPlanId === plan.id ? " is-active" : ""}"
-              data-queue-plan="${escapeHtml(plan.id)}" title="#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)} · ${escapeHtml((plan.status ?? "queued").replaceAll("_", " "))}">
-        ${planStatusIcon(plan.status)}<span>#${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</span>
-      </button>`).join("");
+    queueLinks.innerHTML = queueNavigationMarkup(deploymentCatalog, expandedQueueGroups);
+    queueLinks.querySelectorAll("[data-queue-group]").forEach(button => {
+      button.addEventListener("click", () => {
+        const id = button.dataset.queueGroup;
+        if (expandedQueueGroups.has(id)) expandedQueueGroups.delete(id);
+        else expandedQueueGroups.add(id);
+        renderDeploymentCatalog();
+      });
+    });
     queueLinks.querySelectorAll("[data-queue-plan]").forEach((button) => {
       button.addEventListener("click", () => navigate("deployments", { section: "queue", planId: button.dataset.queuePlan }));
     });
@@ -338,9 +377,12 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     } else if (module === "ai-skills") {
       selectAiChild(detail ?? { section: "skills" });
     } else if (module === "deployments") {
+      if (["queue", "config"].includes(detail?.section)) ansibleExpanded = true;
       deploymentCatalog.section = detail?.section || null;
       deploymentCatalog.selectedId = detail?.resourceId || null;
       deploymentCatalog.selectedPlanId = detail?.planId || null;
+      const selectedPlan = deploymentCatalog.plans.find(plan => plan.id === detail?.planId);
+      if (selectedPlan) expandedQueueGroups.add(queuePlanGroup(selectedPlan));
       root.querySelectorAll("[data-deployment-section]").forEach((button) => {
         button.classList.toggle("is-active", button.dataset.deploymentSection === deploymentCatalog.section);
       });
@@ -380,6 +422,11 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
   });
   root.querySelector('[data-help-section="config"]').addEventListener("click", () => {
     navigate("help", { module: "deployments", section: "config" });
+  });
+  root.querySelector('[data-deployment-tool="ansible"]').addEventListener("click", () => {
+    ansibleExpanded = !ansibleExpanded;
+    renderDeploymentCatalog();
+    if (ansibleExpanded) navigate("deployments", { section: "overview" });
   });
   root.querySelectorAll("[data-deployment-section]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -431,6 +478,11 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
       renderDeploymentCatalog();
     },
     setDeploymentQueue(plans, selectedPlanId = null) {
+      const previousPlan = deploymentCatalog.plans.find(plan => plan.id === deploymentCatalog.selectedPlanId);
+      const selectedPlan = plans.find(plan => plan.id === selectedPlanId);
+      if (selectedPlan && (previousPlan?.id !== selectedPlanId || queuePlanGroup(previousPlan) !== queuePlanGroup(selectedPlan))) {
+        expandedQueueGroups.add(queuePlanGroup(selectedPlan));
+      }
       deploymentCatalog.plans = plans;
       deploymentCatalog.selectedPlanId = selectedPlanId;
       if (selectedPlanId) deploymentQueueExpanded = true;

@@ -1,10 +1,12 @@
+import { mountQueueColumns } from "./queue-columns.js";
+import { emptyPlannerDraft, mountPlannerBuilder } from "./planner-builder.js";
 import { reviewDeploymentApproval } from "./approval-dialog.js";
 import { ensureAgentCredentials } from "../agent/credential-recovery.js";
 import { escapeHtml } from "../../shared/ui.js";
-import { controlDeploymentQueueItem, createDeploymentPlan, deleteDeploymentPlan, getDeploymentQueue, updateDeploymentPlan } from "./queue-api.js";
+import { controlDeploymentQueueItem, deleteDeploymentPlan, getDeploymentQueue, updateDeploymentPlan } from "./queue-api.js";
 
 export async function mountDeploymentQueueView(root, detail = {}, { onQueueChange = () => {} } = {}) {
-  const state = { plans: [], selectedId: detail.planId ?? null, adding: Boolean(detail.new), draft: "", message: "", error: false, busy: false, busyKey: null, infoKey: null, onQueueChange, mountId: crypto.randomUUID() };
+  const state = { plans: [], selectedId: detail.planId ?? null, expandedPlans: new Set(detail.planId ? [detail.planId] : []), adding: Boolean(detail.new), plannerDraft: emptyPlannerDraft(), disposeBuilder: null, message: "", error: false, busyKey: null, infoKey: null, onQueueChange, mountId: crypto.randomUUID() };
   root.dataset.queueMountId = state.mountId;
   root.innerHTML = '<div class="deployment-config-loading">Loading Queue…</div>';
   try {
@@ -23,28 +25,28 @@ function render(root, state) {
     const pre = panel.querySelector("pre");
     return [panel.dataset.infoPanel, { top: pre.scrollTop, follow: pre.scrollHeight - pre.clientHeight - pre.scrollTop < 20 }];
   }));
-  root.innerHTML = state.adding ? editorMarkup(state) : queueMarkup(state);
-  if (state.adding) bindEditor(root, state); else bindQueue(root, state);
+  state.disposeColumns?.();
+  state.disposeColumns = null;
+  state.disposeBuilder?.();
+  state.disposeBuilder = null;
+  if (state.adding) {
+    state.disposeBuilder = mountPlannerBuilder(root, { draft: state.plannerDraft, onSaved: snapshot => {
+      state.plans = snapshot.plans; state.adding = false; state.plannerDraft = emptyPlannerDraft();
+      state.selectedId = snapshot.createdPlanId; state.expandedPlans.add(snapshot.createdPlanId);
+      const saved = state.plans.find(plan => plan.id === snapshot.createdPlanId);
+      state.message = `Plan #${saved?.planNumber ?? ""} saved to Queue.`; state.error = false;
+      render(root, state); notifyQueue(state);
+    }, onClose: () => { state.adding = false; render(root, state); } });
+  } else {
+    root.innerHTML = queueMarkup(state);
+    bindQueue(root, state);
+  }
   root.querySelectorAll("[data-info-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.infoPanel !== state.infoKey;
     const position = logScroll.get(panel.dataset.infoPanel);
     const pre = panel.querySelector("pre");
     if (position && pre) pre.scrollTop = position.follow ? pre.scrollHeight : position.top;
   });
-}
-
-function editorMarkup(state) {
-  return `<section class="queue-plan-editor">
-    <header class="deployment-json-toolbar">
-      <div><strong>New Plan</strong><span>YAML input</span></div>
-      <nav>
-        <button data-action="cancel" title="Cancel" aria-label="Cancel">${icon("close")}</button>
-        <button class="deployment-save" data-action="save" title="Add to Queue" aria-label="Add to Queue" ${state.busy ? "disabled" : ""}>${icon("save")}</button>
-      </nav>
-    </header>
-    <textarea class="deployment-json-editor" data-role="plan-editor" aria-label="Plan YAML" spellcheck="false">${escapeHtml(state.draft)}</textarea>
-    <footer class="deployment-json-status"><span class="${state.error ? "is-error" : ""}">${escapeHtml(state.message)}</span><code>YAML</code></footer>
-  </section>`;
 }
 
 function queueMarkup(state) {
@@ -62,23 +64,29 @@ function queueMarkup(state) {
 
 function planMarkup(plan, state) {
   const planAction = plan.status === "awaiting_approval" ? "stop" : plan.status === "stopped" ? "restart" : controlAction(plan.status);
-  return `<article class="queue-plan-group">
+  const expanded = Boolean(state.expandedPlans?.has(plan.id));
+  return `<article class="queue-plan-group${expanded ? " is-expanded" : ""}" data-plan-group="${escapeHtml(plan.id)}">
     <header>
-      <div><strong>Plan #${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</strong><span>${escapeHtml(plan.processName)}</span></div>
+      <button type="button" class="queue-plan-toggle" data-toggle-plan="${escapeHtml(plan.id)}" aria-expanded="${expanded}" aria-controls="queue-plan-body-${escapeHtml(plan.id)}" aria-label="${expanded ? "Collapse" : "Expand"} Plan #${escapeHtml(plan.planNumber)}">
+        ${icon("chevron")}<span class="queue-plan-heading"><strong>Plan #${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</strong><span>${escapeHtml(plan.processName)}</span></span>
+      </button>
       <div class="queue-plan-actions">
         ${state.selectedId ? `<button data-action="add" title="Add Plan" aria-label="Add Plan">${icon("plus")}</button>` : ""}
         <span class="queue-status is-${escapeHtml(plan.status)}">${escapeHtml(plan.status)}</span>
+        <button class="queue-approve-all" data-control-plan="${escapeHtml(plan.id)}" data-control-action="${plan.approveAll ? "revoke_approve_all" : "approve_all"}" aria-pressed="${Boolean(plan.approveAll)}" title="${plan.approveAll ? "Turn off automatic approval for upcoming deployments" : "Automatically approve all deployments in this Plan"}" aria-label="${plan.approveAll ? "Revoke Approve all" : "Approve all"}">${icon("approve")}Approve all</button>
         <button data-info="plan-info:${escapeHtml(plan.id)}" title="Plan Info" aria-label="Plan Info">${icon("info")}</button>
         <button data-info="plan-log:${escapeHtml(plan.id)}" title="Plan Log" aria-label="Plan Log">${icon("log")}</button>
         <button data-control-plan="${escapeHtml(plan.id)}" data-control-action="${planAction}" title="${actionLabel(planAction)} Plan" aria-label="${actionLabel(planAction)} Plan">${icon(planAction)}</button>
         <button data-delete-plan="${escapeHtml(plan.id)}" title="Delete Plan" aria-label="Delete Plan">${icon("trash")}</button>
       </div>
     </header>
+    <div class="queue-plan-body" id="queue-plan-body-${escapeHtml(plan.id)}" ${expanded ? "" : "hidden"}>
     ${planInfoMarkup(plan, state)}
     ${planLogMarkup(plan, state)}
     <div class="queue-job-table">
-      <div class="queue-job-header"><span>#</span><span>Step name</span><span>Target</span><span>Details</span><span>Status</span><span></span></div>
+      <div class="queue-job-header">${["#", "Step name", "Target", "Details", "Status", "Actions"].map((label, index, labels) => `<span class="queue-column-heading">${index === 5 ? "" : label}${index < 5 ? `<span class="queue-column-resizer" data-resize-queue-column="${index}" role="separator" aria-orientation="vertical" aria-label="Resize ${label} and ${labels[index + 1]} columns" tabindex="0" title="Drag to resize · Double-click to reset · Arrow keys to adjust"></span>` : ""}</span>`).join("")}</div>
       ${plan.jobs.map((job, index) => jobMarkup(plan, job, index)).join("")}
+    </div>
     </div>
   </article>`;
 }
@@ -138,9 +146,9 @@ function jobInfoMarkup(job) {
       <strong>Jira report configuration</strong><pre>${escapeHtml(job.payload || "{}")}</pre>
     </div>`;
   }
-  if (job.driver === "olam") {
+  if (["olam", "container"].includes(job.driver)) {
     return `<div class="queue-info queue-job-info queue-job-payload" data-info-panel="job-info:${escapeHtml(job.id)}" hidden>
-      <strong>OLAM payload</strong>
+      <strong>${job.driver === "container" ? "Ansible container" : "OLAM"} payload</strong>
       <pre>${escapeHtml(job.payload || "{}")}</pre>
     </div>`;
   }
@@ -156,39 +164,31 @@ function jobLogMarkup(job) {
   </div>`;
 }
 
-function bindEditor(root, state) {
-  const editor = root.querySelector('[data-role="plan-editor"]');
-  requestAnimationFrame(() => editor.focus());
-  editor.addEventListener("input", () => { state.draft = editor.value; });
-  editor.addEventListener("keydown", (event) => {
-    if (event.key !== "Tab") return;
-    event.preventDefault();
-    editor.setRangeText("  ", editor.selectionStart, editor.selectionEnd, "end");
-  });
-  root.querySelector('[data-action="cancel"]').addEventListener("click", () => { state.adding = false; render(root, state); });
-  root.querySelector('[data-action="save"]').addEventListener("click", async () => {
-    state.busy = true; state.message = ""; state.error = false; render(root, state);
-    try {
-      const snapshot = await createDeploymentPlan(state.draft);
-      state.plans = snapshot.plans; state.selectedId = snapshot.plans[0]?.id ?? null; state.adding = false; notifyQueue(state);
-    } catch (cause) {
-      state.message = String(cause); state.error = true;
-    } finally {
-      state.busy = false; render(root, state);
-    }
-  });
-}
-
 function bindQueue(root, state) {
+  state.disposeColumns = mountQueueColumns(root, { onResizing: value => { state.resizingColumns = value; } });
+  const setExpanded = (id, expanded) => {
+    if (expanded) state.expandedPlans.add(id); else state.expandedPlans.delete(id);
+    const button = root.querySelector(`[data-toggle-plan="${CSS.escape(id)}"]`);
+    button?.setAttribute("aria-expanded", String(expanded));
+    button?.setAttribute("aria-label", `${expanded ? "Collapse" : "Expand"} ${button.querySelector("strong").textContent}`);
+    const group = button?.closest(".queue-plan-group");
+    group?.classList.toggle("is-expanded", expanded);
+    const body = group?.querySelector(".queue-plan-body");
+    if (body) body.hidden = !expanded;
+  };
+  root.querySelectorAll("[data-toggle-plan]").forEach(button => button.addEventListener("click", () => setExpanded(button.dataset.togglePlan, !state.expandedPlans.has(button.dataset.togglePlan))));
   root.querySelectorAll("button[title][aria-label]").forEach((button) => {
     button.dataset.tooltip = button.title;
     button.removeAttribute("title");
   });
-  root.querySelector('[data-action="add"]').addEventListener("click", () => { state.adding = true; state.draft = ""; render(root, state); });
+  root.querySelector('[data-action="add"]').addEventListener("click", () => { state.adding = true; render(root, state); });
   root.querySelectorAll("[data-control-plan]").forEach((button) => button.addEventListener("click", () => controlItem(root, state, "plan", button.dataset.controlPlan, button.dataset.controlAction)));
   root.querySelectorAll("[data-control-job]").forEach((button) => button.addEventListener("click", () => controlItem(root, state, "job", button.dataset.controlJob, button.dataset.controlAction)));
   root.querySelectorAll("[data-info]").forEach((button) => button.addEventListener("click", () => {
-    state.infoKey = state.infoKey === button.dataset.info ? null : button.dataset.info;
+    const planId = button.closest(".queue-plan-group")?.dataset.planGroup;
+    const collapsed = planId && !state.expandedPlans.has(planId);
+    state.infoKey = !collapsed && state.infoKey === button.dataset.info ? null : button.dataset.info;
+    if (planId) setExpanded(planId, true);
     root.querySelectorAll("[data-info-panel]").forEach((panel) => { panel.hidden = panel.dataset.infoPanel !== state.infoKey; });
   }));
   root.querySelectorAll("[data-plan-payload]").forEach((editor) => editor.addEventListener("keydown", (event) => {
@@ -253,7 +253,19 @@ async function controlItem(root, state, itemType, id, action) {
       if (!decision) return;
       action = decision;
     }
-    if (["start", "restart", "approve"].includes(action)) {
+    if (itemType === "job" && ["start", "restart"].includes(action)) {
+      const job = state.plans.flatMap(plan => plan.jobs).find(job => job.id === id);
+      if (job?.driver === "jira" && job.action === "update" && /unconfirmed/i.test(job.log ?? "")) {
+        const confirmed = window.confirm(`The previous Jira report for ${job.target} has an unconfirmed result. Check the issue's attachments and comments first.
+
+Continue only if the unconfirmed operation is missing. It may be sent again; already confirmed operations will be kept. Deployment steps will not be rerun.
+
+Have you checked Jira and want to resend the missing report operation?`);
+        if (!confirmed) return;
+        action = "retry_unconfirmed_report";
+      }
+    }
+    if (["start", "restart", "approve", "approve_all", "retry_unconfirmed_report"].includes(action)) {
       if (!await ensureAgentCredentials()) return;
     }
     if (reviewedJob) {
@@ -261,7 +273,7 @@ async function controlItem(root, state, itemType, id, action) {
       const job = current.plans.flatMap((plan) => plan.jobs).find((job) => job.id === id);
       if (JSON.stringify(job) !== reviewedJob) throw new Error("The validation changed while you were reviewing it. Open Approve again to review the latest result.");
     }
-    progressDialog = showQueueProgress(root, action === "deny" ? "Denying deployment…" : action === "disable" ? "Disabling job…" : action === "enable" ? "Enabling job…" : "Preparing Agent credentials…");
+    progressDialog = showQueueProgress(root, action === "retry_unconfirmed_report" ? "Retrying Jira report…" : action === "approve_all" ? "Enabling Approve all…" : action === "revoke_approve_all" ? "Turning off Approve all…" : action === "deny" ? "Denying deployment…" : action === "disable" ? "Disabling job…" : action === "enable" ? "Enabling job…" : "Preparing Agent credentials…");
     state.plans = (await controlDeploymentQueueItem(itemType, id, action)).plans;
     notifyQueue(state);
     render(root, state);
@@ -289,10 +301,10 @@ function showQueueProgress(root, message) {
 function scheduleQueuePoll(root, state) {
   window.setTimeout(async () => {
     if (!root.isConnected || root.dataset.queueMountId !== state.mountId || !root.querySelector(".queue-module, .queue-plan-editor")) return;
-    if (!state.adding && !state.busyKey) {
+    if (!state.adding && !state.busyKey && !state.resizingColumns) {
       try {
         const plans = (await getDeploymentQueue()).plans;
-        if (JSON.stringify(plans) !== JSON.stringify(state.plans)) {
+        if (!state.adding && !state.busyKey && !state.resizingColumns && root.dataset.queueMountId === state.mountId && JSON.stringify(plans) !== JSON.stringify(state.plans)) {
           state.plans = plans;
           notifyQueue(state);
           render(root, state);
@@ -334,6 +346,7 @@ async function copyText(value) {
 
 function icon(name) {
   const paths = {
+    chevron: "<path d='m9 5 7 7-7 7'/>",
     disable: "<circle cx='12' cy='12' r='9'/><path d='m6 6 12 12'/>",
     enable: "<circle cx='12' cy='12' r='9'/><path d='m7 12 3 3 7-7'/>",
     plus: "<path d='M12 5v14M5 12h14'/>",

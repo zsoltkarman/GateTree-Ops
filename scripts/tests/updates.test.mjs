@@ -70,3 +70,28 @@ test('release configuration isolates the update feed and uses a per-user Windows
   assert.match(config.plugins.updater.endpoints[0], /GateTree-Ops-updates\/releases\/latest\/download\/latest.json$/);
   assert(config.plugins.updater.pubkey.length > 40);
 });
+
+test('failed manual checks stop displaying Checking for updates', async () => {
+  const f = fixture(async () => { throw 'The automatic-update feed is not available. A published release must include a valid latest.json file.'; });
+  await f.controller.check();
+  assert.equal(f.element('[data-update-version]').textContent, 'Update information unavailable');
+  assert.match(f.element('[data-update-status]').textContent, /latest.json/);
+});
+
+test('install immediately shows Updating and restores the button with an explicit failure', async () => {
+  let rejectInstall;
+  const f = fixture(async command => {
+    if (command === 'check_app_update') return { enabled: true, currentVersion: '0.1.17', version: '0.1.18' };
+    return new Promise((_, reject) => { rejectInstall = reject; });
+  });
+  await f.controller.check();
+  const pending = f.element('[data-update-install]').onclick();
+  assert.equal(f.element('[data-update-install]').textContent, 'Updating…');
+  assert.equal(f.element('[data-update-install]').disabled, true);
+  await new Promise(resolve => setImmediate(resolve));
+  rejectInstall('The installation folder is not writable');
+  await pending;
+  assert.equal(f.element('[data-update-install]').textContent, 'Update and restart');
+  assert.equal(f.element('[data-update-install]').disabled, false);
+  assert.match(f.element('[data-update-status]').textContent, /^Update failed:.*not writable/);
+});

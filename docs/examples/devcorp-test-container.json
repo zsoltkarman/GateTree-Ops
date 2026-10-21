@@ -1,0 +1,25 @@
+{
+  "name": "Devcorp - Test",
+  "details": {
+    "container": {
+      "engine": "auto",
+      "image": "ies-orasys-release-docker-local.artifactory.oci.oraclecorp.com/orasys-ansible-deployer:2026.9.3",
+      "repository": "local_ansible_folder",
+      "deployment_playbook": "playbooks/deploy_orasys_role.yml",
+      "role_variable": "ROLE_NAME",
+      "vault_password_file": "~/.orasys_vault_pass",
+      "payload_defaults": {
+        "ENVIRONMENT": "devcorp",
+        "ansible_ssh_common_args": "-q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=50 -o ServerAliveCountMax=3"
+      }
+    }
+  },
+  "steps": [
+    {
+      "name": "Deploy Ansible",
+      "driver": "container",
+      "action": "deploy",
+      "workflow": ["validate", "approve", "deploy"]
+    }
+  ]
+}

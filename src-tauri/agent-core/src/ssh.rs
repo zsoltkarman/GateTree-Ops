@@ -933,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn scans_connects_lists_and_disconnects_a_real_russh_session() {
+    fn opening_a_second_ssh_session_keeps_the_first_session_working() {
         let server = TestServer::start();
         let mut manager = SshSessionManager::new().unwrap();
         let scanned = manager
@@ -952,12 +952,25 @@ mod tests {
                 authentication: SshAuthentication::Password {
                     password: PASSWORD.into(),
                 },
-                trusted_host_key: scanned.public_key,
+                trusted_host_key: scanned.public_key.clone(),
                 columns: 80,
                 rows: 24,
             })
             .unwrap();
         assert_eq!(manager.list(), vec![session.clone()]);
+        let second = manager.connect(SshConnectRequest {
+            connection_id: "connection-2".into(),
+            name: "Second test host".into(),
+            host: server.address.ip().to_string(),
+            port: server.address.port(),
+            username: USERNAME.into(),
+            authentication: SshAuthentication::Password { password: PASSWORD.into() },
+            trusted_host_key: scanned.public_key,
+            columns: 80,
+            rows: 24,
+        }).unwrap();
+        assert_eq!(manager.list().len(), 2);
+
         manager
             .write_terminal(&session.id, b"echo test\r".to_vec())
             .unwrap();
@@ -980,6 +993,10 @@ mod tests {
         assert_eq!(replay.data, b"echo test\r");
         manager.resize_terminal(&session.id, 120, 40).unwrap();
         manager.disconnect(&session.id).unwrap();
+        let remaining = manager.list();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, second.id);
+        manager.disconnect(&second.id).unwrap();
         assert!(manager.list().is_empty());
     }
 }

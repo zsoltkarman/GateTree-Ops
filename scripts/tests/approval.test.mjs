@@ -123,9 +123,9 @@ test("a stopped Plan offers Restart while a stopped job can be retried separatel
 
 
 test("queue refresh keeps the selected job log open and preserves reading position", () => {
-  const source = queueSource.slice(queueSource.indexOf("function render("), queueSource.indexOf("function editorMarkup("));
-  const renderQueue = new Function("editorMarkup", "queueMarkup", "bindEditor", "bindQueue", `return ${source}`)(
-    () => "editor", () => "updated queue", () => {}, () => {}
+  const source = queueSource.slice(queueSource.indexOf("function render("), queueSource.indexOf("function queueMarkup("));
+  const renderQueue = new Function("mountPlannerBuilder", "queueMarkup", "bindQueue", `return ${source}`)(
+    () => () => {}, () => "updated queue", () => {}
   );
   for (const top of [35, 200]) {
     const oldPre = { scrollTop: top, scrollHeight: 300, clientHeight: 100 };
@@ -153,4 +153,45 @@ test("an explicitly configured deploy without validation can review its target a
   assert(markup.includes("Deployment payload"));
   assert(markup.includes("host-1"));
   assert(!markup.includes('data-decision="approve" disabled'));
+});
+
+test("grouped inventory approval shows all hosts reported by validation", () => {
+  const log = debug("inventory-a", ["Role name: service", "Ansible hostname: inventory-a", "Ansible ssh host: 192.0.2.10"])
+    + debug("inventory-b", ["Role name: service", "Ansible hostname: inventory-b", "Ansible ssh host: 192.0.2.11"]);
+  const markup = approvalDialogMarkup(plan, { ...job, target: "group_one, group_two", log, payload: JSON.stringify({ansible_limit:["group_one","group_two"]}) });
+  for (const host of ["inventory-a", "inventory-b", "192.0.2.10", "192.0.2.11"]) assert(markup.includes(host));
+  assert(!markup.includes("No matching validation preview"));
+  assert(!markup.includes('data-decision="approve" disabled'));
+});
+
+
+test("Approve all remains available for running Plans and can be revoked", () => {
+  const source = queueSource.slice(queueSource.indexOf("function planMarkup("), queueSource.indexOf("function planInfoMarkup("));
+  const markup = new Function("escapeHtml", "controlAction", "actionLabel", "icon", "planInfoMarkup", "planLogMarkup", "jobMarkup", `return ${source}`)(
+    String, () => "stop", String, () => "", () => "", () => "", () => ""
+  );
+  for (const status of ["queued", "running", "awaiting_approval", "stopped"]) {
+    const off = markup({ ...plan, status, approveAll: false }, {});
+    assert.match(off, /data-control-action="approve_all" aria-pressed="false"/);
+    const on = markup({ ...plan, status, approveAll: true }, {});
+    assert.match(on, /data-control-action="revoke_approve_all" aria-pressed="true"/);
+  }
+});
+
+
+test("an unconfirmed Jira report requires an explicit recovery decision before retry", async () => {
+  for (const confirmed of [false, true]) {
+    const calls = [];
+    const reportJob = { ...job, driver: "jira", action: "update", status: "failed", target: "APP-1", log: "Jira update has an unconfirmed result." };
+    const state = { plans: [{ ...plan, jobs: [reportJob] }], busyKey: null };
+    const control = new Function("window", "ensureAgentCredentials", "showQueueProgress", "controlDeploymentQueueItem", "notifyQueue", "render", `return ${controlSource}`)(
+      { confirm: text => { assert.match(text, /Check the issue/); return confirmed; } },
+      async () => { calls.push("unlock"); return true; },
+      () => ({ close() {}, remove() {} }),
+      async (...args) => { calls.push(args); return { plans: [] }; }, () => {}, () => {}
+    );
+    await control({}, state, "job", "job", "restart");
+    assert.deepEqual(calls, confirmed ? ["unlock", ["job", "job", "retry_unconfirmed_report"]] : []);
+    assert.equal(state.busyKey, null);
+  }
 });

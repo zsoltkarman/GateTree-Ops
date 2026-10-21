@@ -11,9 +11,9 @@ const fields = [
   ["ip", "Deployment", "Ansible ssh host from validation output; empty when unavailable."],
   ["datetime", "Plan / deployment", "UTC deployment completion time; report generation time for the Plan summary. Older jobs may show unknown."],
   ["status", "Plan / deployment", "Deployment status; completed for the Plan report."],
-  ["job_id", "Deployment", "OLAM deployment job ID."],
-  ["validation_job_id", "Deployment", "OLAM validation job ID, if available."],
-  ["job_url", "Deployment", "Link to the OLAM deployment output."],
+  ["job_id", "Deployment", "OLAM or local container deployment job ID."],
+  ["validation_job_id", "Deployment", "OLAM or local container validation job ID, if available."],
+  ["job_url", "Deployment", "Link to OLAM output; empty for local container jobs."],
   ["deployments", "Plan", "Summary rendered using deployment_template, once per completed deployment."],
 ];
 
@@ -49,11 +49,65 @@ const cxDeploymentReport = {
     attachments: [{ source: "deployment_log", compression: "zip", filename_template: "{{request}}-{{target}}-{{job_id}}.zip" }],
   },
 };
-const reports = { plan: planReport, deployment: deploymentReport, cxPlan: cxPlanReport, cxDeployment: cxDeploymentReport };
+const containerProcess = {
+  "name": "Devcorp - Test",
+  "details": {
+    "container": {
+      "engine": "auto",
+      "image": "ies-orasys-release-docker-local.artifactory.oci.oraclecorp.com/orasys-ansible-deployer:2026.9.3",
+      "repository": "local_ansible_folder",
+      "deployment_playbook": "playbooks/deploy_orasys_role.yml",
+      "role_variable": "ROLE_NAME",
+      "vault_password_file": "~/.orasys_vault_pass",
+      "payload_defaults": {
+        "ENVIRONMENT": "devcorp",
+        "ansible_ssh_common_args": "-q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=50 -o ServerAliveCountMax=3"
+      }
+    }
+  },
+  "steps": [
+    {
+      "name": "Deploy Ansible",
+      "driver": "container",
+      "action": "deploy",
+      "workflow": [
+        "validate",
+        "approve",
+        "deploy"
+      ]
+    }
+  ]
+};
+
+const reports = { container: containerProcess, plan: planReport, deployment: deploymentReport, cxPlan: cxPlanReport, cxDeployment: cxDeploymentReport };
 
 function markup() {
   return `<article class="report-help-document">
     <header><p class="report-help-breadcrumb">Help / Deployments / Config</p><h1>Deployment Config</h1><p>Configure the report in a Jira or CX <code>update</code> step under <code>report</code>. Connection settings belong in <code>details.jira</code> or <code>details.cx</code>.</p></header>
+    <section><h2>Local container Ansible</h2>
+      <p>Use the same Planner and select a Process with <code>driver: "container"</code>. The image is read from this Process config, never from a hardcoded version. Docker or Podman must be running and able to pull the image (log in to the registry first if required).</p>
+      <p>Choose the local project containing the configured deployment playbook under Deployments / Ansible / Config. The Agent mounts it read-only at <code>/workspace</code>. Planner Account supplies SSH and become credentials. Ansible Vault uses the password file already inside the image; <code>~/</code> refers to the image user's home.</p>
+      <p><code>ansible_config</code> is optional: omit it to retain the image environment and Ansible's normal config discovery. Optional <code>validation_playbook</code> overrides the built-in SSH ping and target preview. The selected workflow runs validation, pauses for approval, then deploys. Stop removes the running container; failed validation never deploys.</p>
+      <p>Plans use <code>inputs.ansible</code>; existing <code>inputs.olam</code> Plans remain supported. Both inventory layouts are supported: <code>inventory/ENVIRONMENT/SITE</code> and <code>inventory/gbucs_orasys_host_inventory/ENVIRONMENT/SITE</code>. Host grouping and extra variables work as in OLAM.</p>
+      <div class="report-help-code-heading"><strong>Devcorp - Test · container Process</strong><button type="button" data-copy-report="container">Copy config JSON</button></div>
+      <pre>${escapeHtml(JSON.stringify(containerProcess, null, 2))}</pre>
+      <p>This example targets the orasys-mcp project (<code>ROLE_NAME</code>). For the older orasys project, set <code>deployment_playbook</code> to <code>playbooks/run_single_role.yml</code> and <code>role_variable</code> to <code>playbook_name</code>. The selected Local Ansible folder must match.</p>
+    </section>
+    <section><h2>Local Ansible folder</h2>
+      <p>Choose the Ansible project folder under Deployments / Config. Select the project containing <code>inventory</code>, not an individual site. The path is saved on this computer and survives restart; it is not part of the shared Process or workspace backup.</p>
+      <p>The Planner uses <code>details.container.payload_defaults.ENVIRONMENT</code> or <code>details.olam.payload_defaults.ENVIRONMENT</code> from the selected Process. Roles, sites, host names and IP addresses come from its static inventory. Refresh rereads the local files. This is a planning preview; OLAM validation remains the source for approval. Choose one role and one or more sites, review the hosts, then add deployment steps and their extra variables. Save Plan writes the Plan to Queue in Queued state; Start is a separate action. Jira and CX numbers are optional; without a ticket, that system’s validation and update jobs are omitted from the Plan. Enter extra variables in each step’s text area, one NAME: value or NAME=value per line. Values are always stored as text.</p>
+    </section>
+    <section><h2>OLAM Plan targets</h2>
+      <p>In Planner Builder, <strong>Jobs</strong> selects <strong>Separate job per host</strong> (default) or <strong>All hosts in one job</strong>. The selected mode is saved as <code>targets.job_mode: per_host</code> or <code>together</code>. Three hosts and two deployment steps produce six deployment jobs in Per host mode and two in Together mode. Together also works with a partial host selection.</p>
+      <p>In Plan YAML, put deployment inputs under <code>inputs.olam</code>. Existing <code>targets.hosts</code> lists keep creating a separate Queue job per host, role and Plan step. To pass several inventory groups together to one OLAM job, use <code>targets.inventory_groups</code> instead:</p>
+      <pre>targets:
+  roles:
+    - service_role
+  inventory_groups:
+    - group_one
+    - group_two</pre>
+      <p>The complete group list becomes <code>ansible_limit</code>. OLAM/Ansible resolves the machines from its inventory. Each role and Plan step still gets its own job and configured workflow; validation and deployment use the same group list. Use either <code>hosts</code> or <code>inventory_groups</code>, not both. Group names are explicit: <code>sites</code> does not automatically translate site labels into inventory group names.</p>
+    </section>
     <section><h2>One summary and one ZIP per Plan</h2>
       <p>Place this step after the deployments in Process Config <code>steps</code>. One deployment or many: the issue receives one summary comment and one ZIP attachment.</p>
       <div class="report-help-code-heading"><strong>Jira update step</strong><button type="button" data-copy-report="plan">Copy step JSON</button></div>
@@ -91,7 +145,7 @@ function markup() {
       <pre>${escapeHtml(JSON.stringify(cxDeploymentReport, null, 2))}</pre>
     </details>
     <section><h2>When reports run</h2>
-      <p>The step reports preceding completed deployments with an OLAM deployment job ID. Disabled rows are excluded. If a deployment fails, the linear Plan stops before a later report step.</p>
+      <p>The step reports preceding completed OLAM or local container deployments with a deployment job ID. Disabled rows are excluded. If a deployment fails, the linear Plan stops before a later report step.</p>
       <p>Process edits apply to existing Plans after a full Restart Plan, which also starts their deployment steps again. Retrying only the update job reuses confirmed writes (remote IDs or CX HTTP acknowledgements). An uncertain write result requires checking the ticket before retrying.</p>
     </section>
     <p class="report-help-copy-status" role="status" aria-live="polite"></p>

@@ -26,7 +26,8 @@ use modules::connections::{
 use modules::deployments::{
     control_deployment_queue_item, create_deployment_plan, delete_deployment_config_resource,
     delete_deployment_plan, duplicate_deployment_config_resource, get_deployment_config,
-    get_deployment_config_bundle, get_deployment_queue, restore_deployment_config_resource,
+    get_deployment_config_bundle, get_deployment_queue, get_local_ansible_settings,
+    get_local_deployment_inventory, set_local_ansible_folder, restore_deployment_config_resource,
     restore_deployment_credentials, save_deployment_config_resource, update_deployment_plan,
     validate_deployment_config_resource,
 };
@@ -144,6 +145,9 @@ pub fn run() {
             read_ai_skill,
             run_ai_skill,
             get_deployment_config,
+            get_local_ansible_settings,
+            set_local_ansible_folder,
+            get_local_deployment_inventory,
             validate_deployment_config_resource,
             save_deployment_config_resource,
             delete_deployment_config_resource,

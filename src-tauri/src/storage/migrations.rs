@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension};
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 22;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 23;
 
 pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -386,6 +386,13 @@ pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    if current_version < 23 {
+        transaction.execute_batch(
+            "ALTER TABLE deployment_plans ADD COLUMN approve_all INTEGER NOT NULL DEFAULT 0 CHECK(approve_all IN (0, 1));
+             INSERT INTO schema_migrations(version) VALUES (23);",
+        )?;
+    }
+
     transaction.execute(
         "INSERT INTO workspace_metadata(key, value) VALUES ('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -405,6 +412,7 @@ mod tests {
             CREATE TABLE workspace_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE vault_entries(id TEXT PRIMARY KEY);
             CREATE TABLE connection_folders(id TEXT PRIMARY KEY);
+            CREATE TABLE deployment_plans(id TEXT PRIMARY KEY);
             CREATE TABLE connections(id TEXT PRIMARY KEY,credential_reference TEXT REFERENCES vault_entries(id));
             INSERT INTO vault_entries VALUES('existing-account');
             INSERT INTO connections VALUES('assigned','existing-account'),('unassigned',NULL);").unwrap();
@@ -473,6 +481,6 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("schema version");
-        assert_eq!(version, "22");
+        assert_eq!(version, "23");
     }
 }

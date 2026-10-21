@@ -64,7 +64,7 @@ export function mountQuickLauncher(host, { onNavigate, showMessage }) {
       <button class="quick-launch-item is-${escape(c.connectionType)}" draggable="true" data-quick-id="${escape(c.id)}"
         title="${escape(`${c.name}\n${c.target}${c.port ? `:${c.port}` : ""}`)}">${connectionIcon(c.connectionType, c.icon)}<span>${escape(label || c.name)}</span></button>`).join("")}</div>
       <button class="quick-launch-more" aria-label="More quick launch connections" aria-haspopup="menu" title="More connections" hidden>»</button>`
-      : `<button class="quick-launch-empty" title="Right-click a connection to pin it, or drag one here">${svg("ssh")}<span>Quick Launcher · drag connections here</span></button>`;
+      : `<button class="quick-launch-empty" title="Right-click a connection to pin it, or drag one here">${connectionIcon("ssh")}<span>Quick Launcher · drag connections here</span></button>`;
     host.querySelectorAll("[data-quick-id]").forEach((button) => {
       button.addEventListener("click", () => launch(button.dataset.quickId));
       button.addEventListener("contextmenu", (event) => { event.preventDefault(); context(button.dataset.quickId, event.clientX, event.clientY); });

@@ -21,7 +21,7 @@ interfaces.
 ## Development
 
 ```bash
-./scripts/run-dev.sh
+./run-dev.sh
 ```
 
 On Windows, use:
@@ -29,6 +29,10 @@ On Windows, use:
 ```powershell
 .\scripts\run-dev.ps1
 ```
+
+For a local macOS build and GitHub package upload, run `./run-release.sh`.
+It offers the next version, builds and publishes the DMG and automatic update
+to `GateTree-Ops-updates`. No switches are needed. See [release instructions](docs/releases.md).
 
 The development launcher builds `gatetree-ops-agent` first and then starts the GateTree-Ops
 GUI. The Agent is a separate executable and remains alive when the GUI exits.

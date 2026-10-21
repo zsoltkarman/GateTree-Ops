@@ -64,6 +64,14 @@ class ReleaseManifestTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     manifest.create_manifest(Path(temp), version, repo)
 
+    def test_native_mac_feed_never_advertises_the_other_cpu(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            self.assets(directory)
+            for cpu in ('aarch64', 'x86_64'):
+                data = manifest.create_manifest(directory, '0.1.17', 'owner/updates', platform='macos-' + cpu)
+                self.assertEqual(set(data['platforms']), {'darwin-' + cpu})
+
 
 if __name__ == '__main__':
     unittest.main()

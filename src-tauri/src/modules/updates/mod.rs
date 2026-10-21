@@ -8,7 +8,7 @@ use std::{
     },
     time::Duration,
 };
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[derive(Default)]
@@ -73,7 +73,7 @@ pub async fn check_app_update(
         .map_err(|e| e.to_string())?
         .check()
         .await
-        .map_err(|e| format!("Could not check for updates: {e}"))?;
+        .map_err(update_check_error)?;
     let info = UpdateInfo {
         enabled: true,
         current_version,
@@ -87,11 +87,46 @@ pub async fn check_app_update(
     Ok(info)
 }
 
-fn verify_user_installation(executable: &Path, home: &Path) -> Result<(), String> {
-    if !executable.starts_with(home) {
-        return Err("To update without administrator access, install GateTree-Ops in your user folder (macOS: ~/Applications; Windows: your per-user Apps folder).".into());
+fn update_check_error(error: tauri_plugin_updater::Error) -> String {
+    if matches!(error, tauri_plugin_updater::Error::ReleaseNotFound) {
+        "The automatic-update feed is not available. A published release must include a valid latest.json file. Local DMG packages can be installed manually.".into()
+    } else {
+        format!("Could not check for updates: {error}")
     }
-    Ok(())
+}
+
+fn verify_writable_installation(executable: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let installation = executable
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|ext| ext == "app"))
+        .ok_or("The running application is not inside a macOS app bundle.")?;
+    #[cfg(not(target_os = "macos"))]
+    let installation = executable;
+    let directory = installation
+        .parent()
+        .ok_or("The application installation folder is unavailable.")?;
+    let probe = directory.join(format!(
+        ".gatetree-ops-update-check-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe);
+    match result {
+        Ok(file) => {
+            drop(file);
+            std::fs::remove_file(&probe).map_err(|error| {
+                format!("Could not remove the installation write check: {error}")
+            })?;
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "The installation folder {} is not writable: {error}. Allow write access or install GateTree-Ops under ~/Applications on macOS or your per-user Apps folder on Windows.",
+            directory.display()
+        )),
+    }
 }
 
 #[tauri::command]
@@ -118,17 +153,11 @@ pub async fn install_app_update(
     if update.version != expected_version {
         return Err("The available update changed. Review it again.".into());
     }
-    let home = app
-        .path()
-        .home_dir()
-        .map_err(|e| e.to_string())?
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
     let executable = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    verify_user_installation(&executable, &home)?;
+    verify_writable_installation(&executable)?;
     update.timeout = Some(Duration::from_secs(300));
     // Reserve BEFORE downloading: this also blocks other GUI instances from starting work.
     let was_running = agent_ipc::prepare_update().map_err(|e| e.to_string())?;
@@ -188,28 +217,35 @@ pub async fn install_app_update(
 mod tests {
     use super::*;
     #[test]
-    fn updates_require_user_owned_install_location_and_single_operation() {
-        assert!(
-            verify_user_installation(
-                Path::new("/Users/test/Applications/App.app/Contents/MacOS/app"),
-                Path::new("/Users/test")
-            )
-            .is_ok()
-        );
-        assert!(
-            verify_user_installation(
-                Path::new("/Applications/App.app/Contents/MacOS/app"),
-                Path::new("/Users/test")
-            )
-            .is_err()
-        );
-        assert!(
-            verify_user_installation(
-                Path::new("/Users/test-other/App.app"),
-                Path::new("/Users/test")
-            )
-            .is_err()
-        );
+    fn missing_feed_is_explained_without_hiding_other_failures() {
+        let missing = update_check_error(tauri_plugin_updater::Error::ReleaseNotFound);
+        assert!(missing.contains("latest.json"));
+        let offline = update_check_error(tauri_plugin_updater::Error::Io(std::io::Error::other(
+            "offline",
+        )));
+        assert!(offline.contains("offline"));
+        assert!(!offline.contains("latest.json"));
+    }
+
+    #[test]
+    fn updates_accept_writable_installation_outside_home_and_reject_missing_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "gatetree-ops-install-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        #[cfg(target_os = "macos")]
+        let executable = root.join("GateTree-Ops.app/Contents/MacOS/gatetree-ops");
+        #[cfg(not(target_os = "macos"))]
+        let executable = root.join("gatetree-ops.exe");
+        assert!(verify_writable_installation(&executable).is_ok());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(verify_writable_installation(&executable).is_err());
+    }
+
+    #[test]
+    fn only_one_update_operation_can_run() {
         let state = UpdateState::default();
         let operation = state.operation().unwrap();
         assert!(state.operation().is_err());

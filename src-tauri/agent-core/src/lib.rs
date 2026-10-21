@@ -24,7 +24,7 @@ pub use ssh::{
     SshAuthentication, SshConnectRequest, SshHostKey, SshSessionStatus, SshTerminalChunk,
 };
 
-pub const PROTOCOL_VERSION: u16 = 16;
+pub const PROTOCOL_VERSION: u16 = 19;
 const ENDPOINT_FILE: &str = "agent-endpoint.json";
 const LOCK_FILE: &str = "agent.lock";
 const JOB_SETS_FILE: &str = "agent-job-sets.json";
@@ -48,6 +48,8 @@ pub struct AgentJobSubmission {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentJobSetSubmission {
+    #[serde(default)]
+    pub approve_all: bool,
     pub id: String,
     #[serde(default)]
     pub plan_number: i64,
@@ -96,6 +98,8 @@ pub struct AgentJobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentJobSetStatus {
+    #[serde(default)]
+    pub approve_all: bool,
     #[serde(default)]
     pub execution_revision: u32,
     #[serde(default)]
@@ -168,6 +172,8 @@ enum AgentAction {
     RetryJob {
         job_id: String,
         credentials: Vec<AgentCredential>,
+        #[serde(default)]
+        recover_unconfirmed_jira_report: bool,
     },
     SetJobEnabled {
         job_id: String,
@@ -180,6 +186,10 @@ enum AgentAction {
     },
     StopJobSet {
         job_set_id: String,
+    },
+    SetApproveAll {
+        job_set_id: String,
+        enabled: bool,
     },
     ApproveJob {
         job_id: String,
@@ -536,9 +546,18 @@ pub fn submit_job_set(
 }
 
 pub fn retry_job(job_id: String, credentials: Vec<AgentCredential>) -> Result<(), AgentIpcError> {
+    retry_job_with_report_recovery(job_id, credentials, false)
+}
+
+pub fn retry_job_with_report_recovery(
+    job_id: String,
+    credentials: Vec<AgentCredential>,
+    recover_unconfirmed_jira_report: bool,
+) -> Result<(), AgentIpcError> {
     simple_request(AgentAction::RetryJob {
         job_id,
         credentials,
+        recover_unconfirmed_jira_report,
     })
 }
 
@@ -572,6 +591,12 @@ pub fn set_job_enabled(job_id: String, enabled: bool) -> Result<AgentJobSetStatu
 
 pub fn deny_job(job_id: String) -> Result<(), AgentIpcError> {
     simple_request(AgentAction::DenyJob { job_id })
+}
+
+pub fn set_approve_all(job_set_id: String, enabled: bool) -> Result<AgentJobSetStatus, AgentIpcError> {
+    let endpoint = read_endpoint(&AgentPaths::discover()?)?;
+    let response = request(&endpoint, AgentAction::SetApproveAll { job_set_id, enabled })?;
+    response_value(response, |response| response.job_set, "Agent job set")
 }
 
 pub fn approve_job(job_id: String) -> Result<AgentJobSetStatus, AgentIpcError> {
@@ -631,6 +656,7 @@ impl JobSetManager {
                 .iter_mut()
                 .find(|job| matches!(job.status.as_str(), "running" | "awaiting_approval"))
             {
+                if job.driver == "container" { drivers::container::stop_orphan(&set.process_definition, job); }
                 job.status = "stopped".into();
                 append_job_log(
                     &mut job.log,
@@ -671,6 +697,7 @@ impl JobSetManager {
             ));
         }
         let mut job_set = AgentJobSetStatus {
+            approve_all: submission.approve_all,
             execution_revision: 3,
             credentials_required: false,
             id: submission.id,
@@ -684,7 +711,7 @@ impl JobSetManager {
                 .jobs
                 .into_iter()
                 .map(|job| {
-                    let phase = (job.driver == "olam" && job.action != "validate").then(|| {
+                    let phase = (matches!(job.driver.as_str(), "olam" | "container") && job.action != "validate").then(|| {
                         if job.action == "deploy" {
                             "deployment".into()
                         } else {
@@ -813,7 +840,7 @@ impl JobSetManager {
             job.log.clear();
             job.validation_job_id = None;
             job.deployment_job_id = None;
-            job.phase = if job.driver == "olam" && job.action != "validate" {
+            job.phase = if matches!(job.driver.as_str(), "olam" | "container") && job.action != "validate" {
                 Some(
                     if job.action == "deploy" {
                         "deployment"
@@ -833,6 +860,35 @@ impl JobSetManager {
         Ok(result)
     }
 
+    fn retry_unconfirmed_jira_report(
+        &mut self,
+        job_id: &str,
+        credentials: Vec<AgentCredential>,
+    ) -> Result<AgentJobSetStatus, AgentIpcError> {
+        let job = self.job_sets.iter().flat_map(|set| &set.jobs)
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| AgentIpcError::InvalidJobSet("job was not found".into()))?;
+        if job.driver != "jira" || job.action != "update"
+            || !matches!(job.status.as_str(), "failed" | "stopped" | "warning")
+            || !job.report_progress.values().any(|value| value == "sending") {
+            return Err(AgentIpcError::InvalidJobSet(
+                "Only a stopped or failed Jira report with an unconfirmed operation can be recovered.".into(),
+            ));
+        }
+        // Validate credentials and preceding steps before changing any checkpoints.
+        let retried = self.retry(job_id, credentials)?;
+        let set = self.job_sets.iter_mut().find(|set| set.id == retried.id).unwrap();
+        let job = set.jobs.iter_mut().find(|job| job.id == job_id).unwrap();
+        for value in job.report_progress.values_mut() {
+            if value == "sending" { *value = "retryable".into(); }
+        }
+        append_job_log(&mut job.log,
+            "Operator checked Jira and explicitly authorized resending the missing, unconfirmed report operations. Confirmed operations are preserved.");
+        let result = set.clone();
+        self.persist()?;
+        Ok(result)
+    }
+
     fn list(&self) -> Vec<AgentJobSetStatus> {
         self.job_sets
             .iter()
@@ -843,7 +899,7 @@ impl JobSetManager {
                     && set
                         .jobs
                         .iter()
-                        .any(|job| matches!(job.driver.as_str(), "jira" | "cx" | "olam"));
+                        .any(|job| matches!(job.driver.as_str(), "jira" | "cx" | "olam" | "container"));
                 set
             })
             .collect()
@@ -924,6 +980,28 @@ impl JobSetManager {
         Ok(result)
     }
 
+    fn set_approve_all(&mut self, id: &str, enabled: bool) -> Result<AgentJobSetStatus, AgentIpcError> {
+        let index = self.job_sets.iter().position(|set| set.id == id)
+            .ok_or_else(|| AgentIpcError::InvalidJobSet("job set was not found".into()))?;
+        let set = &self.job_sets[index];
+        if enabled && set.execution_revision != 3 {
+            return Err(AgentIpcError::InvalidJobSet("Restart the Plan to regenerate jobs from Process steps.".into()));
+        }
+        if enabled && matches!(set.status.as_str(), "running" | "awaiting_approval")
+            && !self.credentials.contains_key(id) {
+            return Err(AgentIpcError::InvalidJobSet("Unlock KeePass to restore Agent credentials first.".into()));
+        }
+        if enabled && set.status == "awaiting_approval" {
+            let job_id = set.jobs.iter().find(|job| job.status == "awaiting_approval")
+                .ok_or_else(|| AgentIpcError::InvalidJobSet("No deployment is awaiting approval.".into()))?.id.clone();
+            self.approve(&job_id)?;
+        }
+        self.job_sets[index].approve_all = enabled;
+        let result = self.job_sets[index].clone();
+        self.persist()?;
+        Ok(result)
+    }
+
     fn approve(&mut self, job_id: &str) -> Result<AgentJobSetStatus, AgentIpcError> {
         let job_set = self
             .job_sets
@@ -941,11 +1019,11 @@ impl JobSetManager {
             .find(|job| job.id == job_id)
             .expect("job was located above");
         if job.status != "awaiting_approval"
-            || job.driver != "olam"
+            || !matches!(job.driver.as_str(), "olam" | "container")
             || !matches!(job.action.as_str(), "deploy" | "validate_deploy")
         {
             return Err(AgentIpcError::InvalidJobSet(
-                "only an OLAM deployment awaiting approval can be approved".into(),
+                "only an Ansible deployment awaiting approval can be approved".into(),
             ));
         }
         if !self.credentials.contains_key(&job_set.id) {
@@ -1054,16 +1132,61 @@ fn serve(
     ssh_sessions: &mut ssh::SshSessionManager,
     job_sets: Arc<Mutex<JobSetManager>>,
 ) -> Result<(), AgentIpcError> {
+    // Keep authenticated health checks responsive while SSH handshakes or
+    // authentication occupy the serial command worker.
+    let stopping = std::sync::atomic::AtomicBool::new(false);
+    thread::scope(|scope| {
+        let (sender, requests) = std::sync::mpsc::channel();
+        let stopping_ref = &stopping;
+        let acceptor = scope.spawn(move || -> Result<(), AgentIpcError> {
+            for incoming in listener.incoming() {
+                if stopping_ref.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                let mut stream = match incoming {
+                    Ok(stream) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if !stream.peer_addr().is_ok_and(|address| address.ip().is_loopback()) {
+                    continue;
+                }
+                if stream.set_read_timeout(Some(Duration::from_secs(5))).is_err()
+                    || stream.set_write_timeout(Some(Duration::from_secs(5))).is_err() {
+                    continue;
+                }
+                let request = read_request(&mut stream);
+                if request.as_ref().is_ok_and(|request| {
+                    request.protocol_version == PROTOCOL_VERSION
+                        && request.token == endpoint.token
+                        && matches!(request.action, AgentAction::Ping)
+                }) {
+                    // A caller may already have timed out and closed its socket.
+                    let _ = write_response(&mut stream, &success_response());
+                } else if sender.send((stream, request)).is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        let result = serve_requests(requests, endpoint, ssh_sessions, job_sets);
+        stopping.store(true, std::sync::atomic::Ordering::Release);
+        // Wake accept() after Shutdown or a worker error so the scoped thread exits.
+        let _ = TcpStream::connect_timeout(&endpoint.address, Duration::from_millis(600));
+        let accept_result = acceptor.join().expect("Agent acceptor thread");
+        result.and(accept_result)
+    })
+}
+
+fn serve_requests(
+    requests: std::sync::mpsc::Receiver<(TcpStream, Result<AgentRequest, AgentIpcError>)>,
+    endpoint: &AgentEndpoint,
+    ssh_sessions: &mut ssh::SshSessionManager,
+    job_sets: Arc<Mutex<JobSetManager>>,
+) -> Result<(), AgentIpcError> {
     let mut update_reserved = false;
     let mut reservation_deadline = Instant::now();
-    for incoming in listener.incoming() {
-        let mut stream = incoming?;
-        if !stream.peer_addr()?.ip().is_loopback() {
-            continue;
-        }
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let request = read_request(&mut stream);
+    for (mut stream, request) in requests {
         if update_reserved && Instant::now() >= reservation_deadline {
             update_reserved = false;
         }
@@ -1235,10 +1358,16 @@ fn serve(
                         AgentAction::RetryJob {
                             job_id,
                             credentials,
+                            recover_unconfirmed_jira_report,
                         } => {
                             let retried = {
                                 let mut manager = job_sets.lock().expect("job set lock");
-                                manager.retry(&job_id, credentials).map(|set| {
+                                let result = if recover_unconfirmed_jira_report {
+                                    manager.retry_unconfirmed_jira_report(&job_id, credentials)
+                                } else {
+                                    manager.retry(&job_id, credentials)
+                                };
+                                result.map(|set| {
                                     let credentials = manager
                                         .credentials
                                         .get(&set.id)
@@ -1303,6 +1432,27 @@ fn serve(
                                 Err(error) => (error_response(&error.to_string()), false),
                             }
                         }
+                        AgentAction::SetApproveAll { job_set_id, enabled } => {
+                            let updated = {
+                                let mut manager = job_sets.lock().expect("job set lock");
+                                let waiting = manager.job_sets.iter().any(|set| set.id == job_set_id && set.status == "awaiting_approval");
+                                manager.set_approve_all(&job_set_id, enabled).map(|set| {
+                                    let credentials = manager.credentials.get(&set.id).cloned().unwrap_or_default();
+                                    (set, credentials, waiting && enabled)
+                                })
+                            };
+                            match updated {
+                                Ok((job_set, credentials, resume)) => {
+                                    if resume {
+                                        spawn_job_set_execution(job_sets.clone(), job_set.id.clone(), credentials);
+                                    }
+                                    let mut response = success_response();
+                                    response.job_set = Some(job_set);
+                                    (response, false)
+                                }
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
                         AgentAction::ApproveJob { job_id } => {
                             let approved = {
                                 let mut manager = job_sets.lock().expect("job set lock");
@@ -1335,7 +1485,8 @@ fn serve(
             Ok(_) => (error_response("IPC authentication failed"), false),
             Err(error) => (error_response(&error.to_string()), false),
         };
-        write_response(&mut stream, &response)?;
+        // Transport failures belong to this client, not to the Agent process.
+        let _ = write_response(&mut stream, &response);
         if shutdown {
             return Ok(());
         }
@@ -1394,7 +1545,7 @@ fn spawn_job_set_execution(
                 if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
                     && let Some(active) = set.jobs.iter_mut().find(|item| item.id == job.id)
                 {
-                    if job.driver == "olam" && job.action == "deploy" {
+                    if matches!(job.driver.as_str(), "olam" | "container") && job.action == "deploy" {
                         if job.phase.as_deref() == Some("deployment") {
                             active.deployment_job_id = None;
                         } else {
@@ -1484,6 +1635,11 @@ fn spawn_job_set_execution(
                     &credentials,
                     &on_started,
                     &on_output,
+                    &|| {
+                        let manager = job_sets.lock().expect("job set lock");
+                        manager.execution_generations.get(&job_set_id) != Some(&generation)
+                            || !manager.job_sets.iter().any(|set| set.id == job_set_id && set.status == "running")
+                    },
                 )
             };
             let mut manager = job_sets.lock().expect("job set lock");
@@ -1519,6 +1675,7 @@ fn spawn_job_set_execution(
                     set.jobs[index].phase = Some("deployment".into());
                     append_job_log(&mut set.jobs[index].log, &log);
                     set.status = "awaiting_approval".into();
+                    apply_automatic_approval(set, index);
                 }
                 Ok(drivers::DriverOutcome::Warning(log)) => {
                     set.jobs[index].status = "warning".into();
@@ -1543,20 +1700,19 @@ fn spawn_job_set_execution(
     });
 }
 
-// Activation is the only place that gates a deployment. Approve starts the
-// already selected deploy action; it never launches an implicit validation.
+// Approve starts the selected deployment; validation steps still run in order.
 fn activate_job(set: &mut AgentJobSetStatus, index: usize) {
     let Some(index) = (index..set.jobs.len()).find(|&i| set.jobs[i].status != "disabled") else {
         set.status = "completed".into();
         return;
     };
-    if set.jobs[index].driver == "olam" && set.jobs[index].action == "deploy" {
+    if matches!(set.jobs[index].driver.as_str(), "olam" | "container") && set.jobs[index].action == "deploy" {
         let deployment = &set.jobs[index];
         let validation = set.jobs[..index]
             .iter()
             .rev()
             .find(|candidate| {
-                candidate.driver == "olam"
+                candidate.driver == deployment.driver
                     && candidate.action == "validate_deployment"
                     && candidate.status == "completed"
                     && candidate.target == deployment.target
@@ -1582,8 +1738,19 @@ fn activate_job(set: &mut AgentJobSetStatus, index: usize) {
         }
         append_job_log(&mut job.log, "Deployment awaiting operator approval.");
         set.status = "awaiting_approval".into();
+        apply_automatic_approval(set, index);
     } else {
         set.jobs[index].status = "running".into();
+        set.status = "running".into();
+    }
+}
+
+fn apply_automatic_approval(set: &mut AgentJobSetStatus, index: usize) {
+    if set.approve_all {
+        let job = &mut set.jobs[index];
+        job.status = "running".into();
+        job.phase = Some("deployment".into());
+        append_job_log(&mut job.log, "Deployment automatically approved: Approve all is enabled for this Plan.");
         set.status = "running".into();
     }
 }
@@ -1599,7 +1766,7 @@ fn record_olam_launch(job: &mut AgentJobStatus, phase: &str, external_id: i64) {
     }
     append_job_log(
         &mut job.log,
-        &format!("OLAM {phase} started as Ansible job {external_id}."),
+        &format!("{} {phase} started as Ansible job {external_id}.", if job.driver == "container" { "Container" } else { "OLAM" }),
     );
 }
 
@@ -2051,6 +2218,7 @@ mod tests {
 
     fn olam_submission(actions: &[&str]) -> AgentJobSetSubmission {
         AgentJobSetSubmission {
+            approve_all: false,
             id: "plan".into(),
             plan_number: 1,
             name: "Plan".into(),
@@ -2074,6 +2242,52 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn approve_all_can_be_enabled_and_revoked_during_a_plan() {
+        let path = env::temp_dir().join(format!("gatetree-approve-all-{}.json", uuid::Uuid::new_v4()));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let mut submission = olam_submission(&["validate_deployment", "deploy", "deploy"]);
+        submission.approve_all = true;
+        let set = manager.submit(submission, false).unwrap();
+        assert_eq!(set.jobs[0].status, "running", "validation must run first");
+        assert_eq!(set.jobs[1].status, "queued");
+        manager.set_approve_all("plan", false).unwrap();
+        manager.job_sets[0].jobs[0].status = "completed".into();
+        activate_job(&mut manager.job_sets[0], 1);
+        assert_eq!(manager.job_sets[0].status, "awaiting_approval");
+        assert!(manager.set_approve_all("plan", true).is_err(), "credentials are required");
+        assert!(!manager.job_sets[0].approve_all);
+        manager.credentials.insert("plan".into(), vec![]);
+        let resumed = manager.set_approve_all("plan", true).unwrap();
+        assert_eq!(resumed.jobs[1].status, "running");
+        assert!(resumed.approve_all);
+        let saved: Vec<AgentJobSetStatus> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved[0].approve_all);
+        let revoked = manager.set_approve_all("plan", false).unwrap();
+        assert_eq!(revoked.jobs[1].status, "running", "revocation must not stop an approved deployment");
+        manager.job_sets[0].jobs[1].status = "completed".into();
+        activate_job(&mut manager.job_sets[0], 2);
+        assert_eq!(manager.job_sets[0].jobs[2].status, "awaiting_approval");
+        assert!(manager.set_approve_all("missing", true).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn approve_all_automatically_activates_explicit_container_deployments() {
+        let path = env::temp_dir().join(format!("gatetree-auto-container-{}.json", uuid::Uuid::new_v4()));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let mut submission = olam_submission(&["deploy", "deploy"]);
+        submission.approve_all = true;
+        for job in &mut submission.jobs { job.driver = "container".into(); }
+        let set = manager.submit(submission, false).unwrap();
+        assert_eq!(set.status, "running");
+        assert_eq!(set.jobs[0].status, "running");
+        assert_eq!(set.jobs[0].phase.as_deref(), Some("deployment"));
+        assert!(set.jobs[0].log.contains("automatically approved"));
+        assert_eq!(set.jobs[1].status, "queued");
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -2106,6 +2320,7 @@ mod tests {
                 &[],
                 &|_, _| panic!("must not launch"),
                 &|_| panic!("must not execute"),
+                &|| false,
             );
             match error {
                 Err(error) => {
@@ -2161,6 +2376,22 @@ mod tests {
         let all_disabled = manager.submit(submission, true).unwrap();
         assert_eq!(all_disabled.status, "completed");
         assert!(all_disabled.jobs.iter().all(|job| job.status == "disabled"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn container_deploy_approval_uses_the_existing_plan_gate() {
+        let path=env::temp_dir().join(format!("gatetree-container-approval-{}.json",uuid::Uuid::new_v4()));
+        let mut manager=JobSetManager::load(path.clone()).unwrap();
+        let mut submission=olam_submission(&["deploy"]);
+        submission.jobs[0].driver="container".into();
+        let set=manager.submit(submission,false).unwrap();
+        assert_eq!(set.status,"awaiting_approval");
+        manager.restore_credentials("plan",vec![AgentCredential{reference:"deploy".into(),username:"user".into(),password:"test-only".into()}]).unwrap();
+        let approved=manager.approve("job-0").unwrap();
+        assert_eq!(approved.jobs[0].phase.as_deref(),Some("deployment"));
+        assert_eq!(approved.status,"running");
+        manager.stop("plan").unwrap();assert_eq!(manager.job_sets[0].status,"stopped");
         fs::remove_file(path).unwrap();
     }
 
@@ -2396,6 +2627,20 @@ mod tests {
 
     #[test]
     fn combined_workflow_finishes_each_host_before_validating_the_next() {
+        run_combined_workflow(false, false);
+    }
+
+    #[test]
+    fn combined_workflow_preserves_full_inventory_group_limits_through_approval() {
+        run_combined_workflow(true, false);
+    }
+
+    #[test]
+    fn approve_all_combined_workflow_validates_and_deploys_every_host_without_manual_approval() {
+        run_combined_workflow(false, true);
+    }
+
+    fn run_combined_workflow(grouped: bool, automatic: bool) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2423,7 +2668,25 @@ mod tests {
                         length = value.trim().parse::<usize>().unwrap();
                     }
                 }
-                reader.read_exact(&mut vec![0; length]).unwrap();
+                let mut payload_bytes = vec![0; length];
+                reader.read_exact(&mut payload_bytes).unwrap();
+                if index % 4 == 1 {
+                    let launch: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+                    let vars: serde_json::Value =
+                        serde_json::from_str(launch["extra_vars"].as_str().unwrap()).unwrap();
+                    let expected = if grouped {
+                        if index < 8 {
+                            serde_json::json!(["group-one", "group-two"])
+                        } else {
+                            serde_json::json!(["group-three", "group-four"])
+                        }
+                    } else if index < 8 {
+                        serde_json::json!(["host-1"])
+                    } else {
+                        serde_json::json!(["host-2"])
+                    };
+                    assert_eq!(vars["ansible_limit"], expected);
+                }
                 let template = if index % 8 < 4 { 1 } else { 2 };
                 let external_id = 111 + index / 4;
                 let body = match index % 4 {
@@ -2474,11 +2737,20 @@ mod tests {
             "validate_deploy",
             "validate_deploy",
         ]);
+        submission.approve_all = automatic;
         submission.jobs[1].disabled = true;
         submission.jobs[3].disabled = true;
+        submission.jobs[0].payload =
+            Some(r#"{"ansible_limit":["host-1"],"playbook_name":"service"}"#.into());
         submission.jobs[2].target = Some("host-2".into());
         submission.jobs[2].payload =
             Some(r#"{"ansible_limit":["host-2"],"playbook_name":"service"}"#.into());
+        if grouped {
+            submission.jobs[0].target = Some("group-one, group-two".into());
+            submission.jobs[0].payload = Some(serde_json::json!({"ansible_limit":["group-one","group-two"],"playbook_name":"service"}).to_string());
+            submission.jobs[2].target = Some("group-three, group-four".into());
+            submission.jobs[2].payload = Some(serde_json::json!({"ansible_limit":["group-three","group-four"],"playbook_name":"service"}).to_string());
+        }
         submission.process_definition = serde_json::json!({"details":{"olam":{
             "url": format!("http://{address}"), "account":"api", "payload_defaults":{"ENVIRONMENT":"test"},
             "validation_template_id":1, "validation_template_job":"Validate",
@@ -2513,36 +2785,38 @@ mod tests {
                 thread::sleep(Duration::from_millis(10));
             }
         };
-        let awaiting = await_status("awaiting_approval");
-        assert_eq!(requests.load(Ordering::SeqCst), 4);
-        assert_eq!(awaiting.jobs.len(), 4);
-        assert_eq!(awaiting.jobs[0].status, "awaiting_approval");
-        assert_eq!(awaiting.jobs[0].validation_job_id, Some(111));
-        assert_eq!(awaiting.jobs[0].deployment_job_id, None);
-        assert_eq!(awaiting.jobs[2].status, "queued");
-        assert_eq!(awaiting.jobs[2].validation_job_id, None);
-        manager.lock().unwrap().approve("job-0").unwrap();
-        spawn_job_set_execution(manager.clone(), "plan".into(), credentials.clone());
-        // Wait for the second host's approval, not the first host's old state.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let second = loop {
-            let set = manager.lock().unwrap().job_sets[0].clone();
-            if set.jobs[2].status == "awaiting_approval" {
-                break set;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "second host did not reach approval"
-            );
-            thread::sleep(Duration::from_millis(10));
-        };
-        assert_eq!(requests.load(Ordering::SeqCst), 12);
-        assert_eq!(second.jobs[0].status, "completed");
-        assert_eq!(second.jobs[0].deployment_job_id, Some(112));
-        assert_eq!(second.jobs[2].validation_job_id, Some(113));
-        assert_eq!(second.jobs[2].deployment_job_id, None);
-        manager.lock().unwrap().approve("job-2").unwrap();
-        spawn_job_set_execution(manager.clone(), "plan".into(), credentials);
+        if !automatic {
+            let awaiting = await_status("awaiting_approval");
+            assert_eq!(requests.load(Ordering::SeqCst), 4);
+            assert_eq!(awaiting.jobs.len(), 4);
+            assert_eq!(awaiting.jobs[0].status, "awaiting_approval");
+            assert_eq!(awaiting.jobs[0].validation_job_id, Some(111));
+            assert_eq!(awaiting.jobs[0].deployment_job_id, None);
+            assert_eq!(awaiting.jobs[2].status, "queued");
+            assert_eq!(awaiting.jobs[2].validation_job_id, None);
+            manager.lock().unwrap().approve("job-0").unwrap();
+            spawn_job_set_execution(manager.clone(), "plan".into(), credentials.clone());
+            // Wait for the second host's approval, not the first host's old state.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let second = loop {
+                let set = manager.lock().unwrap().job_sets[0].clone();
+                if set.jobs[2].status == "awaiting_approval" {
+                    break set;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "second host did not reach approval"
+                );
+                thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(requests.load(Ordering::SeqCst), 12);
+            assert_eq!(second.jobs[0].status, "completed");
+            assert_eq!(second.jobs[0].deployment_job_id, Some(112));
+            assert_eq!(second.jobs[2].validation_job_id, Some(113));
+            assert_eq!(second.jobs[2].deployment_job_id, None);
+            manager.lock().unwrap().approve("job-2").unwrap();
+            spawn_job_set_execution(manager.clone(), "plan".into(), credentials);
+        }
         let completed = await_status("completed");
         assert_eq!(requests.load(Ordering::SeqCst), 16);
         assert_eq!(completed.jobs.len(), 4);
@@ -2561,6 +2835,7 @@ mod tests {
         ));
         let mut manager = JobSetManager::load(path.clone()).unwrap();
         let submission = AgentJobSetSubmission {
+            approve_all: false,
             id: "plan".into(),
             plan_number: 3,
             name: "Plan".into(),
@@ -2618,6 +2893,7 @@ mod tests {
         manager
             .submit(
                 AgentJobSetSubmission {
+                    approve_all: false,
                     id: "plan".into(),
                     plan_number: 1,
                     name: "Plan".into(),
@@ -2704,6 +2980,7 @@ mod tests {
         manager
             .submit(
                 AgentJobSetSubmission {
+                    approve_all: false,
                     id: "plan".into(),
                     plan_number: 1,
                     name: "Plan".into(),
@@ -2849,6 +3126,68 @@ mod tests {
     }
 
     #[test]
+    fn health_checks_remain_responsive_during_a_slow_ssh_handshake() {
+        let runtime = env::temp_dir().join(format!("gatetree-slow-ssh-{}", uuid::Uuid::new_v4()));
+        let paths = AgentPaths::at(runtime.clone());
+        let server_paths = paths.clone();
+        let server = thread::spawn(move || run_server_at(server_paths));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let endpoint = loop {
+            if let Ok(endpoint) = read_endpoint(&paths) {
+                break endpoint;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        };
+        let slow_ssh = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = slow_ssh.local_addr().unwrap();
+        let scan_endpoint = endpoint.clone();
+        let scan = thread::spawn(move || request(&scan_endpoint, AgentAction::ScanSshHostKey {
+            host: address.ip().to_string(), port: address.port(),
+        }));
+        // Accept the SSH connection but withhold its banner until after Ping.
+        let (connection, _) = slow_ssh.accept().unwrap();
+        let started = Instant::now();
+        let ping = request(&endpoint, AgentAction::Ping);
+        drop(connection);
+        let scan = scan.join().unwrap().unwrap();
+        assert!(!scan.ok);
+        assert!(ping.unwrap().running, "SSH handshakes must not make the Agent appear stopped");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(request(&endpoint, AgentAction::ListSshSessions).unwrap().ok);
+        assert!(request(&endpoint, AgentAction::Shutdown).unwrap().ok);
+        server.join().unwrap().unwrap();
+        fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reset_ipc_client_does_not_stop_the_agent() {
+        use std::os::fd::AsRawFd;
+        let runtime = env::temp_dir().join(format!("gatetree-reset-client-{}", uuid::Uuid::new_v4()));
+        let paths = AgentPaths::at(runtime.clone());
+        let server_paths = paths.clone();
+        let server = thread::spawn(move || run_server_at(server_paths));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let endpoint = loop {
+            if let Ok(endpoint) = read_endpoint(&paths) { break endpoint; }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        };
+        let mut client = TcpStream::connect(endpoint.address).unwrap();
+        let linger = libc::linger { l_onoff: 1, l_linger: 0 };
+        // Force the same connection reset as a caller abandoning a timed-out request.
+        assert_eq!(unsafe { libc::setsockopt(client.as_raw_fd(), libc::SOL_SOCKET, libc::SO_LINGER,
+            &linger as *const _ as *const libc::c_void, std::mem::size_of_val(&linger) as libc::socklen_t) }, 0);
+        client.write_all(b"invalid request\n").unwrap();
+        drop(client);
+        assert!(request(&endpoint, AgentAction::ListSshSessions).unwrap().ok);
+        assert!(request(&endpoint, AgentAction::Shutdown).unwrap().ok);
+        server.join().unwrap().unwrap();
+        fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[test]
     fn serves_authenticated_status_and_shutdown_requests() {
         let runtime =
             env::temp_dir().join(format!("gatetree-ops-agent-test-{}", uuid::Uuid::new_v4()));
@@ -2875,6 +3214,7 @@ mod tests {
         .unwrap();
         assert!(sessions.is_empty());
         let submission = AgentJobSetSubmission {
+            approve_all: false,
             id: "plan-1".into(),
             plan_number: 1,
             name: "Test plan".into(),
@@ -2945,6 +3285,7 @@ mod tests {
             request(
                 &endpoint,
                 AgentAction::RetryJob {
+                    recover_unconfirmed_jira_report: false,
                     job_id: "job-1".into(),
                     credentials: vec![]
                 }
@@ -2988,4 +3329,9 @@ mod tests {
         assert!(matches!(status_at(&paths), Err(AgentIpcError::NotRunning)));
         let _ = fs::remove_dir_all(runtime);
     }
+}
+
+/// Validate a local Ansible container Process without launching a container.
+pub fn validate_container_config(config: &serde_json::Value) -> Result<(), String> {
+    drivers::container::validate_config(config)
 }

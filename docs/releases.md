@@ -1,5 +1,31 @@
 # Releases and administrator-free updates
 
+## Development and local Mac release commands
+
+Run `./run-dev.sh` from the repository root to build and start the debug UI.
+The running Agent is reused.
+
+Run `./run-release.sh` to choose a release version, run checks, build a native
+Developer ID signed Mac DMG and publish it to `GateTree-Ops-updates`.
+No switches are needed: press Enter to accept the offered version, or type another.
+Authenticate once using `gh auth login`. The default version is the next patch
+after both the checkout version and existing local packages.
+An empty updates repository is initialized with a binary-download README before
+the first release is uploaded or published; GitHub needs a commit for release tags.
+
+```sh
+./run-release.sh
+```
+
+`--upload-only` resumes an existing local package without rebuilding.
+Publishing is the default; `--draft` uploads for review instead. Published versions cannot be
+overwritten. Only the DMG, SHA-256 checksum, signed updater archive, build metadata,
+release notes and `latest.json` are uploaded. This command does not commit or push
+source or change the debug version. These local packages are not notarized.
+Publishing activates automatic updates for the CPU architecture built on this
+Mac; the other Mac architecture and Windows are not advertised. For a notarized
+universal automatic-update release, use `scripts/release-macos.sh` below.
+
 GateTree-Ops uses its own Tauri update signing key and public binary feed:
 `https://github.com/zsoltkarman/GateTree-Ops-updates/releases/latest/download/latest.json`.
 The old GateTree Sparkle feed, identity and signing key remain separate.
@@ -12,7 +38,9 @@ The dialog shows the version and release notes, with **Later** and **Update and
 restart**. Downloads and signatures are checked before application replacement.
 Offline automatic checks are quiet; manual checks show errors.
 
-Installations must live inside the user's home directory:
+The installation directory must be writable by the current user. The app checks
+actual write access; a writable `/Applications` installation is supported on
+macOS. If you do not have write access, use a per-user installation:
 
 - macOS: open the DMG, create `~/Applications` if necessary, and copy
   `GateTree-Ops.app` there. Finder → Go → Go to Folder → `~/Applications`.
@@ -112,6 +140,25 @@ for existing users. A draft is the final review point before distribution.
 
 ## Local builds
 
+For a local native-architecture DMG matching the old GateTree packaging flow:
+
+```sh
+./scripts/package-macos-local.sh 0.1.16
+```
+
+This stages the source separately, builds the GUI and Agent, signs both the app
+and DMG using the available Developer ID identity, and verifies the bundled
+Agent. Output is under `dist/local/0.1.16/`, including a signed updater archive
+and native-CPU `latest.json`. It does not notarize or upload. macOS may require manual approval to open the local
+package. Use the notarized release workflow below for distribution to coworkers.
+
+Docker on this Mac runs Linux containers. The supported release path builds the
+DMG on macOS and the MSI on Windows (a native host, VM or Actions runner).
+Tauri supports cross-compiling a Windows NSIS Setup EXE from Linux/macOS with
+additional tooling, but that does not produce the MSI or a macOS DMG. The
+existing Windows script builds and verifies both installers on Windows.
+See the [Tauri Windows cross-compilation documentation](https://v2.tauri.app/distribute/windows-installer/#build-windows-apps-on-linux-and-macos).
+
 The same scripts work manually on native build hosts with Rust, Tauri CLI v2 and
 platform build prerequisites. Set `TAURI_SIGNING_PRIVATE_KEY` to the key file or
 its content (defaults to the local path above). For macOS also configure the
@@ -163,6 +210,8 @@ One-time prerequisites:
 - Rustup with a working Rust toolchain. The build installs the Apple Silicon
   and Intel targets. Homebrew Rust alone currently lacks the Intel target on
   this Mac; install/configure Rustup before attempting a universal release.
+  A separate local release toolchain can be selected with `CARGO_HOME` and
+  `RUSTUP_HOME` in `release.env`, without changing the debug shell's Rust setup.
 - Tauri CLI v2 and the local updater key described above.
 - The Developer ID certificate must have an accessible private key in Keychain.
   The script selects it automatically when exactly one Developer ID identity exists.

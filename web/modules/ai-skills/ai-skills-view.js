@@ -27,8 +27,10 @@ export async function mountAiSkillsView(root, detail = {}, { onCatalogChange = (
     runOutput: "",
     runStatus: "",
     onCatalogChange,
+    mountId: crypto.randomUUID(),
+    runRequestId: null,
   };
-  root.innerHTML = '<div class="ai-skills-loading">Loading skills…</div>';
+  root.innerHTML = `<div class="ai-skills-loading" data-ai-skills-mount="${state.mountId}">Loading skills…</div>`;
   try {
     let snapshot = await getAiSkills();
     if (snapshot.libraries.length && !snapshot.skills.length) {
@@ -47,6 +49,7 @@ export async function mountAiSkillsView(root, detail = {}, { onCatalogChange = (
       ? detail.skillId
       : state.skills[0]?.id ?? null;
     if (state.selectedId) state.document = await readAiSkill(state.selectedId);
+    if (!isSkillViewMounted(root, state)) return;
     state.onCatalogChange(state.libraries, state.skills, state.groups);
     render(root, state);
     if (detail.libraryId) {
@@ -57,17 +60,36 @@ export async function mountAiSkillsView(root, detail = {}, { onCatalogChange = (
       }
     }
   } catch (cause) {
-    root.innerHTML = `<div class="ai-skills-error">${escapeHtml(cause)}</div>`;
+    if (isSkillViewMounted(root, state)) root.innerHTML = `<div class="ai-skills-error">${escapeHtml(cause)}</div>`;
+  }
+}
+
+function isSkillViewMounted(root, state) {
+  return root.isConnected && root.querySelector("[data-ai-skills-mount]")?.dataset.aiSkillsMount === state.mountId;
+}
+
+function appendSkillOutput(root, state, chunk) {
+  const pre = root.querySelector(".skill-run-output");
+  const follow = !pre || pre.scrollHeight - pre.clientHeight - pre.scrollTop < 24;
+  if (!state.runOutput && pre) pre.textContent = "";
+  state.runOutput += chunk;
+  if (pre) {
+    pre.append(document.createTextNode(chunk));
+    if (follow) pre.scrollTop = pre.scrollHeight;
   }
 }
 
 function render(root, state) {
+  const oldOutput = root.querySelector(".skill-run-output");
+  const position = oldOutput ? { top: oldOutput.scrollTop, follow: oldOutput.scrollHeight - oldOutput.clientHeight - oldOutput.scrollTop < 24 } : null;
   root.innerHTML = `
-    <div class="ai-skills-module">
+    <div class="ai-skills-module" data-ai-skills-mount="${state.mountId}">
       ${state.section === "config" ? configView(state) : skillsView(state)}
       ${state.message ? `<p class="ai-skills-toast${state.isError ? " is-error" : ""}">${escapeHtml(state.message)}</p>` : ""}
     </div>`;
   bindEvents(root, state);
+  const output = root.querySelector(".skill-run-output");
+  if (output && position) output.scrollTop = position.follow ? output.scrollHeight : position.top;
 }
 
 function configView(state) {
@@ -117,7 +139,7 @@ function skillsView(state) {
             </div>
           </header>
           ${state.running ? '<div class="skill-running"><i></i><span>Running skill…</span></div>' : ""}
-          ${state.runOutput ? `<div class="skill-output-heading"><strong>Output</strong><span>${escapeHtml(state.runStatus)}</span><button data-action="close-output">Show SKILL.md</button></div><pre class="skill-run-output">${escapeHtml(state.runOutput)}</pre>` : `<pre>${escapeHtml(state.document.content)}</pre>`}` : `
+          ${state.running || state.runOutput ? `<div class="skill-output-heading"><strong>Output</strong><span>${escapeHtml(state.runStatus)}</span><button data-action="close-output" ${state.running ? "disabled" : ""}>Show SKILL.md</button></div><pre class="skill-run-output">${escapeHtml(state.runOutput || "Waiting for output…")}</pre>` : `<pre>${escapeHtml(state.document.content)}</pre>`}` : `
           <div class="skill-document-empty">${icon("sparkles")}<span>Select a skill</span></div>`}
       </article>
     </section>`;
@@ -211,25 +233,32 @@ function bindEvents(root, state) {
     });
   });
   root.querySelector('[data-action="run-skill"]')?.addEventListener("click", async () => {
-    const input = await requestSkillInput(state.document);
-    if (input === null) return;
+    const skill = state.document;
+    const input = await requestSkillInput(skill);
+    if (input === null || state.running || !isSkillViewMounted(root, state)) return;
+    const requestId = crypto.randomUUID(); state.runRequestId = requestId;
     state.running = true;
     state.runOutput = "";
-    state.runStatus = "";
+    state.runStatus = "Running";
     state.message = "";
     state.isError = false;
     render(root, state);
     try {
-      const result = await runAiSkill(state.document.id, input);
+      const result = await runAiSkill(skill.id, input, chunk => {
+        if (!state.running || state.runRequestId !== requestId || !isSkillViewMounted(root, state) || typeof chunk !== "string" || !chunk) return;
+        appendSkillOutput(root, state, chunk);
+      });
       state.runOutput = result.output;
       state.runStatus = result.status;
     } catch (cause) {
-      state.runOutput = String(cause);
+      const error = String(cause);
+      state.runOutput = state.runOutput && !error.includes(state.runOutput)
+        ? `${state.runOutput}\n\n${error}` : error;
       state.runStatus = "Failed";
       state.isError = true;
     } finally {
       state.running = false;
-      render(root, state);
+      if (state.runRequestId === requestId && isSkillViewMounted(root, state)) render(root, state);
     }
   });
   root.querySelector('[data-action="close-output"]')?.addEventListener("click", () => {

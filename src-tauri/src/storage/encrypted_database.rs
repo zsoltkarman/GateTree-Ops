@@ -233,7 +233,7 @@ mod tests {
         database
             .connection
             .execute_batch(
-                "DROP TABLE quick_launch_items; ALTER TABLE connections DROP COLUMN icon; ALTER TABLE connections DROP COLUMN credential_mode; ALTER TABLE connection_folders DROP COLUMN credential_mode; ALTER TABLE connection_folders DROP COLUMN credential_reference; DELETE FROM schema_migrations WHERE version>=20;",
+                "ALTER TABLE deployment_plans DROP COLUMN approve_all; DROP TABLE quick_launch_items; ALTER TABLE connections DROP COLUMN icon; ALTER TABLE connections DROP COLUMN credential_mode; ALTER TABLE connection_folders DROP COLUMN credential_mode; ALTER TABLE connection_folders DROP COLUMN credential_reference; DELETE FROM schema_migrations WHERE version>=20;",
             )
             .unwrap();
         drop(database);

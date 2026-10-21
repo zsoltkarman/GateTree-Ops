@@ -32,7 +32,7 @@ struct PlanInputs {
     jira: Option<JiraInput>,
     #[serde(default)]
     cx: Option<CxInput>,
-    #[serde(default)]
+    #[serde(default, alias = "ansible", alias = "container")]
     olam: OlamInput,
 }
 
@@ -64,7 +64,13 @@ struct OlamTargets {
     _sites: Vec<String>,
     roles: Vec<String>,
     hosts: Vec<String>,
+    inventory_groups: Vec<String>,
+    job_mode: Option<OlamJobMode>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OlamJobMode { PerHost, Together }
 
 #[derive(Debug, Deserialize)]
 struct PlanStep {
@@ -139,8 +145,8 @@ impl QueueService {
                 )?;
                 if !current_run { continue; }
                 transaction.execute(
-                    "UPDATE deployment_plans SET status = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
-                    params![set.id, set.status],
+                    "UPDATE deployment_plans SET status = ?2, approve_all = ?3, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                    params![set.id, set.status, set.approve_all],
                 )?;
                 for job in &set.jobs {
                     transaction.execute(
@@ -154,6 +160,15 @@ impl QueueService {
         }).map_err(QueueError::from)
     }
 
+    pub fn set_approve_all(state: &WorkspaceState, id: &str, enabled: bool) -> Result<(), QueueError> {
+        state.with_connection(|connection| {
+            if connection.execute("UPDATE deployment_plans SET approve_all = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1", params![id, enabled])? == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            Ok(())
+        }).map_err(map_workspace_error)
+    }
+
     pub fn snapshot(state: &WorkspaceState) -> Result<QueueSnapshot, QueueError> {
         state
             .with_connection(|connection| {
@@ -165,7 +180,7 @@ impl QueueService {
             .map_err(map_workspace_error)
     }
 
-    pub fn create(state: &WorkspaceState, definition: String) -> Result<(), QueueError> {
+    pub fn create(state: &WorkspaceState, definition: String) -> Result<String, QueueError> {
         let input: PlanInput = serde_yaml::from_str(&definition)?;
         validate_input(&input)?;
         state
@@ -218,7 +233,8 @@ impl QueueService {
                         ],
                     )?;
                 }
-                transaction.commit()
+                transaction.commit()?;
+                Ok(plan_id)
             })
             .map_err(map_workspace_error)
     }
@@ -318,7 +334,7 @@ impl QueueService {
             .with_connection(|connection| {
                 let plan = connection
                     .query_row(
-                        "SELECT p.plan_number, p.name, p.process_name, p.definition_yaml, COALESCE(p.process_definition_json, c.definition_json)
+                        "SELECT p.plan_number, p.name, p.process_name, p.definition_yaml, COALESCE(p.process_definition_json, c.definition_json), p.approve_all
                          FROM deployment_plans p
                          LEFT JOIN deployment_processes c ON c.name = p.process_name COLLATE NOCASE
                          WHERE p.id = ?1",
@@ -330,11 +346,12 @@ impl QueueService {
                                 row.get::<_, String>(2)?,
                                 row.get::<_, String>(3)?,
                                 row.get::<_, String>(4)?,
+                                row.get::<_, bool>(5)?,
                             ))
                         },
                     )
                     .optional()?;
-                let Some((plan_number, name, process_name, plan_definition, process_definition)) = plan else {
+                let Some((plan_number, name, process_name, plan_definition, process_definition, approve_all)) = plan else {
                     return Err(rusqlite::Error::QueryReturnedNoRows);
                 };
                 let process_definition = process_with_plan_requester(&process_definition, &plan_definition)?;
@@ -365,6 +382,7 @@ impl QueueService {
                     keepass_password,
                 )?;
                 Ok(AgentJobSetSubmission {
+                    approve_all,
                     id: id.to_owned(),
                     plan_number,
                     name,
@@ -419,7 +437,7 @@ fn agent_job_details(job: &AgentJobStatus) -> String {
     if job.status == "disabled" {
         return "Disabled — skipped during execution".into();
     }
-    if job.driver != "olam" {
+    if !matches!(job.driver.as_str(), "olam" | "container") {
         return job.details.clone();
     }
     let phase = if job.action == "validate" && job.payload.is_none() {
@@ -499,7 +517,8 @@ fn resolve_agent_credentials(
     let needs_cx = jobs.iter().any(|job| job.driver == "cx");
     let needs_jira = jobs.iter().any(|job| job.driver == "jira");
     let needs_olam = jobs.iter().any(|job| job.driver == "olam");
-    if !needs_cx && !needs_jira && !needs_olam {
+    let needs_container = jobs.iter().any(|job| job.driver == "container");
+    if !needs_cx && !needs_jira && !needs_olam && !needs_container {
         return Ok(Vec::new());
     }
     let Some(password) = keepass_password.filter(|value| !value.is_empty()) else {
@@ -532,7 +551,7 @@ fn resolve_agent_credentials(
     }
     if jobs
         .iter()
-        .any(|job| job.driver == "olam" && job.action != "validate")
+        .any(|job| matches!(job.driver.as_str(), "olam" | "container") && job.action != "validate")
     {
         let plan: PlanInput = serde_yaml::from_str(plan_definition)
             .map_err(|error| to_sql_error(QueueError::Yaml(error)))?;
@@ -810,9 +829,27 @@ fn validate_olam_input(input: &PlanInput) -> Result<(), QueueError> {
             "inputs.olam.steps must not be empty.".into(),
         ));
     }
-    if input.inputs.olam.targets.hosts.is_empty() {
+    let targets = &input.inputs.olam.targets;
+    if targets.hosts.is_empty() && targets.inventory_groups.is_empty() {
         return Err(QueueError::Invalid(
-            "inputs.olam.targets.hosts must not be empty.".into(),
+            "Set inputs.olam.targets.hosts or inventory_groups.".into(),
+        ));
+    }
+    if !targets.hosts.is_empty() && !targets.inventory_groups.is_empty() {
+        return Err(QueueError::Invalid(
+            "Use either inputs.olam.targets.hosts or inventory_groups, not both.".into(),
+        ));
+    }
+    if targets.job_mode == Some(OlamJobMode::PerHost) && !targets.inventory_groups.is_empty() {
+        return Err(QueueError::Invalid("Per-host jobs require hosts instead of inventory_groups. Choose hosts in Planner Builder or set targets.hosts explicitly.".into()));
+    }
+    if targets
+        .inventory_groups
+        .iter()
+        .any(|group| group.trim().is_empty())
+    {
+        return Err(QueueError::Invalid(
+            "Every OLAM inventory group must have a value.".into(),
         ));
     }
     if input.inputs.olam.targets.roles.is_empty()
@@ -870,7 +907,7 @@ fn validate_references(
 ) -> Result<(), QueueError> {
     if jobs
         .iter()
-        .any(|job| job.driver == "olam" && job.action != "validate")
+        .any(|job| matches!(job.driver.as_str(), "olam" | "container") && job.action != "validate")
     {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM vault_entries WHERE name = ?1 COLLATE NOCASE)",
@@ -1021,13 +1058,10 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
                 } else {
                     input.inputs.cx.as_ref().map(|input| input.request.trim())
                 }
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    QueueError::Invalid(format!(
-                        "inputs.{driver}.{} is required by Process step '{name}'.",
-                        if driver == "jira" { "issue" } else { "request" }
-                    ))
-                })?;
+                .filter(|value| !value.is_empty());
+                // Ticket integrations are optional per Plan. Without a ticket,
+                // neither validation nor report jobs exist for that driver.
+                let Some(target) = target else { continue; };
                 if driver == "cx" && action == "update" {
                     if step
                         .get("requester")
@@ -1101,7 +1135,7 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
                     action: action.into(),
                 });
             }
-            "olam" => {
+            "olam" | "container" => {
                 let execution_action = if action == "deploy" {
                     super::service::olam_deploy_action(step)
                         .map_err(|error| QueueError::Invalid(error.to_string()))?
@@ -1109,6 +1143,9 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
                     action
                 };
                 validate_olam_input(input)?;
+                if driver == "container" && input.inputs.olam.targets._sites.is_empty() {
+                    return Err(QueueError::Invalid("Container deployment requires at least one site in Planner.".into()));
+                }
                 let defaults = details
                     .get("payload_defaults")
                     .and_then(JsonValue::as_object)
@@ -1126,7 +1163,7 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
                         "Process details.olam.payload_defaults.ENVIRONMENT is required.".into(),
                     ));
                 }
-                if details
+                if driver == "olam" && details
                     .get("account")
                     .and_then(JsonValue::as_str)
                     .is_none_or(|value| value.trim().is_empty())
@@ -1135,16 +1172,24 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
                         "Process details.olam.account is required.".into(),
                     ));
                 }
+                let targets = &input.inputs.olam.targets;
+                let limits: Vec<String> = if targets.inventory_groups.is_empty() { &targets.hosts } else { &targets.inventory_groups }
+                    .iter().map(|limit| limit.trim().to_owned()).collect();
+                // Missing mode preserves existing Plans: hosts run separately,
+                // while inventory_groups are sent together.
+                let together = targets.job_mode == Some(OlamJobMode::Together)
+                    || (targets.job_mode.is_none() && !targets.inventory_groups.is_empty());
+                let target_sets: Vec<Vec<String>> = if together { vec![limits] } else { limits.into_iter().map(|host| vec![host]).collect() };
                 for plan_step in &input.inputs.olam.steps {
                     for role in &input.inputs.olam.targets.roles {
-                        for host in &input.inputs.olam.targets.hosts {
+                        for limits in &target_sets {
                             let mut job_name = format!("{name} · {}", plan_step.name.trim());
                             if input.inputs.olam.targets.roles.len() > 1 {
                                 job_name.push_str(&format!(" · {}", role.trim()));
                             }
                             jobs.push(JobDefinition {
                                 name: job_name,
-                                target: Some(host.trim().into()),
+                                target: Some(limits.join(", ")),
                                 details: format!(
                                     "{} pending",
                                     if execution_action == "deploy" {
@@ -1153,13 +1198,13 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
                                         "Validation"
                                     }
                                 ),
-                                payload: Some(build_olam_payload(
-                                    input,
-                                    Some(host),
-                                    Some(plan_step),
-                                    role,
-                                    defaults,
-                                )?),
+                                payload: Some({
+                                    let mut payload: JsonValue = serde_json::from_str(&build_olam_payload(input, limits, Some(plan_step), role, defaults)?)?;
+                                    if driver == "container" {
+                                        payload["_container_sites"] = json!(input.inputs.olam.targets._sites);
+                                    }
+                                    serde_json::to_string_pretty(&payload)?
+                                }),
                                 driver: driver.into(),
                                 action: execution_action.into(),
                             });
@@ -1179,7 +1224,7 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
 
 fn build_olam_payload(
     input: &PlanInput,
-    host: Option<&str>,
+    limits: &[String],
     step: Option<&PlanStep>,
     role: &str,
     payload_defaults: &JsonMap<String, JsonValue>,
@@ -1195,28 +1240,16 @@ fn build_olam_payload(
         payload.extend(extra_vars.clone());
     }
 
-    let hosts = host
-        .map(|host| vec![JsonValue::String(host.trim().to_owned())])
-        .unwrap_or_else(|| {
-            input
-                .inputs
-                .olam
-                .targets
-                .hosts
-                .iter()
-                .map(|host| JsonValue::String(host.trim().to_owned()))
-                .collect()
-        });
     payload.insert("ansible_become_pass".into(), json!("$encrypted$"));
-    payload.insert("ansible_limit".into(), JsonValue::Array(hosts));
+    payload.insert("ansible_limit".into(), json!(limits));
     payload.insert("ansible_password".into(), json!("$encrypted$"));
     payload.insert("ansible_user".into(), json!("$encrypted$"));
     payload.insert("playbook_name".into(), json!(role.trim()));
     payload.insert("STRATEGY".into(), json!(input.inputs.olam.strategy.trim()));
-    if let Some(cx) = &input.inputs.cx {
+    if let Some(cx) = input.inputs.cx.as_ref().filter(|cx| !cx.request.trim().is_empty()) {
         payload.insert("ticket_id".into(), json!(cx.request.trim()));
         payload.insert("ticket_system".into(), json!("CX"));
-    } else if let Some(jira) = &input.inputs.jira {
+    } else if let Some(jira) = input.inputs.jira.as_ref().filter(|jira| !jira.issue.trim().is_empty()) {
         payload.insert("ticket_id".into(), json!(jira.issue.trim()));
         payload.insert("ticket_system".into(), json!("JIRA"));
     }
@@ -1288,12 +1321,13 @@ fn compact_queued_endpoint_checks(connection: &Connection) -> rusqlite::Result<(
 
 fn load_plans(connection: &Connection) -> rusqlite::Result<Vec<QueuePlan>> {
     let mut statement = connection.prepare(
-        "SELECT id, plan_number, name, process_name, definition_yaml, status, created_at
+        "SELECT id, plan_number, name, process_name, definition_yaml, status, created_at, approve_all
          FROM deployment_plans ORDER BY created_at DESC, rowid DESC",
     )?;
     let plans = statement
         .query_map([], |row| {
             Ok(QueuePlan {
+                approve_all: row.get(7)?,
                 id: row.get(0)?,
                 plan_number: row.get(1)?,
                 name: row.get(2)?,
@@ -1409,6 +1443,54 @@ inputs:
     }
 
     #[test]
+    fn container_jobs_reuse_planner_grouping_and_explicit_workflow() {
+        let mut input = plan_input();
+        input.inputs.olam.targets.roles = vec!["apache_kafka".into()];
+        input.inputs.olam.targets._sites = vec!["phx".into()];
+        let config = json!({"name":"Devcorp - Test", "details":{"container":{
+            "image":"registry.test/image:chosen", "deployment_playbook":"playbooks/deploy.yml",
+            "payload_defaults":{"ENVIRONMENT":"devcorp"}}},
+            "steps":[{"name":"Deploy Ansible", "driver":"container", "action":"deploy", "workflow":["validate","approve","deploy"]}]});
+        let jobs = generate_jobs(&input, &config).unwrap();
+        assert_eq!(jobs.len(),4);
+        for job in &jobs { assert_eq!(job.driver,"container"); assert_eq!(job.action,"validate_deploy");
+            let payload:JsonValue=serde_json::from_str(job.payload.as_ref().unwrap()).unwrap();
+            assert_eq!(payload["_container_sites"],json!(["phx"]));
+            assert_eq!(payload["ansible_password"],"$encrypted$");
+        }
+        input.inputs.olam.targets.job_mode=Some(OlamJobMode::Together);
+        let jobs=generate_jobs(&input,&config).unwrap(); assert_eq!(jobs.len(),2);
+        let payload:JsonValue=serde_json::from_str(jobs[0].payload.as_ref().unwrap()).unwrap();
+        assert_eq!(payload["ansible_limit"],json!(["host-1","host-2"]));
+        let yaml="plan_name: Test\nprocess: Devcorp - Test\ninputs:\n  ansible:\n    strategy: linear\n    account: deploy\n    targets: {sites: [phx], roles: [apache_kafka], hosts: [host-1]}\n    steps: [{name: Test}]\n";
+        let input:PlanInput=serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(generate_jobs(&input,&config).unwrap().len(),1);
+        let mut invalid=config.clone();invalid["steps"][0].as_object_mut().unwrap().remove("workflow");
+        assert!(generate_jobs(&input,&invalid).is_err());
+    }
+
+    #[test]
+    #[ignore = "Explicit frontend YAML round-trip diagnostic"]
+    fn planner_builder_yaml_round_trip() {
+        let path = std::env::var("GATETREE_OPS_PLANNER_TEST_FILE").unwrap();
+        let definition = fs::read_to_string(path).unwrap();
+        let input: PlanInput = serde_yaml::from_str(&definition).unwrap();
+        validate_input(&input).unwrap();
+        validate_olam_input(&input).unwrap();
+        assert_eq!(input.inputs.cx.as_ref().unwrap().request, "000001-000002");
+        let config = process_config(json!([{"name":"Deploy", "driver":"olam", "action":"deploy", "workflow":["validate", "approve", "deploy"]}]));
+        let jobs = generate_jobs(&input, &config).unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs[0].name.ends_with("Phase two"));
+        assert!(jobs[1].name.ends_with("Phase one"));
+        let first: JsonValue = serde_json::from_str(jobs[0].payload.as_ref().unwrap()).unwrap();
+        let second: JsonValue = serde_json::from_str(jobs[1].payload.as_ref().unwrap()).unwrap();
+        assert_eq!(first["ansible_limit"], json!(["env_a", "env_b"]));
+        assert_eq!(first["COUNT"], "2");
+        assert_eq!(second["VERSION"], "3.9.2");
+    }
+
+    #[test]
     fn generates_only_explicit_steps_in_exact_process_and_target_order() {
         let input = plan_input();
         let config = process_config(json!([
@@ -1482,6 +1564,139 @@ inputs:
                 .unwrap()
                 .iter()
                 .all(|job| job.action == "deploy")
+        );
+    }
+
+    #[test]
+    fn optional_tickets_skip_only_their_integrations_and_keep_deployments() {
+        let config = process_config(json!([
+            {"name":"Jira", "driver":"jira", "action":"validate"},
+            {"name":"CX", "driver":"cx", "action":"validate"},
+            {"name":"Deploy", "driver":"olam", "action":"deploy", "workflow":["validate","approve","deploy"]},
+            {"name":"Report Jira", "driver":"jira", "action":"update", "report":{"scope":"plan","comment_template":"{{plan_name}}"}},
+            {"name":"Report CX", "driver":"cx", "action":"update", "report":{"scope":"plan","comment_template":"{{plan_name}}"}}
+        ]));
+        for (jira, cx) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut input = plan_input();
+            if !jira { input.inputs.jira = None; }
+            if !cx { input.inputs.cx = None; }
+            let jobs = generate_jobs(&input, &config).unwrap();
+            assert_eq!(jobs.iter().filter(|job| job.driver == "olam").count(), 8);
+            assert_eq!(jobs.iter().filter(|job| job.driver == "jira").count(), if jira { 2 } else { 0 });
+            assert_eq!(jobs.iter().filter(|job| job.driver == "cx").count(), if cx { 2 } else { 0 });
+            let payload: JsonValue = serde_json::from_str(jobs.iter().find(|job| job.driver == "olam").unwrap().payload.as_ref().unwrap()).unwrap();
+            assert_eq!(payload.get("ticket_system").and_then(JsonValue::as_str), if cx { Some("CX") } else if jira { Some("JIRA") } else { None });
+        }
+        let mut input = plan_input();
+        input.inputs.jira.as_mut().unwrap().issue = " ".into();
+        input.inputs.cx.as_mut().unwrap().request = " ".into();
+        assert!(generate_jobs(&input, &config).unwrap().iter().all(|job| job.driver == "olam"));
+    }
+
+    #[test]
+    fn inventory_groups_stay_in_one_payload_while_hosts_stay_separate() {
+        let mut input = plan_input();
+        let config = process_config(json!([
+            {"name":"Deploy", "driver":"olam", "action":"deploy", "workflow":["validate","approve","deploy"]}
+        ]));
+        let host_jobs = generate_jobs(&input, &config).unwrap();
+        assert_eq!(host_jobs.len(), 8);
+        assert_eq!(host_jobs[0].target.as_deref(), Some("host-1"));
+        assert_eq!(host_jobs[1].target.as_deref(), Some("host-2"));
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(host_jobs[0].payload.as_deref().unwrap()).unwrap()["ansible_limit"],
+            json!(["host-1"])
+        );
+
+        input.inputs.olam.targets.hosts.clear();
+        input.inputs.olam.targets.inventory_groups = vec![" group-one ".into(), "group-two".into()];
+        let grouped = generate_jobs(&input, &config).unwrap();
+        assert_eq!(grouped.len(), 4); // Two steps x two roles, each receives both groups.
+        assert!(grouped.iter().all(|job| job.action == "validate_deploy"
+            && job.target.as_deref() == Some("group-one, group-two")));
+        for (index, job) in grouped.iter().enumerate() {
+            let payload: JsonValue = serde_json::from_str(job.payload.as_deref().unwrap()).unwrap();
+            assert_eq!(payload["ansible_limit"], json!(["group-one", "group-two"]));
+            assert_eq!(
+                payload["playbook_name"],
+                json!(if index % 2 == 0 {
+                    "service"
+                } else {
+                    "exporter"
+                })
+            );
+            assert_eq!(payload["VERSION"], json!(if index < 2 { "1" } else { "2" }));
+            assert_eq!(payload["STRATEGY"], json!("linear"));
+            assert_eq!(payload["ticket_system"], json!("CX"));
+            assert_eq!(payload["ticket_id"], json!("REQ-1"));
+            assert_eq!(payload["ansible_password"], json!("$encrypted$"));
+        }
+        input.inputs.olam.targets.roles.truncate(1);
+        input.inputs.olam.steps.truncate(1);
+        assert_eq!(generate_jobs(&input, &config).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn explicit_job_mode_splits_hosts_or_combines_them_per_step() {
+        let config = process_config(json!([{"name":"Deploy", "driver":"olam", "action":"deploy", "workflow":["validate","approve","deploy"]}]));
+        let mut input = plan_input();
+        input.inputs.olam.targets.roles = vec!["service".into()];
+        input.inputs.olam.targets.hosts = vec!["host-1".into(), "host-2".into(), "host-3".into()];
+        input.inputs.olam.targets.job_mode = Some(OlamJobMode::PerHost);
+        let separate = generate_jobs(&input, &config).unwrap();
+        assert_eq!(separate.len(), 6);
+        for (index, job) in separate.iter().enumerate() {
+            assert_eq!(job.target.as_deref(), Some(["host-1", "host-2", "host-3"][index % 3]));
+            let payload: JsonValue = serde_json::from_str(job.payload.as_ref().unwrap()).unwrap();
+            assert_eq!(payload["ansible_limit"].as_array().unwrap().len(), 1);
+            assert_eq!(payload["VERSION"], if index < 3 { "1" } else { "2" });
+        }
+        input.inputs.olam.targets.job_mode = Some(OlamJobMode::Together);
+        let together = generate_jobs(&input, &config).unwrap();
+        assert_eq!(together.len(), 2);
+        for job in together {
+            let payload: JsonValue = serde_json::from_str(job.payload.as_ref().unwrap()).unwrap();
+            assert_eq!(payload["ansible_limit"], json!(["host-1","host-2","host-3"]));
+        }
+        input.inputs.olam.targets.hosts = vec!["host-1".into(), "host-3".into()];
+        let partial = generate_jobs(&input, &config).unwrap();
+        assert_eq!(partial.len(), 2);
+        let payload: JsonValue = serde_json::from_str(partial[0].payload.as_ref().unwrap()).unwrap();
+        assert_eq!(payload["ansible_limit"], json!(["host-1","host-3"]));
+        input.inputs.olam.targets.hosts.clear();
+        input.inputs.olam.targets.inventory_groups = vec!["site-group".into()];
+        input.inputs.olam.targets.job_mode = Some(OlamJobMode::PerHost);
+        assert!(validate_olam_input(&input).unwrap_err().to_string().contains("Per-host"));
+        assert!(serde_yaml::from_str::<PlanInput>("plan_name: Test\nprocess: Deploy\ninputs:\n  olam:\n    targets:\n      job_mode: invalid").is_err());
+    }
+
+    #[test]
+    fn grouped_target_input_requires_explicit_unambiguous_nonempty_groups() {
+        let mut input = plan_input();
+        let config = process_config(json!([
+            {"name":"Deploy", "driver":"olam", "action":"deploy", "workflow":["validate","approve","deploy"]}
+        ]));
+        input.inputs.olam.targets.inventory_groups = vec!["group-one".into()];
+        assert!(
+            generate_jobs(&input, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("not both")
+        );
+        input.inputs.olam.targets.hosts.clear();
+        input.inputs.olam.targets.inventory_groups = vec![" ".into()];
+        assert!(
+            generate_jobs(&input, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("inventory group must have a value")
+        );
+        input.inputs.olam.targets.inventory_groups.clear();
+        assert!(
+            generate_jobs(&input, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("inventory_groups")
         );
     }
 
@@ -1610,16 +1825,11 @@ inputs:
         );
         config["details"]["cx"]["requester"] = json!("operator@example.test");
         input.inputs.cx = None;
-        assert!(
-            generate_jobs(&input, &config)
-                .unwrap_err()
-                .to_string()
-                .contains("inputs.cx.request")
-        );
+        assert!(generate_jobs(&input, &config).unwrap().is_empty());
     }
 
     #[test]
-    fn disabling_a_job_survives_workspace_reopen_and_plan_regeneration() {
+    fn disabled_jobs_and_approve_all_survive_workspace_reopen_and_plan_regeneration() {
         let directory =
             std::env::temp_dir().join(format!("gatetree-ops-disabled-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
@@ -1643,6 +1853,7 @@ inputs:
         let initial = QueueService::snapshot(&state).unwrap();
         let plan_id = initial.plans[0].id.clone();
         let job_id = initial.plans[0].jobs[0].id.clone();
+        QueueService::set_approve_all(&state, &plan_id, true).unwrap();
         QueueService::control(&state, "job", &job_id, "disable").unwrap();
         state.lock().unwrap();
         WorkspaceService::unlock(
@@ -1657,6 +1868,10 @@ inputs:
         );
         QueueService::prepare_plan_start(&state, &plan_id, true).unwrap();
         let submission = QueueService::agent_submission(&state, &plan_id, None).unwrap();
+        assert!(submission.approve_all);
+        assert!(QueueService::snapshot(&state).unwrap().plans[0].approve_all);
+        QueueService::set_approve_all(&state, &plan_id, false).unwrap();
+        assert!(!QueueService::agent_submission(&state, &plan_id, None).unwrap().approve_all);
         assert!(submission.jobs[0].disabled);
         assert!(!submission.jobs[1].disabled);
         assert_ne!(submission.jobs[0].id, job_id);
@@ -1747,12 +1962,7 @@ inputs:
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].target.as_deref(), Some("APP-1"));
         config["steps"][0]["driver"] = json!("cx");
-        assert!(
-            generate_jobs(&input, &config)
-                .unwrap_err()
-                .to_string()
-                .contains("inputs.cx.request")
-        );
+        assert!(generate_jobs(&input, &config).unwrap().is_empty());
         config["steps"][0]["action"] = json!("unknown");
         assert!(
             generate_jobs(&input, &config)
@@ -1887,6 +2097,7 @@ inputs:
             Ok(())
         }).unwrap();
         let mut set = AgentJobSetStatus {
+            approve_all: false,
             execution_revision: 2,
             credentials_required: false,
             id: "plan".into(),
@@ -2018,7 +2229,7 @@ inputs:
             Ok(())
         }).expect("seed references");
 
-        QueueService::create(
+        let created_id = QueueService::create(
             &state,
             r#"
 plan_name: Platform upgrade
@@ -2047,6 +2258,9 @@ inputs:
 
         let snapshot = QueueService::snapshot(&state).expect("load queue");
         assert_eq!(snapshot.plans.len(), 1);
+        assert_eq!(snapshot.plans[0].id, created_id);
+        assert_eq!(snapshot.plans[0].status, "queued");
+        assert!(snapshot.plans[0].jobs.iter().all(|job| job.status == "queued"));
         assert_eq!(snapshot.plans[0].jobs.len(), 8);
         assert_eq!(snapshot.plans[0].jobs[0].name, "Validate Jira");
         assert_eq!(

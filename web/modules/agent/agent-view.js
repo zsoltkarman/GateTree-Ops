@@ -90,7 +90,7 @@ function activityFilters(state) {
     const type = activityType(activity);
     counts.set(type, (counts.get(type) ?? 0) + 1);
   }
-  const labels = { url: "URL", deploy: "Deploy", ssh: "SSH" };
+  const labels = { url: "URL", deploy: "Ansible", ssh: "SSH" };
   return [
     { id: "all", label: "All", count: state.jobSets.length + state.sshSessions.length + state.activities.length },
     ...[...counts].map(([id, count]) => ({ id, label: labels[id] ?? id.toUpperCase(), count })),
@@ -101,11 +101,11 @@ function jobSetRows(state) {
   return state.jobSets.map((jobSet) => `
     <div class="agent-table-row agent-plan-row">
       <strong>${escapeHtml(jobSet.name)}</strong>
-      <span>Deploy</span>
+      <span>Ansible</span>
       <code>#${escapeHtml(jobSet.planNumber)}</code>
       <span></span>
       <span class="agent-activity-status">${escapeHtml(jobSet.status)}</span>
-      <span class="agent-row-actions"><button data-action="focus-plan" data-plan-id="${escapeHtml(jobSet.id)}" title="Open Deployment Plan">Focus</button></span>
+      <span class="agent-row-actions"><button data-action="focus-plan" data-plan-id="${escapeHtml(jobSet.id)}" title="Open Ansible Plan">Focus</button></span>
     </div>`).join("");
 }
 

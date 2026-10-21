@@ -86,23 +86,33 @@ pub fn update(
                     ))
                     .json(&json!({"body":comment.unwrap()}))
             };
-            let response = request
+            let response = match request
                 .bearer_auth(&credential.password)
                 .header("Accept", "application/json")
-                .send()
-                .map_err(|e| {
-                    format!(
-                        "Jira update result is unconfirmed: {e}. Check the issue before retrying."
-                    )
-                })?;
+                .send() {
+                    Ok(response) => response,
+                    Err(error) if error.is_connect() => {
+                        // DNS, TLS handshake, or TCP connection failed before an HTTP upload.
+                        checkpoint(&key, "retryable")?;
+                        return Err(format!("Jira connection failed before sending the report: {error}. Retry after restoring connectivity."));
+                    }
+                    Err(error) => return Err(format!(
+                        "Jira update result is unconfirmed: {error}. Check the issue before retrying."
+                    )),
+                };
             let status = response.status();
             if !status.is_success() {
                 // A rejected HTTP request can be retried after the cause is corrected.
                 if status.is_client_error() && status.as_u16() != 408 {
                     checkpoint(&key, "retryable")?;
                 }
+                let description = if status.is_client_error() && status.as_u16() != 408 {
+                    "failed"
+                } else {
+                    "has an unconfirmed result"
+                };
                 return Err(format!(
-                    "Jira update failed for {issue} (HTTP {}). No further report operations were sent.",
+                    "Jira update {description} for {issue} (HTTP {}). No further report operations were sent.",
                     status.as_u16()
                 ));
             }
@@ -343,6 +353,83 @@ pub(super) mod tests {
                 .unwrap_err()
                 .contains("unconfirmed")
         );
+    }
+
+    #[test]
+    fn connection_failure_before_upload_is_retryable_without_operator_recovery() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let (set, mut job, creds) = context(&url, report());
+        let progress = RefCell::new(BTreeMap::new());
+        let error = update(&set, &job, &creds, &|k, v| {
+            progress.borrow_mut().insert(k.to_string(), v.to_string()); Ok(())
+        }, &|_| {}).unwrap_err();
+        assert!(error.contains("before sending"));
+        assert_eq!(progress.borrow()["deploy-0:attachment:0"], "retryable");
+        job.report_progress = progress.borrow().clone();
+        // A normal retry reaches the connection attempt, rather than the unconfirmed gate.
+        let error = update(&set, &job, &creds, &|_, _| Ok(()), &|_| {}).unwrap_err();
+        assert!(error.contains("before sending"));
+    }
+
+    #[test]
+    fn ambiguous_http_failures_keep_the_duplicate_protection_until_explicit_recovery() {
+        for status in [408, 500] {
+            let (url, server) = mock(vec![(status, json!({"error":"unavailable"}))]);
+            let (set, mut job, creds) = context(&url, report());
+            let progress = RefCell::new(BTreeMap::new());
+            let error = update(&set, &job, &creds, &|k,v| {
+                progress.borrow_mut().insert(k.to_string(),v.to_string()); Ok(())
+            }, &|_| {}).unwrap_err();
+            assert!(error.contains("unconfirmed"));
+            assert_eq!(server.join().unwrap().len(),1);
+            assert_eq!(progress.borrow()["deploy-0:attachment:0"], "sending");
+            job.report_progress = progress.borrow().clone();
+            // The mock is closed: normal Retry must stop at the checkpoint, without a POST.
+            let error = update(&set, &job, &creds, &|_,_| panic!("must not resend"), &|_| {}).unwrap_err();
+            assert!(error.contains("unconfirmed"));
+        }
+    }
+
+    #[test]
+    fn explicit_report_recovery_preserves_deployments_and_confirmed_remote_operations() {
+        let (url, server) = mock(vec![(200, json!([{"id":"a2"}])), (201, json!({"id":"c2"}))]);
+        let (mut set, _, creds) = context(&url, report());
+        set.execution_revision = 3;
+        set.status = "failed".into();
+        set.jobs[3].status = "failed".into();
+        set.jobs[3].report_progress = BTreeMap::from([
+            ("deploy-0:attachment:0".into(), "a1".into()),
+            ("deploy-0:comment".into(), "c1".into()),
+            ("deploy-2:attachment:0".into(), "sending".into()),
+        ]);
+        let before = serde_json::to_value(&set.jobs[..3]).unwrap();
+        let path = std::env::temp_dir().join(format!("gatetree-jira-recover-{}.json", uuid::Uuid::new_v4()));
+        let mut manager = crate::JobSetManager::load(path.clone()).unwrap();
+        manager.job_sets.push(set);
+        // Failed authorization must not erase uncertainty.
+        assert!(manager.retry_unconfirmed_jira_report("update", vec![]).is_err());
+        assert_eq!(manager.job_sets[0].jobs[3].report_progress["deploy-2:attachment:0"], "sending");
+        assert!(manager.retry_unconfirmed_jira_report("deploy-0", creds.clone()).is_err());
+        let recovered = manager.retry_unconfirmed_jira_report("update", creds.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&recovered.jobs[..3]).unwrap(), before);
+        let job = &recovered.jobs[3];
+        assert_eq!(job.report_progress["deploy-0:attachment:0"], "a1");
+        assert_eq!(job.report_progress["deploy-0:comment"], "c1");
+        assert_eq!(job.report_progress["deploy-2:attachment:0"], "retryable");
+        let progress = RefCell::new(job.report_progress.clone());
+        update(&recovered, job, &creds, &|k,v| {
+            progress.borrow_mut().insert(k.to_string(),v.to_string()); Ok(())
+        }, &|_| {}).unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2, "confirmed remote operations must not be resent");
+        assert!(requests[0].1.contains("host-2"));
+        assert!(!requests[0].1.contains("host-0"));
+        assert!(progress.borrow().values().all(|v| v != "sending" && v != "retryable"));
+        let saved: Vec<AgentJobSetStatus> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved[0].jobs[3].report_progress, job.report_progress);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

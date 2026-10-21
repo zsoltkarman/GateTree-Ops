@@ -42,6 +42,23 @@ impl BackupService {
     }
 }
 
+impl BackupError {
+    pub fn user_message(&self) -> String {
+        if let Self::Workspace(WorkspaceError::Storage(crate::storage::StorageError::Database(
+            rusqlite::Error::SqliteFailure(error, _),
+        ))) = self
+        {
+            if error.code == rusqlite::ErrorCode::SystemIoFailure {
+                return format!(
+                    "Import could not access the workspace database (SQLite I/O error {}). Close and reopen the app, then retry. If the workspace is in a synced folder such as OneDrive, use a local folder for the active workspace and keep backups in the synced folder. The source JSON backup has not been changed.",
+                    error.extended_code
+                );
+            }
+        }
+        self.to_string()
+    }
+}
+
 fn load_document(connection: &Connection) -> rusqlite::Result<BackupDocument> {
     let schema = load_schema(connection)?;
     let schema_version = connection.query_row(
@@ -253,6 +270,48 @@ mod tests {
     use crate::modules::workspace::WorkspaceService;
     use std::fs;
     use uuid::Uuid;
+
+    #[test]
+    fn import_io_errors_include_recovery_and_extended_code() {
+        let error = BackupError::Workspace(WorkspaceError::Storage(
+            crate::storage::StorageError::Database(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_WRITE),
+                None,
+            )),
+        ));
+        let message = error.user_message();
+        assert!(message.contains(&rusqlite::ffi::SQLITE_IOERR_WRITE.to_string()));
+        assert!(message.contains("local folder"));
+        assert_eq!(
+            BackupError::InvalidFormat.user_message(),
+            BackupError::InvalidFormat.to_string()
+        );
+    }
+
+    #[test]
+    #[ignore = "Set GATETREE_OPS_BACKUP_TEST_PATH to validate an external backup in an isolated workspace"]
+    fn external_backup_round_trip() {
+        let source = std::env::var("GATETREE_OPS_BACKUP_TEST_PATH").expect("backup path");
+        let json = fs::read_to_string(source).expect("read backup");
+        let directory =
+            std::env::temp_dir().join(format!("gatetree-ops-import-check-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let state = WorkspaceState::default();
+        WorkspaceService::create(
+            &state,
+            directory.to_string_lossy().into_owned(),
+            "isolated-import-test-password",
+        )
+        .expect("create isolated workspace");
+        let result = BackupService::import_json(&state, &json);
+        if let Ok(summary) = &result {
+            let (_, exported) = BackupService::export_json(&state).expect("export imported data");
+            assert_eq!(summary.records, exported.records);
+        }
+        state.lock().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        result.expect("import external backup");
+    }
 
     #[test]
     fn accepts_legacy_backup_format_but_keeps_gate_tree_formats_separate() {

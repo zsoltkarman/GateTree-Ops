@@ -461,6 +461,7 @@ mod tests {
                 &credentials,
                 &|_, _| panic!("endpoint validation must not launch a job"),
                 &|_| panic!("endpoint validation must not poll job output"),
+                &|| false,
             );
             match result {
                 Ok(DriverOutcome::Completed(log)) if authorized => {

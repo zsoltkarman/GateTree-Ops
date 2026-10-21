@@ -24,7 +24,7 @@ pub fn import_backup(
 ) -> Result<BackupSummary, String> {
     let json =
         fs::read_to_string(path).map_err(|error| format!("Could not read backup: {error}"))?;
-    BackupService::import_json(&state, &json).map_err(|error| error.to_string())
+    BackupService::import_json(&state, &json).map_err(|error| error.user_message())
 }
 
 #[cfg(unix)]

@@ -2,14 +2,24 @@
   "jira": {
     "id": "jira",
     "defaults": {
-      "headers": { "Accept": "application/json", "Content-Type": "application/json" },
+      "headers": {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+      },
       "timeout_seconds": 30,
       "verify_tls": true
     },
     "actions": {
       "validate": {
-        "request": { "method": "GET", "path": "/rest/api/2/issue/{{input.issue_key}}" },
-        "success": { "status_codes": [200] },
+        "request": {
+          "method": "GET",
+          "path": "/rest/api/2/issue/{{input.issue_key}}"
+        },
+        "success": {
+          "status_codes": [
+            200
+          ]
+        },
         "output": {
           "issue_key": "$.key",
           "summary": "$.fields.summary",
@@ -19,24 +29,55 @@
           "reporter": "$.fields.reporter.displayName"
         }
       },
-      "update": { "implementation": "native", "configuration": "step.report" }
+      "update": {
+        "implementation": "native",
+        "configuration": "step.report"
+      }
     }
   },
   "cx": {
     "id": "cx",
-    "defaults": { "timeout_seconds": 30, "verify_tls": true },
+    "defaults": {
+      "timeout_seconds": 30,
+      "verify_tls": true
+    },
     "actions": {
-      "validate": { "implementation": "pending" },
-      "update": { "implementation": "native", "configuration": "step.report" }
+      "validate": {
+        "implementation": "pending"
+      },
+      "update": {
+        "implementation": "native",
+        "configuration": "step.report"
+      }
     }
   },
   "olam": {
     "id": "olam",
-    "defaults": { "timeout_seconds": 30, "verify_tls": true },
+    "defaults": {
+      "timeout_seconds": 30,
+      "verify_tls": true
+    },
     "actions": {
-      "validate": { "implementation": "native" },
-      "validate_deployment": { "implementation": "native" },
-      "deploy": { "implementation": "pending" }
+      "validate": {
+        "implementation": "native"
+      },
+      "validate_deployment": {
+        "implementation": "native"
+      },
+      "deploy": {
+        "implementation": "pending"
+      }
+    }
+  },
+  "container": {
+    "id": "container",
+    "actions": {
+      "validate_deployment": {
+        "implementation": "native"
+      },
+      "deploy": {
+        "implementation": "native"
+      }
     }
   }
 }

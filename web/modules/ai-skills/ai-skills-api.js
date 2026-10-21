@@ -6,4 +6,8 @@ export const updateAiSkillLibrary = (id, name, path) => invoke("update_ai_skill_
 export const deleteAiSkillLibrary = (id) => invoke("delete_ai_skill_library", { id });
 export const refreshAiSkills = () => invoke("refresh_ai_skills");
 export const readAiSkill = (id) => invoke("read_ai_skill", { id });
-export const runAiSkill = (id, input) => invoke("run_ai_skill", { id, input });
+export const runAiSkill = (id, input, onOutput = () => {}) => {
+  const onOutputChannel = new window.__TAURI__.core.Channel();
+  onOutputChannel.onmessage = onOutput;
+  return invoke("run_ai_skill", { id, input, onOutput: onOutputChannel });
+};

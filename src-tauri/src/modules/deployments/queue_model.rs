@@ -9,6 +9,7 @@ pub struct QueueSnapshot {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueuePlan {
+    pub approve_all: bool,
     pub id: String,
     pub plan_number: i64,
     pub name: String,
@@ -32,4 +33,12 @@ pub struct QueueJob {
     pub driver: String,
     pub action: String,
     pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedQueueSnapshot {
+    #[serde(flatten)]
+    pub queue: QueueSnapshot,
+    pub created_plan_id: String,
 }

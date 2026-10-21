@@ -1,8 +1,11 @@
 use std::{
     collections::HashSet,
     env, fs,
+    io::{self, Read},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -167,11 +170,11 @@ impl AiSkillsService {
         })
     }
 
-    pub fn run_skill(
+    pub fn prepare_skill_run(
         state: &WorkspaceState,
         id: String,
         input: String,
-    ) -> Result<AiSkillRunResult, AiSkillsError> {
+    ) -> Result<Command, AiSkillsError> {
         let skill = state
             .with_connection(|connection| skill_by_id(connection, &id))
             .map_err(AiSkillsError::from)?
@@ -201,7 +204,8 @@ impl AiSkillsService {
             request
         );
         let executable = codex_executable().ok_or(AiSkillsError::CodexUnavailable)?;
-        let result = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .current_dir(&directory)
             .args([
                 "exec",
@@ -211,25 +215,109 @@ impl AiSkillsService {
                 "never",
                 "--skip-git-repo-check",
             ])
-            .arg(prompt)
-            .output()
-            .map_err(AiSkillsError::Io)?;
-        let stdout = String::from_utf8_lossy(&result.stdout).trim().to_owned();
-        let stderr = String::from_utf8_lossy(&result.stderr).trim().to_owned();
-        let output = match (stdout.is_empty(), stderr.is_empty()) {
-            (false, false) => format!("{stdout}\n\n{stderr}"),
-            (false, true) => stdout,
-            (true, false) => stderr,
-            (true, true) => "Codex completed without output.".to_owned(),
-        };
-        if !result.status.success() {
-            return Err(AiSkillsError::CodexFailed(output));
-        }
-        Ok(AiSkillRunResult {
-            output,
-            status: "Completed".to_owned(),
-        })
+            .arg(prompt);
+        Ok(command)
     }
+}
+
+// Read both pipes concurrently; a busy stderr must not block stdout (or vice versa).
+// Decode each pipe independently so multibyte characters can span read chunks.
+fn read_skill_output(mut reader: impl Read, sender: mpsc::SyncSender<io::Result<String>>) {
+    let mut buffer = [0_u8; 4096];
+    let mut pending = Vec::new();
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                let _ = sender.send(Err(error));
+                break;
+            }
+        };
+        if count == 0 {
+            if !pending.is_empty() {
+                let _ = sender.send(Ok(String::from_utf8_lossy(&pending).into_owned()));
+            }
+            break;
+        }
+        pending.extend_from_slice(&buffer[..count]);
+        let mut text = String::new();
+        loop {
+            match std::str::from_utf8(&pending) {
+                Ok(valid) => {
+                    text.push_str(valid);
+                    pending.clear();
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    text.push_str(std::str::from_utf8(&pending[..valid]).unwrap());
+                    pending.drain(..valid);
+                    if let Some(length) = error.error_len() {
+                        text.push('\u{fffd}');
+                        pending.drain(..length);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        if !text.is_empty() && sender.send(Ok(text)).is_err() {
+            break;
+        }
+    }
+}
+
+pub(super) fn execute_skill(
+    mut command: Command,
+    mut on_output: impl FnMut(&str),
+) -> Result<AiSkillRunResult, AiSkillsError> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(AiSkillsError::Io)?;
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (sender, receiver) = mpsc::sync_channel(64);
+    let errors = sender.clone();
+    let out_thread = thread::spawn(move || read_skill_output(stdout, sender));
+    let err_thread = thread::spawn(move || read_skill_output(stderr, errors));
+    let mut output = String::new();
+    let mut read_error = None;
+    for message in receiver {
+        match message {
+            Ok(chunk) => {
+                output.push_str(&chunk);
+                on_output(&chunk);
+            }
+            Err(error) => {
+                read_error = Some(error);
+            }
+        }
+    }
+    let status = child.wait().map_err(AiSkillsError::Io)?;
+    let out_join = out_thread.join();
+    let err_join = err_thread.join();
+    if out_join.is_err() || err_join.is_err() {
+        return Err(AiSkillsError::Io(io::Error::other(
+            "Skill output reader stopped unexpectedly.",
+        )));
+    }
+    if let Some(error) = read_error {
+        return Err(AiSkillsError::Io(error));
+    }
+    if output.is_empty() {
+        output = "Codex completed without output.".into();
+    }
+    if !status.success() {
+        return Err(AiSkillsError::CodexFailed(output));
+    }
+    Ok(AiSkillRunResult {
+        output,
+        status: "Completed".into(),
+    })
 }
 
 fn validate_name(name: String) -> Result<String, AiSkillsError> {
@@ -575,6 +663,56 @@ pub enum AiSkillsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_utf8_across_output_chunks() {
+        struct ByteReader(std::io::Cursor<Vec<u8>>);
+        impl Read for ByteReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.0.read(&mut buffer[..1])
+            }
+        }
+        let expected = "Árvíztűrő tükörfúrógép 🦀";
+        let (sender, receiver) = mpsc::sync_channel(64);
+        read_skill_output(
+            ByteReader(io::Cursor::new(expected.as_bytes().to_vec())),
+            sender,
+        );
+        let actual: String = receiver.into_iter().map(Result::unwrap).collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streams_output_before_process_finishes() {
+        let gate =
+            std::env::temp_dir().join(format!("gatetree-skill-stream-{}", uuid::Uuid::new_v4()));
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf first; n=0; while [ ! -f \"$1\" ]; do n=$((n+1)); [ \"$n\" -lt 40 ] || exit 9; sleep 0.05; done; printf second >&2", "--"]).arg(&gate);
+        let mut streamed = String::new();
+        let result = execute_skill(command, |chunk| {
+            streamed.push_str(chunk);
+            if streamed.contains("first") {
+                fs::write(&gate, "continue").unwrap();
+            }
+        });
+        let _ = fs::remove_file(&gate);
+        let result = result.unwrap();
+        assert_eq!(result.output, "firstsecond");
+        assert_eq!(result.output, streamed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streams_both_pipes_and_keeps_failure_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf stdout; printf stderr >&2; exit 7"]);
+        let mut streamed = String::new();
+        let error = execute_skill(command, |chunk| streamed.push_str(chunk)).unwrap_err();
+        assert!(streamed.contains("stdout"));
+        assert!(streamed.contains("stderr"));
+        assert!(error.to_string().contains(&streamed));
+    }
 
     #[test]
     fn reads_catalog_front_matter_in_order() {

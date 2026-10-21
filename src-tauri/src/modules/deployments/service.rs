@@ -385,12 +385,12 @@ fn validate_http_endpoint(base_url: &str) -> Result<(), DeploymentError> {
 
 pub(super) fn olam_deploy_action(step: &Value) -> Result<&'static str, DeploymentError> {
     let phases = step.get("workflow").and_then(Value::as_array)
-        .ok_or_else(|| DeploymentError::Invalid("OLAM deploy requires an explicit workflow, for example [\"validate\", \"approve\", \"deploy\"].".into()))?;
+        .ok_or_else(|| DeploymentError::Invalid("Ansible deploy requires an explicit workflow, for example [\"validate\", \"approve\", \"deploy\"].".into()))?;
     let phases: Option<Vec<&str>> = phases.iter().map(Value::as_str).collect();
     match phases.as_deref() {
         Some(["validate", "approve", "deploy"]) => Ok("validate_deploy"),
         Some(["approve", "deploy"]) => Ok("deploy"),
-        _ => Err(DeploymentError::Invalid("Supported OLAM workflows: [\"validate\", \"approve\", \"deploy\"] or [\"approve\", \"deploy\"].".into())),
+        _ => Err(DeploymentError::Invalid("Supported Ansible workflows: [\"validate\", \"approve\", \"deploy\"] or [\"approve\", \"deploy\"].".into())),
     }
 }
 
@@ -443,6 +443,11 @@ fn validate_process(
             .filter(|step| step.get("driver").and_then(Value::as_str) == Some(alias))
             .filter_map(|step| step.get("action").and_then(Value::as_str))
             .collect();
+        if alias == "container" {
+            crate::agent_ipc::validate_container_config(&Value::Object(driver_details.clone()))
+                .map_err(DeploymentError::Invalid)?;
+            continue;
+        }
         let url = required_string(driver_details, "url")?;
         if !used_actions.is_empty() {
             endpoints.push(url);
@@ -508,7 +513,7 @@ fn validate_process(
             )));
         }
         let action_name = required_identifier(step, "action")?;
-        if driver_name == "olam" && action_name == "deploy" {
+        if matches!(driver_name.as_str(), "olam" | "container") && action_name == "deploy" {
             olam_deploy_action(&Value::Object(step.clone()))?;
         }
         if matches!(driver_name.as_str(), "jira" | "cx") && action_name == "update" {
@@ -952,6 +957,17 @@ mod tests {
         )
         .expect("create encrypted workspace");
         (state, directory)
+    }
+
+    #[test]
+    fn container_process_requires_no_olam_url_or_vault_account() {
+        let connection=Connection::open_in_memory().unwrap();
+        let mut config:Value=serde_json::from_str(include_str!("../../../../docs/examples/devcorp-test-container.json")).unwrap();
+        assert!(validate_process(&connection,config.as_object().unwrap()).unwrap().is_empty());
+        config["details"]["container"]["image"]=json!("registry.test/image:next-version");
+        validate_process(&connection,config.as_object().unwrap()).unwrap();
+        config["steps"][0]["workflow"]=json!(["deploy"]);
+        assert!(validate_process(&connection,config.as_object().unwrap()).is_err());
     }
 
     #[test]

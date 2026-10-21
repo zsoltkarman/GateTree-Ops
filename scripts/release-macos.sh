@@ -47,6 +47,7 @@ PY
   source "$config"
   set +a
 fi
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 export TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$HOME/.config/gatetree-ops/updater.key}"
 errors=0
 fail() { echo "Missing: $*" >&2; errors=$((errors + 1)); }
@@ -117,6 +118,7 @@ python3 "$repo_dir/scripts/create-update-manifest.py" "$assets" --version "$vers
 $build_only && { echo "Signed local Mac release: $assets"; exit 0; }
 shopt -s nullglob
 files=("$assets"/*.dmg "$assets"/*.app.tar.gz "$assets"/*.app.tar.gz.sig "$assets/latest.json" "$assets/build-info.json")
+bash "$repo_dir/scripts/ensure-updates-repository.sh"
 if [[ "$existing" == true ]]; then
   gh release upload "v$version" "${files[@]}" --repo "$updates_repo" --clobber
   gh release edit "v$version" --repo "$updates_repo" --notes-file "$notes"

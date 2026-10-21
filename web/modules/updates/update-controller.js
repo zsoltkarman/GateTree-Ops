@@ -13,6 +13,7 @@ export function createUpdateController({ invoke = window.__TAURI__.core.invoke, 
     working = value;
     if (!dialog) return;
     dialog.querySelectorAll('button').forEach(button => { button.disabled = value; });
+    dialog.querySelector('[data-update-install]').textContent = value ? 'Updating…' : 'Update and restart';
     dialog.setAttribute('aria-busy', String(value));
   };
   function close() {
@@ -57,7 +58,7 @@ export function createUpdateController({ invoke = window.__TAURI__.core.invoke, 
       });
       await invoke('install_app_update', { expectedVersion: metadata.version });
     } catch (error) {
-      status(String(error));
+      status(`Update failed: ${String(error)}`);
       if (dialog) dialog.querySelector('[data-update-progress]').hidden = true;
     } finally {
       unlisten();
@@ -88,7 +89,12 @@ export function createUpdateController({ invoke = window.__TAURI__.core.invoke, 
       dialog.querySelector('[data-update-install]').hidden = !info.version;
       dialog.querySelector('[data-update-later]').textContent = info.version ? 'Later' : 'Close';
       status(!info.enabled ? 'Automatic updates are available in installed release builds. Debug builds stay unchanged.' : info.version ? 'Your GUI and Agent will update together. Save your work before restarting.' : 'You are using the latest version.');
-    } catch (error) { if (!automatic) status(String(error)); }
+    } catch (error) {
+      if (!automatic) {
+        if (dialog) dialog.querySelector('[data-update-version]').textContent = 'Update information unavailable';
+        status(String(error));
+      }
+    }
     finally { checking = false; }
   }
   return { check, start: () => { notifyTimer = setTimeout(() => check({ automatic: true }), 8000); },

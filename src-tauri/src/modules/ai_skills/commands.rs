@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{State, ipc::Channel};
 
 use crate::modules::workspace::WorkspaceState;
 
@@ -52,10 +52,20 @@ pub fn read_ai_skill(
 }
 
 #[tauri::command]
-pub fn run_ai_skill(
+pub async fn run_ai_skill(
     state: State<'_, WorkspaceState>,
     id: String,
     input: String,
+    on_output: Channel<String>,
 ) -> Result<AiSkillRunResult, String> {
-    AiSkillsService::run_skill(&state, id, input).map_err(|error| error.to_string())
+    let command =
+        AiSkillsService::prepare_skill_run(&state, id, input).map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        super::service::execute_skill(command, |chunk| {
+            let _ = on_output.send(chunk.to_owned());
+        })
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
