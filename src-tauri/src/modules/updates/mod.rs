@@ -209,8 +209,8 @@ pub async fn install_app_update(
         }
         return Err(error);
     }
-    // macOS continues here; Windows installer normally exits and relaunches the GUI.
-    app.restart();
+    // macOS reopens the installed bundle only after this process has exited.
+    crate::platform::relaunch::after_update(&app, &executable)
 }
 
 #[cfg(test)]

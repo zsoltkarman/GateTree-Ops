@@ -1,5 +1,7 @@
 GateTree-Ops
 
+- macOS update relaunch now waits for the previous GUI to terminate, refreshes the installed bundle registration, and opens that bundle normally instead of forcing a new instance. Dock preferences are preserved.
+
 - Installed releases allow one GUI instance; another launch focuses the existing window. Clicking the macOS Dock icon restores and focuses the main window. Debug builds can still run separately.
 
 - Jira report Retry can recover unconfirmed operations after the operator checks the issue and explicitly confirms resending missing operations. Confirmed uploads/comments and completed deployments are preserved. Connection failures before sending are retryable directly.

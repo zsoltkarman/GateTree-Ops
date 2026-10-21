@@ -2,3 +2,4 @@
 //! never directly on macOS or Windows APIs.
 
 pub mod biometric;
+pub mod relaunch;
