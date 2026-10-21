@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local native Mac build, followed by binary-only GitHub release upload.
+# Push the source checkout, then build and publish a binary-only Mac release.
 set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="zsoltkarman/GateTree-Ops-updates"
@@ -8,15 +8,16 @@ usage() {
   cat <<'HELP'
 Usage: ./run-release.sh [--version X.Y.Z] [--yes] [--dry-run] [--upload-only] [--draft]
 
-Prompts for a version, builds a local native macOS DMG and publishes a release to
-zsoltkarman/GateTree-Ops-updates. Only the DMG, checksum and build metadata are
-uploaded, together with the signed updater archive and latest.json. Source,
-debug binaries, workspaces and the running Agent stay unchanged.
+Prompts for a version, runs checks, commits all non-ignored source changes and
+pushes the current branch to origin. Builds a native macOS DMG from that commit
+and publishes binaries to zsoltkarman/GateTree-Ops-updates. Debug binaries and
+the running Agent stay unchanged.
 
   --version X.Y.Z  Use this version without prompting.
   --yes            Use the next available patch version without prompting.
   --dry-run        Show the release plan; do not build or upload.
-  --upload-only    Upload an existing dist/local/X.Y.Z package; requires --version.
+  --upload-only    Upload an existing package without committing/pushing current source.
+                   Requires --version.
   --draft          Upload for review without publishing (default: publish).
 
 Requires macOS, Developer ID signing, native Rust, Tauri CLI and gh auth login.
@@ -58,6 +59,7 @@ assets="$root_dir/dist/local/$version"
 echo "GateTree-Ops release: v$version"
 echo "Build: native macOS, Developer ID signed, not notarized"
 echo "Destination: https://github.com/$repo/releases"
+if ! $upload_only; then echo 'Source: commit all non-ignored changes and push the current branch to origin'; fi
 if $publish; then echo 'Visibility: published after upload'; else echo 'Visibility: draft for review'; fi
 if $dry_run; then echo 'Dry run: no files changed, build or upload started.'; exit 0; fi
 [[ $(uname -s) == Darwin ]] || { echo 'Run this local macOS release on a Mac.' >&2; exit 1; }
@@ -71,14 +73,29 @@ if ! $upload_only; then
   node --test scripts/tests/*.test.mjs
   python3 -m unittest discover -s scripts/tests -p 'test_*.py'
   cargo test --locked --manifest-path src-tauri/Cargo.toml -p gatetree-ops -p gatetree-ops-agent-core --lib
+  source_branch="$(git symbolic-ref --quiet --short HEAD)" || { echo 'Check out a branch before releasing; detached HEAD cannot be pushed automatically.' >&2; exit 1; }
+  git remote get-url origin >/dev/null || { echo 'Configure the source repository origin before releasing.' >&2; exit 1; }
+  echo "Source changes for origin/$source_branch:"
+  git status --short
+  git add --all -- .
+  if ! git diff --cached --quiet; then
+    git diff --cached --stat
+    git commit -m "Release v$version: synchronize source"
+  fi
+  source_commit="$(git rev-parse HEAD)"
+  git push --set-upstream origin "HEAD:refs/heads/$source_branch" || { echo 'Source push failed; no package was built or release uploaded. Resolve the Git error and rerun.' >&2; exit 1; }
+  [[ -z "$(git status --porcelain)" ]] || { echo 'Source changed during synchronization. Commit/push those changes before releasing.' >&2; exit 1; }
+  echo "Source pushed: origin/$source_branch @ $source_commit"
   "$root_dir/scripts/package-macos-local.sh" "$version"
 fi
-python3 - "$assets" "$version" <<'PY'
+python3 - "$assets" "$version" "${source_commit:-}" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
 p=Path(sys.argv[1]);d=json.loads((p/'build-info.json').read_text())
 assert d['version']==sys.argv[2] and d['distribution']=='local' and d['notarized'] is False, 'Unexpected package metadata'
 assert d['target'] in ('aarch64-apple-darwin','x86_64-apple-darwin'), 'Unexpected package target'
+if sys.argv[3]:
+    assert d.get('sourceCommit') == sys.argv[3] and d.get('sourceDirty') is False, 'Package source does not match the pushed clean commit; no release will be uploaded'
 dmgs=list(p.glob('*.dmg'));assert len(dmgs)==1, 'Expected exactly one DMG'
 f=dmgs[0];assert f.name==f"GateTree-Ops-{sys.argv[2]}-{d['target']}.dmg" and f.stat().st_size>0
 digest=hashlib.file_digest(f.open('rb'),'sha256').hexdigest()

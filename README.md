@@ -31,6 +31,8 @@ On Windows, use:
 ```
 
 For a local macOS build and GitHub package upload, run `./run-release.sh`.
+It commits non-ignored source changes and pushes the current branch to `origin`
+before building, so the release source (including new files) is available in Git.
 It offers the next version, builds and publishes the DMG and automatic update
 to `GateTree-Ops-updates`. No switches are needed. See [release instructions](docs/releases.md).
 

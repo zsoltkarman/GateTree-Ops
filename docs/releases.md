@@ -5,7 +5,8 @@
 Run `./run-dev.sh` from the repository root to build and start the debug UI.
 The running Agent is reused.
 
-Run `./run-release.sh` to choose a release version, run checks, build a native
+Run `./run-release.sh` to choose a release version, run checks, commit all non-ignored
+source changes (including new files and deletions), push the current branch to `origin`, and build a native
 Developer ID signed Mac DMG and publish it to `GateTree-Ops-updates`.
 No switches are needed: press Enter to accept the offered version, or type another.
 Authenticate once using `gh auth login`. The default version is the next patch
@@ -17,11 +18,15 @@ the first release is uploaded or published; GitHub needs a commit for release ta
 ./run-release.sh
 ```
 
-`--upload-only` resumes an existing local package without rebuilding.
+`--upload-only` resumes an existing local package without rebuilding or committing/pushing
+the current source checkout.
 Publishing is the default; `--draft` uploads for review instead. Published versions cannot be
 overwritten. Only the DMG, SHA-256 checksum, signed updater archive, build metadata,
-release notes and `latest.json` are uploaded. This command does not commit or push
-source or change the debug version. These local packages are not notarized.
+release notes and `latest.json` are uploaded to the binary updates repository. Source is
+committed/pushed separately to the source repository. The launcher shows the source file
+summary and pushed commit; a rejected push stops before packaging or release upload.
+It never force-pushes. Build metadata must match that pushed, clean source commit.
+The debug version remains unchanged. These local packages are not notarized.
 Publishing activates automatic updates for the CPU architecture built on this
 Mac; the other Mac architecture and Windows are not advertised. For a notarized
 universal automatic-update release, use `scripts/release-macos.sh` below.
