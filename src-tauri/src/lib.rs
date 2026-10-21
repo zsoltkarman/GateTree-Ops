@@ -50,10 +50,27 @@ use modules::workspace::{
     unlock_workspace_for_development, unlock_workspace_with_biometrics,
 };
 
+fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::Manager;
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // Register first so a second release process exits before opening a workspace.
+    // Debug builds can still run alongside the installed application.
+    if !cfg!(debug_assertions) {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            focus_main_window(app);
+        }));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(UpdateState::default())
@@ -164,6 +181,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building GateTree-Ops")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                focus_main_window(app);
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 app.state::<LocalTerminals>().clear();
             }
