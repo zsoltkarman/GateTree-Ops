@@ -95,8 +95,6 @@ pub fn execute(
     let template_name = required_string(olam, template_key)?;
     let template_id = required_id(olam, template_id_key)?;
     let api_credential = credential(credentials, api_account, "OLAM API")?;
-    let deployment_account = deployment_account(plan_definition)?;
-    let deployment_credential = credential(credentials, &deployment_account, "deployment")?;
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .danger_accept_invalid_certs(
@@ -108,36 +106,48 @@ pub fn execute(
         .build()
         .map_err(|error| format!("Could not initialize OLAM HTTP client: {error}"))?;
 
-    verify_template(
-        &client,
-        base_url,
-        template_id,
-        template_name,
-        api_credential,
-    )?;
-    let payload = resolved_payload(job, deployment_credential, environment)?;
-    let launch_url = format!(
-        "{}/api/v2/job_templates/{template_id}/launch/",
-        base_url.trim_end_matches('/')
-    );
-    let launch: Value = checked(
-        client
-            .post(&launch_url)
-            .basic_auth(&api_credential.username, Some(&api_credential.password))
-            .json(&json!({ "extra_vars": payload }))
-            .send()
-            .map_err(|error| {
-                format!("Could not launch OLAM template '{template_name}': {error}")
-            })?,
-        &format!("launch OLAM template '{template_name}'"),
-    )?
-    .json()
-    .map_err(|error| format!("OLAM launch response is invalid: {error}"))?;
-    let job_id = launch
-        .get("id")
-        .and_then(Value::as_i64)
-        .filter(|id| *id > 0)
-        .ok_or_else(|| "OLAM did not return an Ansible job ID.".to_string())?;
+    let existing_job_id = if phase == "deployment" {
+        job.deployment_job_id
+    } else {
+        job.validation_job_id
+    };
+    let job_id = if let Some(id) = existing_job_id.filter(|id| *id > 0) {
+        // GET/poll failures must never fall back to launching a duplicate.
+        id
+    } else {
+        let deployment_account = deployment_account(plan_definition)?;
+        let deployment_credential = credential(credentials, &deployment_account, "deployment")?;
+        verify_template(
+            &client,
+            base_url,
+            template_id,
+            template_name,
+            api_credential,
+        )?;
+        let payload = resolved_payload(job, deployment_credential, environment)?;
+        let launch_url = format!(
+            "{}/api/v2/job_templates/{template_id}/launch/",
+            base_url.trim_end_matches('/')
+        );
+        let launch: Value = checked(
+            client
+                .post(&launch_url)
+                .basic_auth(&api_credential.username, Some(&api_credential.password))
+                .json(&json!({ "extra_vars": payload }))
+                .send()
+                .map_err(|error| {
+                    format!("Could not launch OLAM template '{template_name}': {error}")
+                })?,
+            &format!("launch OLAM template '{template_name}'"),
+        )?
+        .json()
+        .map_err(|error| format!("OLAM launch response is invalid: {error}"))?;
+        launch
+            .get("id")
+            .and_then(Value::as_i64)
+            .filter(|id| *id > 0)
+            .ok_or_else(|| "OLAM did not return an Ansible job ID.".to_string())?
+    };
     on_started(phase, job_id);
     let output = wait_for_job(
         &client,
@@ -474,6 +484,61 @@ mod tests {
                 _ => panic!("unexpected endpoint validation result"),
             }
             server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn resumes_existing_olam_jobs_using_only_get_even_on_remote_failure() {
+        for phase in ["validation", "deployment"] {
+            for status in ["successful", "failed", "canceled", "not_found"] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = std::thread::spawn(move || {
+                    let requests = if status == "not_found" { 1 } else { 3 };
+                    for index in 0..requests {
+                        let (mut stream, _) = listener.accept().unwrap();
+                        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        let mut request = String::new();
+                        reader.read_line(&mut request).unwrap();
+                        let path = if index == 2 { "/api/v2/jobs/68952/stdout/?format=txt" } else { "/api/v2/jobs/68952/" };
+                        assert!(request.starts_with(&format!("GET {path} ")), "unexpected request: {request}");
+                        loop {
+                            let mut header = String::new();
+                            reader.read_line(&mut header).unwrap();
+                            if header == "\r\n" { break; }
+                        }
+                        let body = if index == 2 { "ok: [host-1]".into() }
+                            else { json!({"status": if index == 0 { "running" } else { status }}).to_string() };
+                        let code = if status == "not_found" { "404 Not Found" } else { "200 OK" };
+                        write!(stream, "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    }
+                });
+                let process = json!({"details":{"olam":{
+                    "url":format!("http://{address}"), "account":"api", "payload_defaults":{"ENVIRONMENT":"test"},
+                    "validation_template_job":"Validate", "validation_template_id":1,
+                    "deployment_template_job":"Deploy", "deployment_template_id":2
+                }}}).to_string();
+                let job = AgentJobStatus {
+                    id:"job".into(), sequence:1, name:"Upgrade".into(), driver:"olam".into(),
+                    action: if phase == "deployment" { "deploy" } else { "validate_deployment" }.into(),
+                    target:Some("host-1".into()), details:String::new(), payload:None, status:"running".into(),
+                    log:String::new(), phase:Some(phase.into()),
+                    validation_job_id:if phase == "validation" { Some(68952) } else { Some(100) },
+                    deployment_job_id:if phase == "deployment" { Some(68952) } else { None },
+                    finished_at:None, report_progress:Default::default(),
+                };
+                // Monitoring requires no deployment payload or deployment credential.
+                let result = execute(&process, "{}", &job, &[AgentCredential {
+                    reference:"api".into(), username:"user".into(), password:"test-only".into(),
+                }], &|observed_phase,id| { assert_eq!(observed_phase,phase); assert_eq!(id,68952); }, &|_| {});
+                if status == "successful" {
+                    assert!(matches!(result, Ok(DriverOutcome::Completed(_))));
+                } else {
+                    assert!(result.is_err());
+                }
+                server.join().unwrap();
+            }
         }
     }
 

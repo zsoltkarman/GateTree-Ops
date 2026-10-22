@@ -827,6 +827,23 @@ impl JobSetManager {
         if !credentials.is_empty() {
             self.credentials.insert(set.id.clone(), credentials);
         }
+        // Stopping monitoring does not cancel the remote OLAM job. Reattach to
+        // that execution without resetting its IDs, phase, or following jobs.
+        let job = &mut set.jobs[index];
+        let existing_olam_job = if job.phase.as_deref() == Some("deployment") || job.action == "deploy" {
+            job.deployment_job_id
+        } else {
+            job.validation_job_id
+        };
+        if job.driver == "olam" && job.status == "stopped" && existing_olam_job.is_some_and(|id| id > 0) {
+            job.status = "running".into();
+            job.finished_at = None;
+            append_job_log(&mut job.log, &format!("Resuming monitoring of existing OLAM job {}. No new job will be launched.", existing_olam_job.unwrap()));
+            set.status = "running".into();
+            let result = set.clone();
+            self.persist()?;
+            return Ok(result);
+        }
         let retried_id = set.jobs[index].id.clone();
         for job in &mut set.jobs[index..] {
             if job.status == "disabled" {
@@ -1545,7 +1562,7 @@ fn spawn_job_set_execution(
                 if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
                     && let Some(active) = set.jobs.iter_mut().find(|item| item.id == job.id)
                 {
-                    if matches!(job.driver.as_str(), "olam" | "container") && job.action == "deploy" {
+                    if job.driver == "container" && job.action == "deploy" {
                         if job.phase.as_deref() == Some("deployment") {
                             active.deployment_job_id = None;
                         } else {
@@ -2957,6 +2974,43 @@ mod tests {
         assert_eq!(retried.jobs[0].status, "awaiting_approval");
         assert_eq!(retried.jobs[1].status, "queued");
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stopped_olam_retry_resumes_existing_phase_and_preserves_following_jobs() {
+        for action in ["deploy", "validate_deployment", "validate_deploy"] {
+            for phase in ["validation", "deployment"] {
+                if action == "deploy" && phase == "validation" { continue; }
+                let path = env::temp_dir().join(format!("gatetree-resume-{}.json", uuid::Uuid::new_v4()));
+                let mut manager = JobSetManager::load(path.clone()).unwrap();
+                manager.submit(olam_submission(&[action, "deploy"]), false).unwrap();
+                let set = &mut manager.job_sets[0];
+                set.status = "stopped".into();
+                set.jobs[0].status = "stopped".into();
+                set.jobs[0].phase = Some(phase.into());
+                set.jobs[0].validation_job_id = Some(101);
+                set.jobs[0].deployment_job_id = if phase == "deployment" { Some(68952) } else { None };
+                set.jobs[0].log = "Previous output".into();
+                let following = serde_json::to_value(&set.jobs[1]).unwrap();
+                manager.persist().unwrap();
+                let mut manager = JobSetManager::load(path.clone()).unwrap();
+                let resumed = manager.retry("job-0", vec![AgentCredential {
+                    reference: "api".into(), username: "user".into(), password: "test-only".into(),
+                }]).unwrap();
+                assert_eq!(resumed.status, "running");
+                assert_eq!(resumed.jobs[0].status, "running");
+                assert_eq!(resumed.jobs[0].phase.as_deref(), Some(phase));
+                assert_eq!(resumed.jobs[0].validation_job_id, Some(101));
+                assert_eq!(resumed.jobs[0].deployment_job_id, if phase == "deployment" { Some(68952) } else { None });
+                assert!(resumed.jobs[0].log.starts_with("Previous output"));
+                assert!(resumed.jobs[0].log.contains("Resuming monitoring"));
+                assert_eq!(serde_json::to_value(&resumed.jobs[1]).unwrap(), following);
+                let loaded = JobSetManager::load(path.clone()).unwrap();
+                assert_eq!(loaded.job_sets[0].jobs[0].phase.as_deref(), Some(phase));
+                assert_eq!(loaded.job_sets[0].jobs[0].validation_job_id, Some(101));
+                fs::remove_file(path).unwrap();
+            }
+        }
     }
 
     #[test]
