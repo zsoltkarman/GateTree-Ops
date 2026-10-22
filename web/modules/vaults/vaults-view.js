@@ -67,14 +67,14 @@ function render(root, state) {
         </div>
       </form>
 
-      ${state.message ? `<p class="vault-status${state.isError ? " is-error" : ""}">${escapeHtml(state.message)}</p>` : ""}
+      <p class="vault-status${state.isError ? " is-error" : ""}" role="status" ${state.message ? "" : "hidden"}>${escapeHtml(state.message)}</p>
 
       <section class="vault-entry-list">
         <div class="vault-entry-header"><span>Name</span><span>Path</span><span>Actions</span></div>
         ${state.entries.length ? state.entries.map((entry) => `
           <div class="vault-entry-row">
-            <strong>${escapeHtml(entry.name)}</strong>
-            <code>${escapeHtml(entry.entryPath)}</code>
+            <div class="vault-entry-value"><strong>${escapeHtml(entry.name)}</strong><button type="button" data-copy-entry="name" data-entry-id="${entry.id}" title="Copy name" aria-label="Copy name">${icon("copy")}</button></div>
+            <div class="vault-entry-value"><code>${escapeHtml(entry.entryPath)}</code><button type="button" data-copy-entry="entryPath" data-entry-id="${entry.id}" title="Copy KeePass path" aria-label="Copy KeePass path">${icon("copy")}</button></div>
             <span class="vault-entry-actions">
               <button data-action="edit-entry" data-entry-id="${entry.id}" title="Edit reference" aria-label="Edit ${escapeHtml(entry.name)}">${icon("pencil")}</button>
               <button data-action="delete-entry" data-entry-id="${entry.id}" title="Delete reference" aria-label="Delete ${escapeHtml(entry.name)}">${icon("trash")}</button>
@@ -87,6 +87,30 @@ function render(root, state) {
 }
 
 function bindEvents(root, state) {
+  root.querySelectorAll("[data-copy-entry]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const entry = state.entries.find(item => item.id === button.dataset.entryId);
+      if (!entry) return;
+      const label = button.title;
+      try {
+        await copyVaultText(entry[button.dataset.copyEntry]);
+        button.innerHTML = icon("check");
+        button.title = "Copied";
+        button.setAttribute("aria-label", "Copied");
+        window.setTimeout(() => {
+          if (!button.isConnected) return;
+          button.innerHTML = icon("copy");
+          button.title = label;
+          button.setAttribute("aria-label", label);
+        }, 1500);
+      } catch (cause) {
+        const status = root.querySelector(".vault-status");
+        status.textContent = `Could not copy: ${String(cause)}`;
+        status.classList.add("is-error");
+        status.hidden = false;
+      }
+    });
+  });
   const databaseInput = root.querySelector('[data-role="database-path"]');
   databaseInput.addEventListener("input", () => {
     state.databaseDraft = databaseInput.value;
@@ -184,6 +208,25 @@ function bindEvents(root, state) {
   });
 }
 
+async function copyVaultText(value) {
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(value); return; } catch (_) {}
+  }
+  const previousFocus = document.activeElement;
+  const field = document.createElement("textarea");
+  field.value = value;
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.append(field);
+  try {
+    field.select();
+    if (!document.execCommand("copy")) throw new Error("Clipboard is unavailable. Select the text and copy it manually.");
+  } finally {
+    field.remove();
+    previousFocus?.focus({ preventScroll: true });
+  }
+}
+
 function requestKeePassPassword(root) {
   return new Promise((resolve) => {
     const dialog = document.createElement("dialog");
@@ -237,6 +280,8 @@ function clearEditor(state, keepMessage = false) {
 
 function icon(name) {
   const paths = {
+    copy: "<rect x='8' y='8' width='11' height='11' rx='1.5'/><path d='M16 8V5H5v11h3'/>",
+    check: "<path d='m5 12 4 4L19 6'/>",
     folder: "<path d='M3.5 7.5h6l2-2h9v13h-17z'/>",
     save: "<path d='M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6'/>",
     trash: "<path d='M5 7h14M9 7V4h6v3M7.5 7l.7 13h7.6l.7-13M10 11v5M14 11v5'/>",

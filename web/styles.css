@@ -448,8 +448,13 @@ input:focus { border-color: #58d0d5; box-shadow: 0 0 0 3px rgba(88,208,213,.1); 
 .vault-entry-header span:last-child { text-align: center; }
 .vault-entry-row { min-height: 50px; border-bottom: 1px solid var(--border); }
 .vault-entry-row:last-child { border-bottom: 0; }
-.vault-entry-row strong { overflow: hidden; color: var(--text-strong); font: 12px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; text-overflow: ellipsis; white-space: nowrap; }
-.vault-entry-row code { overflow: hidden; color: var(--text-secondary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.vault-entry-value { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) 24px; align-items: start; gap: 6px; }
+.vault-entry-row strong, .vault-entry-row code { min-width: 0; white-space: normal; overflow-wrap: anywhere; user-select: text; line-height: 1.5; }
+.vault-entry-row strong { color: var(--text-strong); font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size: 11px; font-weight: 400; }
+.vault-entry-row code { color: var(--text-secondary); font-size: 11px; }
+.vault-entry-value button { display: grid; place-items: center; width: 24px; height: 24px; padding: 4px; color: var(--text-muted); border: 0; border-radius: 4px; background: transparent; }
+.vault-entry-value button:hover, .vault-entry-value button:focus-visible { color: var(--accent); background: var(--surface-hover); }
+.vault-entry-value svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .vault-entry-actions { display: flex; justify-content: center; gap: 4px; }
 .vault-entry-actions button { width: 28px; height: 28px; background: transparent; border-color: transparent; }
 .vault-entry-actions button:last-child:hover { color: #d15f5f; }
