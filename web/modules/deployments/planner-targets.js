@@ -3,9 +3,11 @@ import { getLocalDeploymentInventory, getLocalAnsibleSettings } from "./deployme
 
 export function resolvePlannerTargets(snapshot, selection) {
   const roles = new Set(selection.roles); const sites = new Set(selection.sites);
+  const order = new Map((selection.order ?? []).map((key, index) => [key, index]));
   return snapshot.sites.filter(site => sites.has(site.name)).flatMap(site => site.hosts
     .filter(host => host.roles.some(role => roles.has(role)))
-    .map(host => ({ ...host, site: site.name, group: site.group, roles: host.roles.filter(role => roles.has(role)), key: JSON.stringify([site.name, host.name]) })));
+    .map(host => ({ ...host, site: site.name, group: site.group, roles: host.roles.filter(role => roles.has(role)), key: JSON.stringify([site.name, host.name]) })))
+    .sort((a, b) => (order.get(a.key) ?? Infinity) - (order.get(b.key) ?? Infinity));
 }
 
 export function plannerTargetInput(snapshot, selection) {
@@ -53,8 +55,9 @@ export function mountPlannerTargets(root, { draft, loadInventory = getLocalDeplo
       ${snapshot.warnings.length ? `<details class="planner-inventory-warnings"><summary>Inventory notices (${snapshot.warnings.length})</summary>${snapshot.warnings.map(w => `<p>${escapeHtml(w)}</p>`).join("")}</details>` : ""}
       <div class="planner-target-pickers"><section><details class="planner-picker" data-picker="role" ${openPicker === "role" ? "open" : ""}><summary>Role <strong>${escapeHtml(selection.roles[0] || "Select role")}</strong></summary><div class="planner-picker-popover"><input type="search" data-role-search placeholder="Search roles…" aria-label="Search inventory roles" value="${escapeHtml(roleQuery)}"><div class="planner-target-options" data-role-options>${roles.filter(role => role.toLowerCase().includes(roleQuery.toLowerCase())).map(role => `<label><input type="radio" name="planner-target-role" data-target-role value="${escapeHtml(role)}" ${selection.roles.includes(role) ? "checked" : ""}><span>${escapeHtml(role)}</span></label>`).join("") || '<p>No matching roles.</p>'}</div></div></details></section>
       <section><details class="planner-picker" data-picker="site" ${openPicker === "site" ? "open" : ""}><summary>Sites <strong>${escapeHtml(selection.sites.length ? selection.sites.join(", ") : "Select sites")}</strong></summary><div class="planner-picker-popover"><input type="search" data-site-search placeholder="Search sites…" aria-label="Search inventory sites" value="${escapeHtml(siteQuery)}"><div class="planner-target-options">${snapshot.sites.filter(site => site.name.toLowerCase().includes(siteQuery.toLowerCase())).map(site => `<label><input type="checkbox" data-target-site value="${escapeHtml(site.name)}" ${selection.sites.includes(site.name) ? "checked" : ""} ${!counts(site) ? "disabled" : ""}><span>${escapeHtml(site.name)}</span><small>${counts(site)} hosts</small></label>`).join("") || '<p>No matching sites.</p>'}</div></div></details></section></div>
-      <div class="planner-hosts-heading"><h3>Hosts <span>${enabled.length} / ${matches.length} selected</span><span class="planner-job-count">${deploymentJobs} ${deploymentJobs === 1 ? "job" : "jobs"} / step</span></h3>${matches.length ? '<button type="button" data-select-all-hosts>Select all</button>' : ""}</div>
-      <div class="planner-host-table"><table><thead><tr><th aria-label="Selected"></th><th>Host</th><th>IP</th><th>Site</th><th>Role</th></tr></thead><tbody>${matches.map(host => `<tr><td><input type="checkbox" data-target-host value="${escapeHtml(host.key)}" aria-label="Include ${escapeHtml(host.name)}" ${selection.excluded.includes(host.key) ? "" : "checked"}></td><td>${escapeHtml(host.name)}</td><td>${escapeHtml(host.ip || "—")}</td><td>${escapeHtml(host.site)}</td><td>${escapeHtml(host.roles.join(", "))}</td></tr>`).join("") || '<tr><td colspan="5">Select a role and sites to preview the matching hosts.</td></tr>'}</tbody></table></div>
+      <div class="planner-hosts-heading"><h3>Hosts <span>${enabled.length} / ${matches.length} selected</span><span class="planner-job-count">${deploymentJobs} ${deploymentJobs === 1 ? "job" : "jobs"} / step</span></h3>${matches.length ? '<div class="planner-host-actions"><button type="button" data-select-all-hosts>Select all</button><button type="button" data-deselect-all-hosts>Deselect all</button></div>' : ""}</div>
+      <div class="planner-host-table"><table><thead><tr><th aria-label="Selected"></th><th>#</th><th>Host</th><th>IP</th><th>Site</th><th>Role</th><th>Order</th></tr></thead><tbody>${matches.map((host, index) => `<tr><td><input type="checkbox" data-target-host value="${index}" aria-label="Include ${escapeHtml(host.name)}" ${selection.excluded.includes(host.key) ? "" : "checked"}></td><td>${selection.excluded.includes(host.key) ? "—" : enabled.findIndex(item => item.key === host.key) + 1}</td><td>${escapeHtml(host.name)}</td><td>${escapeHtml(host.ip || "—")}</td><td>${escapeHtml(host.site)}</td><td>${escapeHtml(host.roles.join(", "))}</td><td><div class="planner-host-order"><button type="button" data-move-host="${index}" data-direction="-1" aria-label="Move ${escapeHtml(host.name)} up" ${index === 0 || selection.jobMode === "together" ? "disabled" : ""}>↑</button><button type="button" data-move-host="${index}" data-direction="1" aria-label="Move ${escapeHtml(host.name)} down" ${index === matches.length - 1 || selection.jobMode === "together" ? "disabled" : ""}>↓</button></div></td></tr>`).join("") || '<tr><td colspan="7">Select a role and sites to preview the matching hosts.</td></tr>'}</tbody></table></div>
+      ${matches.length > 1 ? `<p class="planner-host-order-note">${selection.jobMode === "together" ? "Choose Separate job per host to set the execution order." : "Hosts run in the numbered order within each step. Use ↑ / ↓ to change the order."}</p>` : ""}
 `;
     content.querySelector("[data-target-refresh]").addEventListener("click", refresh);
     content.querySelector("[data-job-mode]").addEventListener("change", event => { selection.jobMode = event.target.value; render(); });
@@ -87,8 +90,21 @@ export function mountPlannerTargets(root, { draft, loadInventory = getLocalDeplo
     content.querySelectorAll("[data-target-role]").forEach(input => input.addEventListener("change", () => updateList("roles", input.value, input.checked)));
     content.querySelectorAll("[data-target-site]").forEach(input => input.addEventListener("change", () => updateList("sites", input.value, input.checked)));
     content.querySelectorAll("[data-target-host]").forEach(input => input.addEventListener("change", () => {
-      selection.excluded = input.checked ? selection.excluded.filter(v => v !== input.value) : [...selection.excluded, input.value]; render();
+      const key = matches[Number(input.value)].key;
+      selection.excluded = input.checked ? selection.excluded.filter(v => v !== key) : [...new Set([...selection.excluded, key])]; render();
     }));
+    content.querySelectorAll("[data-move-host]").forEach(button => button.addEventListener("click", () => {
+      const index = Number(button.dataset.moveHost), next = index + Number(button.dataset.direction);
+      if (selection.jobMode === "together" || next < 0 || next >= matches.length) return;
+      const order = matches.map(host => host.key);
+      [order[index], order[next]] = [order[next], order[index]];
+      selection.order = order;
+      const scrollTop = content.querySelector(".planner-host-table").scrollTop;
+      render();
+      content.querySelector(".planner-host-table").scrollTop = scrollTop;
+      content.querySelector(`[data-move-host="${next}"][data-direction="${button.dataset.direction}"]`)?.focus({ preventScroll: true });
+    }));
+    content.querySelector("[data-deselect-all-hosts]")?.addEventListener("click", () => { selection.excluded = matches.map(host => host.key); render(); });
     content.querySelector("[data-select-all-hosts]")?.addEventListener("click", () => { selection.excluded = []; render(); });
   }
   async function refresh() {

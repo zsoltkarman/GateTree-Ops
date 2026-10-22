@@ -1106,7 +1106,11 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in sr
 .planner-host-table th { position: sticky; top: 0; text-align: left; color: var(--text-muted); background: var(--surface); font-size: 10px; }
 .planner-host-table td, .planner-host-table th { padding: 8px; border-bottom: 1px solid var(--border); }
 .planner-host-table td { color: var(--text-secondary); overflow-wrap: anywhere; }
-.planner-host-table td:nth-child(3) { white-space: nowrap; }
+.planner-host-table td:nth-child(4) { white-space: nowrap; }
+.planner-host-actions, .planner-host-order { display: flex; gap: 6px; }
+.planner-host-actions { flex-wrap: wrap; justify-content: flex-end; }
+.planner-host-order button { padding: 2px 7px; min-width: 26px; }
+.planner-host-order-note { margin: 5px 0 0; color: var(--text-muted); font-size: 10px; }
 .planner-inventory-note { margin: 10px 0 0; }
 .planner-inventory-warnings { margin: 0 0 12px; color: var(--text-muted); font-size: 11px; }
 .planner-inventory-warnings p { margin: 6px 0; }
