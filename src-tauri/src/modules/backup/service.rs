@@ -19,6 +19,18 @@ const TECHNICAL_TABLES: &[&str] = &["schema_migrations", "workspace_metadata"];
 pub struct BackupService;
 
 impl BackupService {
+    pub fn export_encrypted(state: &WorkspaceState) -> Result<(Vec<u8>, BackupSummary), String> {
+        let (key, salt) = state.backup_encryption_material().map_err(|error| error.to_string())?;
+        let (json, summary) = Self::export_json(state).map_err(|error| error.to_string())?;
+        let json = zeroize::Zeroizing::new(json);
+        Ok((super::encryption::encrypt(&json, &key, &salt)?, summary))
+    }
+
+    pub fn import_bytes(state: &WorkspaceState, bytes: &[u8], password: &str) -> Result<BackupSummary, String> {
+        let json = super::encryption::decode(bytes, password)?;
+        Self::import_json(state, &json).map_err(|error| error.user_message())
+    }
+
     pub fn export_json(state: &WorkspaceState) -> Result<(String, BackupSummary), BackupError> {
         let document = state
             .with_connection(load_document)
@@ -326,6 +338,48 @@ mod tests {
         assert!(validate_and_prepare(&document, &BTreeMap::new()).is_ok());
         document.format = "gatetree-configuration".into();
         assert!(validate_and_prepare(&document, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn encrypted_export_restores_into_another_workspace_without_mutating_on_bad_password() {
+        let directory = std::env::temp_dir().join(format!("gatetree-encrypted-backup-{}", Uuid::new_v4()));
+        let source_dir = directory.join("source");
+        let target_dir = directory.join("target");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&target_dir).unwrap();
+        let source = WorkspaceState::default();
+        let target = WorkspaceState::default();
+        WorkspaceService::create(&source, source_dir.to_string_lossy().into_owned(), "original-workspace-password").unwrap();
+        WorkspaceService::create(&target, target_dir.to_string_lossy().into_owned(), "different-workspace-password").unwrap();
+        for (state, text) in [(&source, "private source content"), (&target, "keep destination untouched")] {
+            state.with_connection(|connection| {
+                connection.execute_batch("CREATE TABLE backup_test_data (content TEXT NOT NULL)")?;
+                connection.execute("INSERT INTO backup_test_data VALUES (?1)", [text])?;
+                Ok(())
+            }).unwrap();
+        }
+        let read = |state: &WorkspaceState| state.with_connection(|connection| {
+            connection.query_row("SELECT content FROM backup_test_data", [], |row| row.get::<_, String>(0))
+        }).unwrap();
+        let (bytes, exported) = BackupService::export_encrypted(&source).unwrap();
+        assert!(BackupService::import_bytes(&target, &bytes, "different-workspace-password").is_err());
+        assert_eq!(read(&target), "keep destination untouched");
+        let mut damaged = bytes.clone();
+        *damaged.last_mut().unwrap() ^= 1;
+        assert!(BackupService::import_bytes(&target, &damaged, "original-workspace-password").is_err());
+        assert_eq!(read(&target), "keep destination untouched");
+        let imported = BackupService::import_bytes(&target, &bytes, "original-workspace-password").unwrap();
+        assert_eq!(imported.records, exported.records);
+        assert_eq!(read(&target), "private source content");
+        let (legacy, _) = BackupService::export_json(&source).unwrap();
+        BackupService::import_bytes(&target, legacy.as_bytes(), "").unwrap();
+        target.lock().unwrap();
+        WorkspaceService::unlock(&target, target_dir.to_string_lossy().into_owned(), "different-workspace-password").unwrap();
+        assert_eq!(read(&target), "private source content");
+        source.lock().unwrap();
+        assert!(BackupService::export_encrypted(&source).is_err());
+        target.lock().unwrap();
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

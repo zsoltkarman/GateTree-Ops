@@ -25,6 +25,7 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 getrandom = "0.3"
 pbkdf2 = "0.12"
+ring = "0.17"
 portable-pty = "0.9"
 gatetree-ops-agent-core = { path = "agent-core" }
 rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }

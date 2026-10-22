@@ -1647,6 +1647,7 @@ dependencies = [
  "objc2-local-authentication",
  "pbkdf2 0.12.2",
  "portable-pty",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

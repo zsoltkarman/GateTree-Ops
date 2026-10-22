@@ -134,6 +134,14 @@ impl WorkspaceState {
             .map_err(WorkspaceError::from)
     }
 
+    pub(crate) fn backup_encryption_material(&self) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), WorkspaceError> {
+        let active = self.active.lock().map_err(|_| WorkspaceError::StatePoisoned)?;
+        let active = active.as_ref().ok_or(WorkspaceError::NotUnlocked)?;
+        let salt = fs::read(salt_path(&active.path))?;
+        if salt.len() != SALT_SIZE { return Err(WorkspaceError::InvalidSalt); }
+        Ok((Zeroizing::new(active.key.to_vec()), salt))
+    }
+
     pub fn with_connection<T>(
         &self,
         operation: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,

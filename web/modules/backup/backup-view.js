@@ -12,17 +12,17 @@ function render(root, state) {
         <span class="backup-card-icon">${icon("export")}</span>
         <div>
           <strong>Export workspace</strong>
-          <p>Save all workspace content to a JSON file.</p>
+          <p>Save an encrypted backup protected by this workspace’s password.</p>
         </div>
-        <button data-action="export" ${state.busy ? "disabled" : ""}>Export JSON</button>
+        <button data-action="export" ${state.busy ? "disabled" : ""}>Export encrypted backup</button>
       </section>
       <section class="backup-card">
         <span class="backup-card-icon">${icon("import")}</span>
         <div>
           <strong>Import workspace</strong>
-          <p>Replace workspace content from a GateTree-Ops JSON backup.</p>
+          <p>Restore an encrypted backup using its original workspace password. Older JSON backups are also supported.</p>
         </div>
-        <button data-action="import" ${state.busy ? "disabled" : ""}>Import JSON</button>
+        <button data-action="import" ${state.busy ? "disabled" : ""}>Import backup</button>
       </section>
       ${state.message ? `<p class="backup-status${state.isError ? " is-error" : ""}">${escapeHtml(state.message)}</p>` : ""}
     </div>`;
@@ -36,8 +36,8 @@ async function exportWorkspace(root, state) {
   try {
     path = await window.__TAURI__.dialog.save({
       title: "Export GateTree-Ops workspace",
-      defaultPath: "gatetree-ops-backup.json",
-      filters: [{ name: "JSON", extensions: ["json"] }],
+      defaultPath: "gatetree-ops-backup.gtbak",
+      filters: [{ name: "Encrypted GateTree-Ops backup", extensions: ["gtbak"] }],
     });
   } catch (cause) {
     showError(root, state, cause);
@@ -46,7 +46,7 @@ async function exportWorkspace(root, state) {
   if (!path) return;
   await run(root, state, async () => {
     const summary = await exportBackup(path);
-    state.message = `Exported ${summary.records} records from ${summary.tables} tables.`;
+    state.message = `Encrypted backup exported: ${summary.records} records from ${summary.tables} tables. Use this workspace’s password to restore it.`;
   });
 }
 
@@ -57,7 +57,7 @@ async function importWorkspace(root, state) {
       directory: false,
       multiple: false,
       title: "Import GateTree-Ops workspace",
-      filters: [{ name: "JSON", extensions: ["json"] }],
+      filters: [{ name: "GateTree-Ops backup", extensions: ["gtbak", "json"] }],
     });
   } catch (cause) {
     showError(root, state, cause);
@@ -65,9 +65,38 @@ async function importWorkspace(root, state) {
   }
   if (!path) return;
   if (!window.confirm("Replace all current workspace content with this backup?")) return;
+  let password = await requestBackupPassword(root);
+  if (password === null) return;
   await run(root, state, async () => {
-    const summary = await importBackup(path);
-    state.message = `Imported ${summary.records} records into ${summary.tables} tables.`;
+    try {
+      const summary = await importBackup(path, password);
+      state.message = `Imported ${summary.records} records into ${summary.tables} tables.`;
+    } finally { password = ""; }
+  });
+}
+
+function requestBackupPassword(root) {
+  return new Promise(resolve => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "queue-password-dialog";
+    dialog.innerHTML = `<form method="dialog">
+      <strong>Decrypt backup</strong>
+      <small>Enter the workspace password used when this backup was exported. For an older unencrypted JSON backup, leave this blank.</small>
+      <label><span>Backup workspace password</span><input type="password" autocomplete="off"></label>
+      <div><button type="button" data-cancel-backup>Cancel</button><button type="submit" class="connection-primary-action">Decrypt and import</button></div>
+    </form>`;
+    root.append(dialog);
+    const input = dialog.querySelector("input");
+    dialog.querySelector("form").addEventListener("submit", event => { event.preventDefault(); dialog.close("import"); });
+    dialog.querySelector("[data-cancel-backup]").addEventListener("click", () => dialog.close("cancel"));
+    dialog.addEventListener("close", () => {
+      const value = dialog.returnValue === "import" ? input.value : null;
+      input.value = "";
+      dialog.remove();
+      resolve(value);
+    }, { once: true });
+    dialog.showModal();
+    requestAnimationFrame(() => input.focus());
   });
 }
 

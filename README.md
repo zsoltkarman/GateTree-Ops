@@ -148,6 +148,16 @@ without changing the Rust workspace contract.
 
 ## Installers and updates
 
+**Backup → Export encrypted backup** creates a `.gtbak` file protected by the
+current workspace password, including when the workspace was unlocked using
+biometrics. Export uses the unlocked key without asking for or saving that password.
+Import asks for the source workspace password used at export time, which can differ
+from the destination workspace password. Wrong passwords and altered files are
+rejected before changing workspace content. Backups use AES-256-GCM with a fresh
+HKDF-derived key and nonce per file. Existing unencrypted JSON backups remain
+importable; leave the backup password blank for those files. Previously exported
+JSON files remain unencrypted.
+
 Installed releases provide **Help → Check for Updates**, version/release-note review,
 signed downloads and coordinated GUI/Agent replacement. Install under
 `~/Applications` on macOS or use the Windows per-user Setup EXE to update without
