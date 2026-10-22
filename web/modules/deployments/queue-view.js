@@ -65,10 +65,18 @@ function queueMarkup(state) {
 function planMarkup(plan, state) {
   const planAction = plan.status === "awaiting_approval" ? "stop" : plan.status === "stopped" ? "restart" : controlAction(plan.status);
   const expanded = Boolean(state.expandedPlans?.has(plan.id));
+  const roles = [...new Set(plan.jobs.flatMap(job => {
+    if (!["olam", "container"].includes(job.driver)) return [];
+    try {
+      const role = JSON.parse(job.payload ?? "null")?.playbook_name;
+      return typeof role === "string" && role.trim() ? [role.trim()] : [];
+    } catch { return []; }
+  }))];
+  const subtitle = `${plan.processName}${roles.length ? ` · ${roles.length === 1 ? "Role" : "Roles"}: ${roles.join(", ")}` : ""}`;
   return `<article class="queue-plan-group${expanded ? " is-expanded" : ""}" data-plan-group="${escapeHtml(plan.id)}">
     <header>
       <button type="button" class="queue-plan-toggle" data-toggle-plan="${escapeHtml(plan.id)}" aria-expanded="${expanded}" aria-controls="queue-plan-body-${escapeHtml(plan.id)}" aria-label="${expanded ? "Collapse" : "Expand"} Plan #${escapeHtml(plan.planNumber)}">
-        ${icon("chevron")}<span class="queue-plan-heading"><strong>Plan #${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</strong><span>${escapeHtml(plan.processName)}</span></span>
+        ${icon("chevron")}<span class="queue-plan-heading"><strong>Plan #${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</strong><span title="${escapeHtml(subtitle).replaceAll('"', '&quot;')}">${escapeHtml(subtitle)}</span></span>
       </button>
       <div class="queue-plan-actions">
         ${state.selectedId ? `<button data-action="add" title="Add Plan" aria-label="Add Plan">${icon("plus")}</button>` : ""}
