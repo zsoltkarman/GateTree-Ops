@@ -7,6 +7,7 @@ import {
   writeAgentSshTerminal,
 } from "../agent/agent-api.js";
 import { escapeHtml } from "../../shared/ui.js";
+import { configureTerminalKeyboard } from "./terminal-keyboard.js";
 
 const encoder = new TextEncoder();
 
@@ -24,10 +25,11 @@ export function mountSshTerminal(root, session, onClose, options = {}) {
           <button type="button" data-action="close-terminal" data-tooltip="${local ? "Close local terminal" : "Disconnect SSH and close terminal"}" aria-label="${local ? "Close local terminal" : "Disconnect SSH and close terminal"}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
         </nav>
       </header>
-      <div class="ssh-terminal" data-role="ssh-terminal"></div>
+      <div class="ssh-terminal" data-role="ssh-terminal"><div class="ssh-terminal-viewport" data-role="ssh-terminal-viewport"></div></div>
     </section>`;
 
   const host = root.querySelector('[data-role="ssh-terminal"]');
+  const viewport = root.querySelector('[data-role="ssh-terminal-viewport"]');
   if (options.theme) {
     host.style.backgroundColor = options.theme.background;
     root.querySelector(".ssh-terminal-shell").style.setProperty("--terminal-foreground", options.theme.foreground);
@@ -48,8 +50,11 @@ export function mountSshTerminal(root, session, onClose, options = {}) {
     },
   });
   const fit = new FitAddon();
+  configureTerminalKeyboard(terminal);
   terminal.loadAddon(fit);
-  terminal.open(host);
+  // FitAddon measures its parent's computed height, including border-box
+  // padding. Use an unpadded viewport so the last row fits inside the shell.
+  terminal.open(viewport);
 
   let disposed = false;
   let reading = false;
@@ -59,7 +64,7 @@ export function mountSshTerminal(root, session, onClose, options = {}) {
   let resizeTimer = null;
   let pollTimer = null;
   const resize = () => {
-    if (disposed || !host.isConnected || !host.clientWidth || !host.clientHeight) return;
+    if (disposed || !viewport.isConnected || !viewport.clientWidth || !viewport.clientHeight) return;
     fit.fit();
     window.clearTimeout(resizeTimer);
     resizeTimer = window.setTimeout(() => {
@@ -67,7 +72,7 @@ export function mountSshTerminal(root, session, onClose, options = {}) {
     }, 80);
   };
   const observer = new ResizeObserver(resize);
-  observer.observe(host);
+  observer.observe(viewport);
   requestAnimationFrame(() => {
     resize();
     if (!root.closest("[hidden]")) terminal.focus();
