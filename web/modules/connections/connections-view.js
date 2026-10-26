@@ -234,8 +234,8 @@ function connectionForm(state) {
       ${isUrl ? "" : `<label><span>Manual username</span><input data-role="connection-username" maxlength="255" autocomplete="off" value="${escapeHtml(existing?.username ?? "")}" /></label>`}
       ${isSsh ? `
         <label><span>SSH engine</span><select data-role="connection-ssh-transport">
-          <option value="embedded"${(existing?.sshTransport ?? "embedded") === "embedded" ? " selected" : ""}>GateTree-Ops embedded SSH</option>
-          <option value="openssh"${existing?.sshTransport === "openssh" ? " selected" : ""}>Local OpenSSH config (ProxyJump / MFA)</option>
+          <option value="openssh"${(existing?.sshTransport ?? "openssh") === "openssh" ? " selected" : ""}>Terminal login (password / MFA / SSH config)</option>
+          <option value="embedded"${existing?.sshTransport === "embedded" ? " selected" : ""}>GateTree-Ops embedded SSH</option>
         </select></label>
         <label><span>Authentication</span><select data-role="connection-authentication">
           ${authenticationOption("password", "Password", authentication)}
@@ -271,6 +271,7 @@ function connectionPanel(connection, state) {
       ${activeSession ? '<span class="connection-running-status"><i></i>Running in Agent</span>' : ""}
       ${activeSession ? `<button class="connection-open-action" data-action="attach-active-session" data-session-id="${activeSession.id}">Show open session</button>` : ""}
       ${connection.connectionType === "ssh" ? `<button class="connection-open-action" data-action="new-ssh-session" data-connection-id="${connection.id}">New SSH session</button>` : ""}
+      ${connection.connectionType === "ssh" && connection.sshTransport !== "openssh" ? `<button class="connection-open-action" data-action="terminal-login" data-connection-id="${connection.id}">Log in in terminal</button>` : ""}
       <button class="connection-secondary-action" data-action="edit-connection" data-connection-id="${connection.id}">Edit</button>
       ${connection.connectionType === "url" ? `<button class="connection-open-action" data-action="open-url" data-connection-id="${connection.id}">Open</button>` : ""}
     </div>`;
@@ -521,6 +522,10 @@ function bindEvents(root, state) {
   root.querySelector('[data-action="new-ssh-session"]')?.addEventListener("click", event => {
     root.querySelector(`.connection-item-row[data-connection-id="${CSS.escape(event.currentTarget.dataset.connectionId)}"]`)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
   });
+  root.querySelector('[data-action="terminal-login"]')?.addEventListener("click", event => {
+    const connection = state.connections.find(item => item.id === event.currentTarget.dataset.connectionId);
+    if (connection) void connectSshInTerminal(root, state, connection);
+  });
   root.querySelector('[data-action="attach-active-session"]')?.addEventListener("click", async event => {
     const sessionId = event.currentTarget.dataset.sessionId;
     await runAction(root, state, async () => {
@@ -533,6 +538,25 @@ function bindEvents(root, state) {
       }
       showSshSession(state, session);
     });
+  });
+}
+
+async function connectSshInTerminal(root, state, connection) {
+  if (connection.connectionType !== "ssh") return;
+  await runAction(root, state, async () => {
+    if (connection.sshTransport !== "openssh") {
+      const updated = await updateConnectionItem(
+        connection.id, connection.name, connection.target, connection.port, connection.tag,
+        connection.username, connection.authentication, connection.credentialReference,
+        "openssh", connection.icon, connection.credentialMode,
+      );
+      Object.assign(connection, updated);
+    }
+    const session = await connectSshWithDialog(connection);
+    if (session) {
+      showSshSession(state, session);
+      state.sshSessions.push(session);
+    }
   });
 }
 
@@ -704,6 +728,7 @@ function showConnectionContextMenu(root, state, connection, x, y) {
   const menu = document.createElement("div");
   menu.className = "connection-context-menu";
   menu.innerHTML = `
+    ${connection.connectionType === "ssh" ? `<button data-context-action="terminal-login">${icon("connection")}<span>Log in in terminal</span></button>` : ""}
     <button data-context-action="quick-launch">${icon("connection")}<span>Add to Quick Launcher</span></button>
     <button data-context-action="copy-target">${icon("copy")}<span>Copy hostname / IP</span></button>
     <button data-context-action="edit">${icon("pencil")}<span>Edit</span></button>`;
@@ -718,6 +743,10 @@ function showConnectionContextMenu(root, state, connection, x, y) {
   };
   window.setTimeout(() => window.addEventListener("pointerdown", close), 0);
   window.addEventListener("blur", close);
+  menu.querySelector('[data-context-action="terminal-login"]')?.addEventListener("click", () => {
+    close();
+    void connectSshInTerminal(root, state, connection);
+  });
   menu.querySelector('[data-context-action="quick-launch"]').addEventListener("click", async () => {
     close();
     try { await pinQuickLaunchItem(connection.id); }

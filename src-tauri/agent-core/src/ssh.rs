@@ -123,7 +123,8 @@ enum SessionBackend {
 
 pub(crate) struct SshSessionManager {
     runtime: Runtime,
-    sessions: HashMap<String, ManagedSession>,
+    sessions: Mutex<HashMap<String, ManagedSession>>,
+    stopping: AtomicBool,
 }
 
 impl SshSessionManager {
@@ -134,7 +135,8 @@ impl SshSessionManager {
             .build()?;
         Ok(Self {
             runtime,
-            sessions: HashMap::new(),
+            sessions: Mutex::new(HashMap::new()),
+            stopping: AtomicBool::new(false),
         })
     }
 
@@ -166,8 +168,16 @@ impl SshSessionManager {
     }
 
     pub(crate) fn connect(
-        &mut self,
+        &self,
         request: SshConnectRequest,
+    ) -> Result<SshSessionStatus, SshManagerError> {
+        self.connect_with_timeout(request, CONNECT_TIMEOUT)
+    }
+
+    fn connect_with_timeout(
+        &self,
+        request: SshConnectRequest,
+        timeout: Duration,
     ) -> Result<SshSessionStatus, SshManagerError> {
         validate_request(&request)?;
         if matches!(request.authentication, SshAuthentication::OpenSsh) {
@@ -189,44 +199,29 @@ impl SshSessionManager {
         let handler = StrictHostKeyClient {
             trusted_key: Arc::new(trusted_key),
         };
-        let mut handle = self.runtime.block_on(async {
-            tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                client::connect(Arc::new(client_config()), (host.as_str(), port), handler),
-            )
-            .await
-            .map_err(|_| SshManagerError::Timeout)?
-            .map_err(SshManagerError::from)
+        // One deadline covers the handshake, authentication and shell setup.
+        // A server or key agent that stalls must not outlive the IPC request.
+        let (handle, channel) = self.runtime.block_on(async {
+            tokio::time::timeout(timeout, async {
+                let mut handle = client::connect(
+                    Arc::new(client_config()), (host.as_str(), port), handler,
+                ).await?;
+                if !authenticate(&mut handle, &username, authentication).await? {
+                    let _ = handle.disconnect(Disconnect::ByApplication, "authentication failed", "en").await;
+                    return Err(SshManagerError::AuthenticationFailed);
+                }
+                let channel = handle.channel_open_session().await?;
+                channel.request_pty(false, "xterm-256color", u32::from(columns), u32::from(rows), 0, 0, &[]).await?;
+                channel.request_shell(false).await?;
+                Ok::<_, SshManagerError>((handle, channel))
+            }).await.map_err(|_| SshManagerError::Timeout)?
         })?;
-
-        let authenticated = self
-            .runtime
-            .block_on(async { authenticate(&mut handle, &username, authentication).await })?;
-        if !authenticated {
-            let _ = self.runtime.block_on(handle.disconnect(
-                Disconnect::ByApplication,
-                "authentication failed",
-                "en",
-            ));
-            return Err(SshManagerError::AuthenticationFailed);
+        let mut sessions = self.sessions.lock().map_err(|_| SshManagerError::StatePoisoned)?;
+        if self.stopping.load(Ordering::Acquire) {
+            drop(sessions);
+            let _ = self.runtime.block_on(handle.disconnect(Disconnect::ByApplication, "Agent stopped", "en"));
+            return Err(SshManagerError::TerminalClosed);
         }
-
-        let channel = self.runtime.block_on(async {
-            let channel = handle.channel_open_session().await?;
-            channel
-                .request_pty(
-                    false,
-                    "xterm-256color",
-                    u32::from(columns),
-                    u32::from(rows),
-                    0,
-                    0,
-                    &[],
-                )
-                .await?;
-            channel.request_shell(false).await?;
-            Ok::<_, russh::Error>(channel)
-        })?;
         let (mut reader, writer) = channel.split();
         let output = Arc::new(Mutex::new(TerminalBuffer::default()));
         let reader_output = Arc::clone(&output);
@@ -262,7 +257,7 @@ impl SshSessionManager {
             keepalive_interval_seconds: KEEPALIVE_INTERVAL.as_secs(),
             keepalive_max_failures: KEEPALIVE_MAX_FAILURES,
         };
-        self.sessions.insert(
+        sessions.insert(
             id,
             ManagedSession {
                 status: status.clone(),
@@ -275,8 +270,16 @@ impl SshSessionManager {
     }
 
     fn connect_openssh(
-        &mut self,
+        &self,
         request: SshConnectRequest,
+    ) -> Result<SshSessionStatus, SshManagerError> {
+        self.connect_openssh_with_command(request, CommandBuilder::new(openssh_executable()))
+    }
+
+    fn connect_openssh_with_command(
+        &self,
+        request: SshConnectRequest,
+        mut command: CommandBuilder,
     ) -> Result<SshSessionStatus, SshManagerError> {
         let pair = native_pty_system().openpty(PtySize {
             rows: request.rows,
@@ -284,10 +287,11 @@ impl SshSessionManager {
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        let mut command = CommandBuilder::new(openssh_executable());
         let port = request.port.to_string();
         command.args([
             "-tt",
+            "-o",
+            "BatchMode=no",
             "-o",
             "ServerAliveInterval=20",
             "-o",
@@ -298,6 +302,7 @@ impl SshSessionManager {
         command.args(["-l", request.username.trim()]);
         command.arg(request.host.as_str());
         command.env("TERM", "xterm-256color");
+        command.env("SSH_ASKPASS_REQUIRE", "never");
 
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
@@ -337,7 +342,14 @@ impl SshSessionManager {
             keepalive_interval_seconds: KEEPALIVE_INTERVAL.as_secs(),
             keepalive_max_failures: KEEPALIVE_MAX_FAILURES,
         };
-        self.sessions.insert(
+        let mut sessions = self.sessions.lock().map_err(|_| SshManagerError::StatePoisoned)?;
+        if self.stopping.load(Ordering::Acquire) {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(SshManagerError::TerminalClosed);
+        }
+        sessions.insert(
             id,
             ManagedSession {
                 status: status.clone(),
@@ -353,13 +365,13 @@ impl SshSessionManager {
         Ok(status)
     }
 
-    pub(crate) fn list(&mut self) -> Vec<SshSessionStatus> {
-        self.sessions.retain(|_, session| match &session.backend {
+    pub(crate) fn list(&self) -> Vec<SshSessionStatus> {
+        let mut sessions = self.sessions.lock().expect("SSH session lock");
+        sessions.retain(|_, session| match &session.backend {
             SessionBackend::Russh { handle, .. } => !handle.is_closed(),
             SessionBackend::OpenSsh { .. } => !session.closed.load(Ordering::Acquire),
         });
-        let mut sessions = self
-            .sessions
+        let mut sessions = sessions
             .values()
             .map(|session| {
                 let mut status = session.status.clone();
@@ -375,9 +387,10 @@ impl SshSessionManager {
         sessions
     }
 
-    pub(crate) fn disconnect(&mut self, id: &str) -> Result<(), SshManagerError> {
+    pub(crate) fn disconnect(&self, id: &str) -> Result<(), SshManagerError> {
         let session = self
             .sessions
+            .lock().map_err(|_| SshManagerError::StatePoisoned)?
             .remove(id)
             .ok_or(SshManagerError::SessionNotFound)?;
         match session.backend {
@@ -398,8 +411,8 @@ impl SshSessionManager {
     }
 
     pub(crate) fn write_terminal(&self, id: &str, data: Vec<u8>) -> Result<(), SshManagerError> {
-        let session = self
-            .sessions
+        let sessions = self.sessions.lock().map_err(|_| SshManagerError::StatePoisoned)?;
+        let session = sessions
             .get(id)
             .ok_or(SshManagerError::SessionNotFound)?;
         if session.closed.load(Ordering::Acquire) {
@@ -426,8 +439,8 @@ impl SshSessionManager {
         rows: u16,
     ) -> Result<(), SshManagerError> {
         validate_terminal_size(columns, rows)?;
-        let session = self
-            .sessions
+        let sessions = self.sessions.lock().map_err(|_| SshManagerError::StatePoisoned)?;
+        let session = sessions
             .get(id)
             .ok_or(SshManagerError::SessionNotFound)?;
         match &session.backend {
@@ -452,8 +465,8 @@ impl SshSessionManager {
         offset: Option<u64>,
         maximum_bytes: usize,
     ) -> Result<SshTerminalChunk, SshManagerError> {
-        let session = self
-            .sessions
+        let sessions = self.sessions.lock().map_err(|_| SshManagerError::StatePoisoned)?;
+        let session = sessions
             .get(id)
             .ok_or(SshManagerError::SessionNotFound)?;
         let output = session
@@ -482,8 +495,13 @@ impl SshSessionManager {
         })
     }
 
-    pub(crate) fn disconnect_all(&mut self) {
-        for (_, session) in self.sessions.drain() {
+    pub(crate) fn disconnect_all(&self) {
+        let sessions = {
+            let mut sessions = self.sessions.lock().expect("SSH session lock");
+            self.stopping.store(true, Ordering::Release);
+            std::mem::take(&mut *sessions)
+        };
+        for (_, session) in sessions {
             match session.backend {
                 SessionBackend::Russh { handle, .. } => {
                     let _ = self.runtime.block_on(handle.disconnect(
@@ -749,7 +767,7 @@ pub(crate) enum SshManagerError {
     SshAgentUnavailable(String),
     #[error("SSH keyboard-interactive authentication sent too many prompts")]
     TooManyAuthenticationPrompts,
-    #[error("SSH connection timed out")]
+    #[error("SSH connection setup timed out after 15 seconds (handshake, authentication or shell setup)")]
     Timeout,
     #[error("SSH session was not found")]
     SessionNotFound,
@@ -791,7 +809,7 @@ mod tests {
     const PASSWORD: &str = "test-only-password";
 
     #[derive(Clone)]
-    struct TestHandler;
+    struct TestHandler { auth_delay: Duration }
 
     impl server::Handler for TestHandler {
         type Error = russh::Error;
@@ -801,6 +819,7 @@ mod tests {
             user: &str,
             password: &str,
         ) -> Result<server::Auth, Self::Error> {
+            tokio::time::sleep(self.auth_delay).await;
             Ok(if user == USERNAME && password == PASSWORD {
                 server::Auth::Accept
             } else {
@@ -862,6 +881,10 @@ mod tests {
 
     impl TestServer {
         fn start() -> Self {
+            Self::start_with_auth_delay(Duration::ZERO)
+        }
+
+        fn start_with_auth_delay(auth_delay: Duration) -> Self {
             let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
             let public_key = host_key.public_key().to_openssh().unwrap();
             let stop = Arc::new(AtomicBool::new(false));
@@ -885,7 +908,7 @@ mod tests {
                             let config = Arc::clone(&config);
                             tokio::spawn(async move {
                                 if let Ok(session) =
-                                    server::run_stream(config, socket, TestHandler).await
+                                    server::run_stream(config, socket, TestHandler { auth_delay }).await
                                 {
                                     let _ = session.await;
                                 }
@@ -913,6 +936,23 @@ mod tests {
     }
 
     #[test]
+    fn stalled_authentication_obeys_the_connection_deadline_without_creating_a_session() {
+        let server = TestServer::start_with_auth_delay(Duration::from_secs(5));
+        let manager = SshSessionManager::new().unwrap();
+        let started = std::time::Instant::now();
+        let result = manager.connect_with_timeout(SshConnectRequest {
+            connection_id: "slow-auth".into(), name: "Slow authentication".into(),
+            host: server.address.ip().to_string(), port: server.address.port(),
+            username: USERNAME.into(),
+            authentication: SshAuthentication::Password { password: PASSWORD.into() },
+            trusted_host_key: server.public_key.clone(), columns: 80, rows: 24,
+        }, Duration::from_millis(300));
+        assert!(matches!(result, Err(SshManagerError::Timeout)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(manager.list().is_empty());
+    }
+
+    #[test]
     fn openssh_requires_an_explicit_username_instead_of_using_the_local_account() {
         let mut request = SshConnectRequest {
             connection_id: "connection".into(),
@@ -932,10 +972,49 @@ mod tests {
         assert!(validate_request(&request).is_ok());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn terminal_login_exposes_password_and_mfa_prompts_before_authentication_finishes() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!("gatetree-interactive-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("fake-ssh");
+        std::fs::write(&script, "#!/bin/sh\nstty -echo\nprintf 'Password: '\nIFS= read -r login_password\nprintf '\\r\\nMFA: '\nIFS= read -r login_otp\nunset login_password login_otp\nstty echo\nprintf '\\r\\nAuthenticated\\r\\n'\nIFS= read -r keep_open\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let manager = SshSessionManager::new().unwrap();
+        let session = manager.connect_openssh_with_command(SshConnectRequest {
+            connection_id: "interactive-test".into(), name: "Test terminal login".into(),
+            host: "unused.test".into(), port: 22, username: "test-user".into(),
+            authentication: SshAuthentication::OpenSsh, trusted_host_key: String::new(), columns: 80, rows: 24,
+        }, CommandBuilder::new(&script)).unwrap();
+        let wait_for = |expected: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                let chunk = manager.read_terminal(&session.id, None, 4096).unwrap();
+                let output = String::from_utf8_lossy(&chunk.data).to_string();
+                if output.contains(expected) { return output; }
+                assert!(!chunk.closed, "Terminal closed before showing {expected}: {output}");
+                assert!(std::time::Instant::now() < deadline, "Missing {expected}: {output}");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let first = wait_for("Password: ");
+        assert!(!first.contains("Authenticated"));
+        manager.write_terminal(&session.id, b"test-password\r".to_vec()).unwrap();
+        let second = wait_for("MFA: ");
+        assert!(!second.contains("test-password"));
+        assert!(!second.contains("Authenticated"));
+        manager.write_terminal(&session.id, b"123456\r".to_vec()).unwrap();
+        let authenticated = wait_for("Authenticated");
+        assert!(!authenticated.contains("123456"));
+        manager.disconnect(&session.id).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn opening_a_second_ssh_session_keeps_the_first_session_working() {
         let server = TestServer::start();
-        let mut manager = SshSessionManager::new().unwrap();
+        let manager = SshSessionManager::new().unwrap();
         let scanned = manager
             .scan_host_key(server.address.ip().to_string(), server.address.port())
             .unwrap();

@@ -1162,10 +1162,11 @@ fn run_server_at(paths: AgentPaths) -> Result<(), AgentIpcError> {
     };
     write_endpoint(&paths, &endpoint)?;
 
-    let mut ssh_sessions =
-        ssh::SshSessionManager::new().map_err(|error| AgentIpcError::Ssh(error.to_string()))?;
+    let ssh_sessions = Arc::new(
+        ssh::SshSessionManager::new().map_err(|error| AgentIpcError::Ssh(error.to_string()))?,
+    );
     let job_sets = Arc::new(Mutex::new(JobSetManager::load(paths.job_sets.clone())?));
-    let result = serve(&listener, &endpoint, &mut ssh_sessions, job_sets);
+    let result = serve(&listener, &endpoint, ssh_sessions, job_sets);
     remove_owned_endpoint(&paths, &endpoint);
     drop(lock);
     result
@@ -1174,7 +1175,7 @@ fn run_server_at(paths: AgentPaths) -> Result<(), AgentIpcError> {
 fn serve(
     listener: &TcpListener,
     endpoint: &AgentEndpoint,
-    ssh_sessions: &mut ssh::SshSessionManager,
+    ssh_sessions: Arc<ssh::SshSessionManager>,
     job_sets: Arc<Mutex<JobSetManager>>,
 ) -> Result<(), AgentIpcError> {
     // Keep authenticated health checks responsive while SSH handshakes or
@@ -1226,11 +1227,12 @@ fn serve(
 fn serve_requests(
     requests: std::sync::mpsc::Receiver<(TcpStream, Result<AgentRequest, AgentIpcError>)>,
     endpoint: &AgentEndpoint,
-    ssh_sessions: &mut ssh::SshSessionManager,
+    ssh_sessions: Arc<ssh::SshSessionManager>,
     job_sets: Arc<Mutex<JobSetManager>>,
 ) -> Result<(), AgentIpcError> {
     let mut update_reserved = false;
     let mut reservation_deadline = Instant::now();
+    let pending_ssh = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for (mut stream, request) in requests {
         if update_reserved && Instant::now() >= reservation_deadline {
             update_reserved = false;
@@ -1271,7 +1273,8 @@ fn serve_requests(
                                         )
                                     })
                             });
-                            if busy || !ssh_sessions.list().is_empty() {
+                            if busy || !ssh_sessions.list().is_empty()
+                                || pending_ssh.load(std::sync::atomic::Ordering::Acquire) > 0 {
                                 (
                                     error_response(
                                         "Finish or stop active deployments and close SSH sessions before installing the update.",
@@ -1307,24 +1310,32 @@ fn serve_requests(
                             (success_response(), true)
                         }
                         AgentAction::ScanSshHostKey { host, port } => {
-                            match ssh_sessions.scan_host_key(host, port) {
-                                Ok(host_key) => {
-                                    let mut response = success_response();
-                                    response.ssh_host_key = Some(host_key);
-                                    (response, false)
+                            let sessions = ssh_sessions.clone();
+                            let _ = dispatch_ssh_request(pending_ssh.clone(), stream, move || {
+                                match sessions.scan_host_key(host, port) {
+                                    Ok(host_key) => {
+                                        let mut response = success_response();
+                                        response.ssh_host_key = Some(host_key);
+                                        response
+                                    }
+                                    Err(error) => error_response(&error.to_string()),
                                 }
-                                Err(error) => (error_response(&error.to_string()), false),
-                            }
+                            });
+                            continue;
                         }
                         AgentAction::ConnectSsh { request } => {
-                            match ssh_sessions.connect(request) {
-                                Ok(session) => {
-                                    let mut response = success_response();
-                                    response.ssh_session = Some(session);
-                                    (response, false)
+                            let sessions = ssh_sessions.clone();
+                            let _ = dispatch_ssh_request(pending_ssh.clone(), stream, move || {
+                                match sessions.connect(request) {
+                                    Ok(session) => {
+                                        let mut response = success_response();
+                                        response.ssh_session = Some(session);
+                                        response
+                                    }
+                                    Err(error) => error_response(&error.to_string()),
                                 }
-                                Err(error) => (error_response(&error.to_string()), false),
-                            }
+                            });
+                            continue;
                         }
                         AgentAction::ListSshSessions => {
                             let mut response = success_response();
@@ -1541,6 +1552,36 @@ fn serve_requests(
         if shutdown {
             return Ok(());
         }
+    }
+    Ok(())
+}
+
+fn dispatch_ssh_request(
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+    mut stream: TcpStream,
+    operation: impl FnOnce() -> AgentResponse + Send + 'static,
+) -> Result<(), std::io::Error> {
+    use std::sync::atomic::Ordering;
+    // Admission is serialized by the command worker; only completion is concurrent.
+    if pending.load(Ordering::Acquire) >= 4 {
+        let _ = write_response(&mut stream, &error_response("Too many SSH connections are being opened. Wait for them to finish."));
+        return Ok(());
+    }
+    let mut error_stream = stream.try_clone()?;
+    pending.fetch_add(1, Ordering::AcqRel);
+    struct PendingSsh(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for PendingSsh {
+        fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
+    }
+    let guard = PendingSsh(pending);
+    let result = thread::Builder::new().name("gatetree-ops-ssh-connect".into()).spawn(move || {
+        let _guard = guard;
+        let response = operation();
+        let _ = write_response(&mut stream, &response);
+    });
+    if let Err(error) = result {
+        let _ = write_response(&mut error_stream, &error_response(&format!("Could not start SSH connection worker: {error}")));
+        return Err(error);
     }
     Ok(())
 }
@@ -1833,6 +1874,11 @@ fn request(endpoint: &AgentEndpoint, action: AgentAction) -> Result<AgentRespons
         return Err(AgentIpcError::InvalidEndpoint);
     }
     let lifecycle = matches!(&action, AgentAction::Ping | AgentAction::Shutdown);
+    let operation = match &action {
+        AgentAction::ScanSshHostKey { .. } => "checking the SSH host key",
+        AgentAction::ConnectSsh { .. } => "opening the SSH connection",
+        _ => "waiting for the Agent response",
+    };
     if !lifecycle && endpoint.protocol_version != PROTOCOL_VERSION {
         return Err(AgentIpcError::ProtocolMismatch);
     }
@@ -1864,7 +1910,16 @@ fn request(endpoint: &AgentEndpoint, action: AgentAction) -> Result<AgentRespons
     let mut line = String::new();
     BufReader::new(stream)
         .take(MAX_MESSAGE_BYTES)
-        .read_to_string(&mut line)?;
+        .read_line(&mut line)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                AgentIpcError::RequestTimedOut(operation)
+            }
+            _ => AgentIpcError::Io(error),
+        })?;
+    if line.len() as u64 >= MAX_MESSAGE_BYTES {
+        return Err(AgentIpcError::MessageTooLarge);
+    }
     let response: AgentResponse = serde_json::from_str(line.trim())?;
     if response.protocol_version != protocol_version {
         return Err(AgentIpcError::ProtocolMismatch);
@@ -2171,6 +2226,8 @@ pub enum AgentIpcError {
     MessageTooLarge,
     #[error("GateTree-Ops Agent response did not contain {0}")]
     InvalidResponse(String),
+    #[error("GateTree-Ops Agent timed out while {0}. The operation may still finish; check its status before retrying.")]
+    RequestTimedOut(&'static str),
     #[error("GateTree-Ops Agent SSH manager failed: {0}")]
     Ssh(String),
     #[error("GateTree-Ops Agent job set is invalid: {0}")]
@@ -2186,6 +2243,42 @@ pub enum AgentIpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_ipc_response_does_not_wait_for_the_connection_to_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = AgentEndpoint { protocol_version: PROTOCOL_VERSION,
+            address: listener.local_addr().unwrap(), token: "test-token".into(), pid: 1 };
+        let (release, wait) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream).unwrap();
+            write_response(&mut stream, &success_response()).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(3));
+        });
+        let result = request(&endpoint, AgentAction::Ping);
+        let _ = release.send(());
+        server.join().unwrap();
+        assert!(result.unwrap().ok);
+    }
+
+    #[test]
+    fn ipc_read_timeout_has_an_actionable_error_instead_of_a_raw_os_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = AgentEndpoint { protocol_version: PROTOCOL_VERSION,
+            address: listener.local_addr().unwrap(), token: "test-token".into(), pid: 1 };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream).unwrap();
+            thread::sleep(Duration::from_millis(2400));
+        });
+        let result = request(&endpoint, AgentAction::Ping);
+        server.join().unwrap();
+        let error = result.unwrap_err();
+        assert!(matches!(error, AgentIpcError::RequestTimedOut(_)));
+        assert!(error.to_string().contains("check its status before retrying"));
+        assert!(!error.to_string().contains("os error"));
+    }
 
     #[test]
     fn migrates_legacy_plan_state_once_without_endpoints_or_active_legacy_agents() {
@@ -3270,22 +3363,39 @@ mod tests {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(10));
         };
-        let slow_ssh = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = slow_ssh.local_addr().unwrap();
-        let scan_endpoint = endpoint.clone();
-        let scan = thread::spawn(move || request(&scan_endpoint, AgentAction::ScanSshHostKey {
-            host: address.ip().to_string(), port: address.port(),
-        }));
-        // Accept the SSH connection but withhold its banner until after Ping.
-        let (connection, _) = slow_ssh.accept().unwrap();
-        let started = Instant::now();
-        let ping = request(&endpoint, AgentAction::Ping);
-        drop(connection);
-        let scan = scan.join().unwrap().unwrap();
-        assert!(!scan.ok);
-        assert!(ping.unwrap().running, "SSH handshakes must not make the Agent appear stopped");
-        assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(request(&endpoint, AgentAction::ListSshSessions).unwrap().ok);
+        for connect in [false, true] {
+            let slow_ssh = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = slow_ssh.local_addr().unwrap();
+            let scan_endpoint = endpoint.clone();
+            let action = if connect {
+                let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).unwrap();
+                AgentAction::ConnectSsh { request: SshConnectRequest {
+                    connection_id: "test".into(), name: "Slow SSH".into(),
+                    host: address.ip().to_string(), port: address.port(), username: "test".into(),
+                    authentication: SshAuthentication::Password { password: "test".into() },
+                    trusted_host_key: key.public_key().to_openssh().unwrap(), columns: 80, rows: 24,
+                } }
+            } else {
+                AgentAction::ScanSshHostKey { host: address.ip().to_string(), port: address.port() }
+            };
+            let scan = thread::spawn(move || request(&scan_endpoint, action));
+            // Accept the SSH connection but withhold its banner until after Ping.
+            let (connection, _) = slow_ssh.accept().unwrap();
+            let started = Instant::now();
+            let ping = request(&endpoint, AgentAction::Ping);
+            let sessions = request(&endpoint, AgentAction::ListSshSessions);
+            let plans = request(&endpoint, AgentAction::ListJobSets);
+            let update = reserve_update(&endpoint);
+            drop(connection);
+            let scan = scan.join().unwrap().unwrap();
+            assert!(!scan.ok);
+            assert!(ping.unwrap().running, "SSH handshakes must not make the Agent appear stopped");
+            assert!(sessions.unwrap().ok, "Session polling must not time out during SSH setup");
+            assert!(plans.unwrap().ok, "Queue polling must not time out during SSH setup");
+            assert!(update.is_err(), "Pending SSH setup must block an application update");
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(request(&endpoint, AgentAction::ListSshSessions).unwrap().ok);
+        }
         assert!(request(&endpoint, AgentAction::Shutdown).unwrap().ok);
         server.join().unwrap().unwrap();
         fs::remove_dir_all(runtime).unwrap();

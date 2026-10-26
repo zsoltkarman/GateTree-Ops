@@ -68,6 +68,13 @@ OpenSSH connections. OpenSSH receives that explicit username and never falls
 back to the local operating-system account. **Close** disconnects the SSH session
 and closes the terminal; **Detach** keeps the session open in a separate window.
 
+New SSH connections default to **Terminal login**, which opens the terminal
+before authentication so password, MFA and SSH configuration prompts are visible
+and interactive from the start. For an existing connection, choose **Log in in
+terminal** in its details or right-click menu to save this mode and connect.
+KeePass supplies the username in this mode; password and MFA responses are
+entered in the terminal. Embedded SSH remains available in the connection editor.
+
 SSH host keys are stored in the encrypted workspace by host and port. GateTree-Ops
 marks first-seen keys as unknown and blocks silent replacement when a trusted
 key changes. Active SSH transports send a keepalive every 20 seconds and are

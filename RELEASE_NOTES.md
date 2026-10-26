@@ -1,5 +1,9 @@
 GateTree-Ops
 
+- New SSH connections default to interactive terminal login. Existing connections offer Log in in terminal in their details and right-click menu; password and MFA prompts are visible from the start.
+
+- Slow SSH handshakes and authentication no longer block session and Plan status polling. Native SSH setup has a 15-second deadline covering authentication and shell setup; Agent timeouts now show a descriptive error instead of raw OS error 35.
+
 - Inactive Plans now have a Delete Plan button beside Focus in Agent activity. Deletion removes Queue and Agent history permanently; active Plans must be stopped first.
 
 - macOS update relaunch now waits for the previous GUI to terminate, refreshes the installed bundle registration, and opens that bundle normally instead of forcing a new instance. Dock preferences are preserved.
