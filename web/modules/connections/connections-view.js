@@ -730,7 +730,8 @@ function showConnectionContextMenu(root, state, connection, x, y) {
   menu.innerHTML = `
     ${connection.connectionType === "ssh" ? `<button data-context-action="terminal-login">${icon("connection")}<span>Log in in terminal</span></button>` : ""}
     <button data-context-action="quick-launch">${icon("connection")}<span>Add to Quick Launcher</span></button>
-    <button data-context-action="copy-target">${icon("copy")}<span>Copy hostname / IP</span></button>
+    ${connection.connectionType === "ssh" ? `<button data-context-action="copy-hostname">${icon("copy")}<span>Copy hostname</span></button>` : ""}
+    <button data-context-action="copy-target">${icon("copy")}<span>${connection.connectionType === "ssh" ? "Copy IP" : "Copy hostname / IP"}</span></button>
     <button data-context-action="edit">${icon("pencil")}<span>Edit</span></button>`;
   document.body.append(menu);
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -756,6 +757,15 @@ function showConnectionContextMenu(root, state, connection, x, y) {
     close();
     try {
       await copyText(connection.target);
+    } catch (cause) {
+      state.error = String(cause);
+      render(root, state);
+    }
+  });
+  menu.querySelector('[data-context-action="copy-hostname"]')?.addEventListener("click", async () => {
+    close();
+    try {
+      await copyText(connection.name);
     } catch (cause) {
       state.error = String(cause);
       render(root, state);
