@@ -52,6 +52,10 @@ function renderShell(session) {
 
   function queueChanged(plans) {
     if (disposed) return;
+    const ids = new Set(plans.map(plan => plan.id));
+    for (const id of plansById.keys()) {
+      if (!ids.has(id)) { plansById.delete(id); tabs.remove(`plan:${id}`); }
+    }
     for (const plan of plans) {
       plansById.set(plan.id, plan);
       tabs.update(`plan:${plan.id}`, { title: `#${plan.planNumber} · ${plan.name}`, status: plan.status });
@@ -138,6 +142,7 @@ function renderShell(session) {
       mountBackupView(content);
     } else if (module === "agent") {
       void mountAgentView(content, { ...(detail ?? {}), onFocusDeploymentPlan: openPlan,
+        onQueueChange: queueChanged,
         onAttachSshSession: session => { void attachSsh(session).catch(fail); }, onSnapshot: snapshot => { void syncSessions(snapshot).catch(fail); } });
     } else if (module === "ai-skills") {
       mountAiSkillsView(content, detail ?? {}, { onCatalogChange: (libraries, skills, groups) => shell.setAiSkillsNavigation(libraries, skills, groups) });

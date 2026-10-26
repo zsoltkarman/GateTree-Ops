@@ -1,5 +1,7 @@
 GateTree-Ops
 
+- Inactive Plans now have a Delete Plan button beside Focus in Agent activity. Deletion removes Queue and Agent history permanently; active Plans must be stopped first.
+
 - macOS update relaunch now waits for the previous GUI to terminate, refreshes the installed bundle registration, and opens that bundle normally instead of forcing a new instance. Dock preferences are preserved.
 
 - Installed releases allow one GUI instance; another launch focuses the existing window. Clicking the macOS Dock icon restores and focuses the main window. Debug builds can still run separately.

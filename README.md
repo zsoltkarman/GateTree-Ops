@@ -59,6 +59,10 @@ a Plan tab only closes the view, and execution continues in the Agent. **Detach*
 moves an SSH view to its own window. Live sessions are available again after a
 GUI restart. URL links remain in the system browser and Overview.
 
+Inactive Plans can be deleted directly beside **Focus** in the Agent activity
+list. Confirming deletion removes the Plan and its job history from both the
+Queue and Agent, including after restart. Stop active Plans before deleting them.
+
 New SSH connections prompt for a username in an empty field, including local
 OpenSSH connections. OpenSSH receives that explicit username and never falls
 back to the local operating-system account. **Close** disconnects the SSH session

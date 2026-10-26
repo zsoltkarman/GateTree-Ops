@@ -43,6 +43,9 @@ pub fn delete_deployment_plan(
     state: State<'_, WorkspaceState>,
     id: String,
 ) -> Result<QueueSnapshot, String> {
+    // Load persisted Agent history too, so an offline deletion cannot reappear on restart.
+    agent_ipc::start().map_err(|error| error.to_string())?;
+    agent_ipc::delete_job_set(id.clone()).map_err(|error| error.to_string())?;
     QueueService::delete(&state, &id).map_err(|error| error.to_string())?;
     QueueService::snapshot(&state).map_err(|error| error.to_string())
 }

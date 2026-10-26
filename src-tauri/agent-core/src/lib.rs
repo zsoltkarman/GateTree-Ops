@@ -24,7 +24,7 @@ pub use ssh::{
     SshAuthentication, SshConnectRequest, SshHostKey, SshSessionStatus, SshTerminalChunk,
 };
 
-pub const PROTOCOL_VERSION: u16 = 19;
+pub const PROTOCOL_VERSION: u16 = 20;
 const ENDPOINT_FILE: &str = "agent-endpoint.json";
 const LOCK_FILE: &str = "agent.lock";
 const JOB_SETS_FILE: &str = "agent-job-sets.json";
@@ -185,6 +185,9 @@ enum AgentAction {
         credentials: Vec<AgentCredential>,
     },
     StopJobSet {
+        job_set_id: String,
+    },
+    DeleteJobSet {
         job_set_id: String,
     },
     SetApproveAll {
@@ -581,6 +584,10 @@ pub fn stop_job_set(job_set_id: String) -> Result<AgentJobSetStatus, AgentIpcErr
     let endpoint = read_endpoint(&AgentPaths::discover()?)?;
     let response = request(&endpoint, AgentAction::StopJobSet { job_set_id })?;
     response_value(response, |response| response.job_set, "Agent job set")
+}
+
+pub fn delete_job_set(job_set_id: String) -> Result<(), AgentIpcError> {
+    simple_request(AgentAction::DeleteJobSet { job_set_id })
 }
 
 pub fn set_job_enabled(job_id: String, enabled: bool) -> Result<AgentJobSetStatus, AgentIpcError> {
@@ -1078,6 +1085,27 @@ impl JobSetManager {
         Ok(result)
     }
 
+    fn delete(&mut self, id: &str) -> Result<(), AgentIpcError> {
+        let Some(index) = self.job_sets.iter().position(|set| set.id == id) else {
+            return Ok(());
+        };
+        let set = &self.job_sets[index];
+        if matches!(set.status.as_str(), "running" | "awaiting_approval")
+            || set.jobs.iter().any(|job| matches!(job.status.as_str(), "running" | "awaiting_approval"))
+        {
+            return Err(AgentIpcError::InvalidJobSet("Stop the Plan before deleting it.".into()));
+        }
+        let removed = self.job_sets.remove(index);
+        if let Err(error) = self.persist() {
+            self.job_sets.insert(index, removed);
+            return Err(error);
+        }
+        self.credentials.remove(id);
+        // Invalidate workers that may still be finishing a stopped execution.
+        *self.execution_generations.entry(id.into()).or_default() += 1;
+        Ok(())
+    }
+
     fn persist(&self) -> Result<(), AgentIpcError> {
         let temporary = self.path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(&self.job_sets)?;
@@ -1440,6 +1468,12 @@ fn serve_requests(
                                     response.job_set = Some(job_set);
                                     (response, false)
                                 }
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::DeleteJobSet { job_set_id } => {
+                            match job_sets.lock().expect("job set lock").delete(&job_set_id) {
+                                Ok(()) => (success_response(), false),
                                 Err(error) => (error_response(&error.to_string()), false),
                             }
                         }
@@ -2346,6 +2380,49 @@ mod tests {
                 _ => panic!("update without Plan context must fail"),
             }
         }
+    }
+
+    #[test]
+    fn deleted_plans_stay_deleted_after_restart_and_active_plans_are_protected() {
+        let path = env::temp_dir().join(format!("gatetree-ops-delete-{}.json", uuid::Uuid::new_v4()));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let set = manager.submit(olam_submission(&["deploy"]), false).unwrap();
+        let original = fs::read(&path).unwrap();
+        manager.credentials.insert(set.id.clone(), vec![]);
+        assert!(manager.delete(&set.id).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        manager.job_sets[0].status = "awaiting_approval".into();
+        assert!(manager.delete(&set.id).is_err());
+        // Even an inconsistent parent status must not allow deletion of a live job.
+        manager.job_sets[0].status = "stopped".into();
+        manager.job_sets[0].jobs[0].status = "running".into();
+        assert!(manager.delete(&set.id).is_err());
+        manager.stop(&set.id).unwrap();
+        let generation = manager.execution_generations[&set.id];
+        manager.delete(&set.id).unwrap();
+        assert!(manager.list().is_empty());
+        assert!(!manager.credentials.contains_key(&set.id));
+        assert!(manager.execution_generations[&set.id] > generation);
+        assert!(JobSetManager::load(path.clone()).unwrap().list().is_empty());
+        manager.delete(&set.id).unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_plan_delete_keeps_history_and_credentials() {
+        let path = env::temp_dir().join(format!("gatetree-ops-delete-failure-{}.json", uuid::Uuid::new_v4()));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let set = manager.submit(olam_submission(&["deploy"]), false).unwrap();
+        manager.stop(&set.id).unwrap();
+        manager.credentials.insert(set.id.clone(), vec![]);
+        // Force persistence to fail without depending on filesystem permissions.
+        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(manager.delete(&set.id).is_err());
+        assert_eq!(manager.list().len(), 1);
+        assert!(manager.credentials.contains_key(&set.id));
+        assert_eq!(JobSetManager::load(path.clone()).unwrap().list().len(), 1);
+        fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { escapeHtml } from "../../shared/ui.js";
+import { deleteDeploymentPlan } from "../deployments/queue-api.js";
 import {
   deleteAgentActivity,
   disconnectAgentSshSession,
@@ -17,6 +18,7 @@ export async function mountAgentView(root, options = {}) {
     status: null, activities: [], sshSessions: [], jobSets: [], filter: "all", busy: false, error: "",
     mountId: crypto.randomUUID(), onAttachSshSession: options.onAttachSshSession,
     onFocusDeploymentPlan: options.onFocusDeploymentPlan,
+    onQueueChange: options.onQueueChange,
     overview: Boolean(options.overview), onSnapshot: options.onSnapshot,
   };
   root.dataset.agentMountId = state.mountId;
@@ -105,7 +107,9 @@ function jobSetRows(state) {
       <code>#${escapeHtml(jobSet.planNumber)}</code>
       <span></span>
       <span class="agent-activity-status">${escapeHtml(jobSet.status)}</span>
-      <span class="agent-row-actions"><button data-action="focus-plan" data-plan-id="${escapeHtml(jobSet.id)}" title="Open Ansible Plan">Focus</button></span>
+      <span class="agent-row-actions"><button data-action="focus-plan" data-plan-id="${escapeHtml(jobSet.id)}" title="Open Ansible Plan">Focus</button>
+        ${["running", "awaiting_approval"].includes(jobSet.status) ? "" : `<button class="agent-delete-action" data-action="delete-plan" data-plan-id="${escapeHtml(jobSet.id)}" title="Delete Plan" aria-label="Delete Plan" ${state.busy ? "disabled" : ""}>${trashIcon()}</button>`}
+      </span>
     </div>`).join("");
 }
 
@@ -168,6 +172,9 @@ function bindEvents(root, state) {
   root.querySelectorAll('[data-action="focus-plan"]').forEach((button) => {
     button.addEventListener("click", () => state.onFocusDeploymentPlan?.(button.dataset.planId));
   });
+  root.querySelectorAll('[data-action="delete-plan"]').forEach((button) => {
+    button.addEventListener("click", () => deletePlan(root, state, button.dataset.planId));
+  });
   root.querySelectorAll('[data-action="attach-session"]').forEach((button) => {
     button.addEventListener("click", () => {
       const session = state.sshSessions.find((item) => item.id === button.dataset.sessionId);
@@ -188,6 +195,17 @@ function bindEvents(root, state) {
       await deleteAgentActivity(button.dataset.activityId);
       state.activities = state.activities.filter((activity) => activity.id !== button.dataset.activityId);
     }));
+  });
+}
+
+async function deletePlan(root, state, id) {
+  const plan = state.jobSets.find(item => item.id === id);
+  if (state.busy || !plan || ["running", "awaiting_approval"].includes(plan.status)) return;
+  if (!window.confirm(`Delete plan “${plan.name}” and its job history?`)) return;
+  await run(root, state, async () => {
+    const snapshot = await deleteDeploymentPlan(id);
+    state.jobSets = state.jobSets.filter(item => item.id !== id);
+    state.onQueueChange?.(snapshot.plans);
   });
 }
 
