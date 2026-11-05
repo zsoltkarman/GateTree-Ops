@@ -79,5 +79,13 @@
         "implementation": "native"
       }
     }
+  },
+  "thanos": {
+    "id": "thanos",
+    "actions": {
+      "query": {
+        "implementation": "native"
+      }
+    }
   }
 }

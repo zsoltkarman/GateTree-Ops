@@ -24,7 +24,7 @@ pub use ssh::{
     SshAuthentication, SshConnectRequest, SshHostKey, SshSessionStatus, SshTerminalChunk,
 };
 
-pub const PROTOCOL_VERSION: u16 = 20;
+pub const PROTOCOL_VERSION: u16 = 21;
 const ENDPOINT_FILE: &str = "agent-endpoint.json";
 const LOCK_FILE: &str = "agent.lock";
 const JOB_SETS_FILE: &str = "agent-job-sets.json";
@@ -923,7 +923,10 @@ impl JobSetManager {
                     && set
                         .jobs
                         .iter()
-                        .any(|job| matches!(job.driver.as_str(), "jira" | "cx" | "olam" | "container"));
+                        .any(|job| matches!(job.driver.as_str(), "jira" | "cx" | "olam" | "container")
+                            || (job.driver == "thanos" && serde_json::from_str::<serde_json::Value>(&set.process_definition).ok()
+                                .and_then(|p| p.pointer("/details/thanos/auth").and_then(serde_json::Value::as_str).map(str::to_owned))
+                                .is_some_and(|auth| auth != "none")));
                 set
             })
             .collect()
@@ -3573,6 +3576,10 @@ mod tests {
 }
 
 /// Validate a local Ansible container Process without launching a container.
+pub fn validate_thanos_config(config: &serde_json::Value) -> Result<(), String> {
+    drivers::thanos::validate_config(config)
+}
+
 pub fn validate_container_config(config: &serde_json::Value) -> Result<(), String> {
     drivers::container::validate_config(config)
 }

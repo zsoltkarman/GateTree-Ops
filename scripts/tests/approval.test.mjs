@@ -195,3 +195,11 @@ test("an unconfirmed Jira report requires an explicit recovery decision before r
     assert.equal(state.busyKey, null);
   }
 });
+
+
+test("only completed Plans offer Copy to new Plan",()=>{
+ const source=queueSource.slice(queueSource.indexOf("function planMarkup("),queueSource.indexOf("function planInfoMarkup("));
+ const markup=new Function("escapeHtml","controlAction","actionLabel","icon","planInfoMarkup","planLogMarkup","jobMarkup",`return ${source}`)(String,()=>"start",a=>a,()=>"",()=>"",()=>"",()=>"");
+ assert.match(markup({...plan,status:"completed"},{}),/data-duplicate-plan=/);
+ for(const status of ["queued","running","failed"])assert.doesNotMatch(markup({...plan,status},{}),/data-duplicate-plan=/);
+});

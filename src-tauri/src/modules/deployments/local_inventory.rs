@@ -70,6 +70,24 @@ pub fn set_local_ansible_folder(
     write_settings(&settings_path(&app)?, &path)
 }
 
+fn scan_roles(project: &Path) -> Result<Vec<String>, String> {
+    let roles_dir = project.join("roles");
+    if !roles_dir.is_dir() { return Err("The local Ansible project has no roles folder.".into()); }
+    let roles = directories(&roles_dir)?.into_iter()
+        .filter(|path| path.join("tasks").is_dir())
+        .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    Ok(roles)
+}
+
+#[tauri::command]
+pub async fn get_local_deployment_roles(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let path = read_settings(&settings_path(&app)?)?.path.ok_or("Choose a local Ansible folder first.")?;
+    tauri::async_runtime::spawn_blocking(move || scan_roles(&project_path(&path)?))
+        .await.map_err(|error| error.to_string())?
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InventorySnapshot {
@@ -326,6 +344,17 @@ pub async fn get_local_deployment_inventory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn role_choices_come_from_local_role_directories_with_tasks() {
+        let temp = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        for path in ["roles/z_exporter/tasks", "roles/a_exporter/tasks", "roles/.hidden/tasks", "roles/docs"] {
+            fs::create_dir_all(temp.join(path)).unwrap();
+        }
+        fs::write(temp.join("roles/README.md"),"Documentation").unwrap();
+        assert_eq!(scan_roles(&temp).unwrap(),vec!["a_exporter","z_exporter"]);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     #[test]
     fn folder_settings_survive_restart_and_reject_invalid_projects() {
         let temp = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());

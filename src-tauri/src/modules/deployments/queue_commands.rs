@@ -15,6 +15,11 @@ pub fn get_deployment_queue(state: State<'_, WorkspaceState>) -> Result<QueueSna
 }
 
 #[tauri::command]
+pub fn get_completed_deployment_plan_copy(state: State<'_, WorkspaceState>, id: String) -> Result<serde_json::Value, String> {
+    QueueService::completed_plan_copy(&state, &id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn create_deployment_plan(
     state: State<'_, WorkspaceState>,
     definition: String,

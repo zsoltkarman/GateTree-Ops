@@ -1,3 +1,4 @@
+import { mountValidationQueries } from "./validation-queries.js";
 import { mountLocalAnsibleSource } from "./local-ansible-source.js";
 import { showDeploymentHelp } from "../help/help-view.js";
 import { escapeHtml } from "../../shared/ui.js";
@@ -9,11 +10,13 @@ export async function mountDeploymentConfigView(root, detail = {}, { onCatalogCh
   const state = { processes: [], editors: new Map(), expanded: new Set(), selectedId: detail.resourceId ?? null, busy: null, onCatalogChange };
   const mountId = crypto.randomUUID(); root.dataset.configMountId = mountId;
   const alive = () => root.isConnected && root.dataset.configMountId === mountId;
-  root.innerHTML = `<div class="deployment-config-module deployment-config-accordion"><div data-local-ansible-settings></div><section class="deployment-config-list" data-config-list><p class="deployment-config-loading">Loading deployment config…</p></section></div>`;
+  root.innerHTML = `<div class="deployment-config-module deployment-config-accordion"><div data-local-ansible-settings></div><div data-validation-queries></div><section class="deployment-config-list" data-config-list><p class="deployment-config-loading">Loading deployment config…</p></section></div>`;
   mountLocalAnsibleSource(root.querySelector("[data-local-ansible-settings]"));
   try {
-    state.processes = (await getDeploymentConfig()).processes;
+    const snapshot = await getDeploymentConfig();
     if (!alive()) return;
+    state.processes = snapshot.processes;
+    mountValidationQueries(root.querySelector("[data-validation-queries]"), { queries: snapshot.validationQueries ?? [] });
     if (detail.resourceId && state.processes.some(p => p.id === detail.resourceId)) state.expanded.add(detail.resourceId);
     if (detail.new) { editorState(state, NEW_CONFIG); state.expanded.add(NEW_CONFIG); }
     notifyCatalog(state); renderList(root, state);

@@ -48,3 +48,62 @@ test('container Process uses the same Planner and serializes generic Ansible inp
  assert.deepEqual(plan.inputs.ansible.targets,draft().olamTargets);
  const yaml=plannerPlanYaml(plan);assert(yaml.includes('  ansible:\n'));assert(!yaml.includes('  olam:\n'));assert(yaml.includes('"COUNT":"3"'));
 });
+
+test('Thanos steps preserve literal PromQL and order without deploy variables or polling overrides',()=>{
+ const d=draft();
+ const query='count(up{job="exporter",region=~"a|b"} == 1) == bool 2';
+ d.steps.splice(1,0,{name:'Verify running service',type:'thanos_query',query,extraVarsText:'not a variable assignment'});
+ const config=[{...processes[0],definition:JSON.stringify({steps:[{driver:'olam',action:'deploy'}],details:{thanos:{url:'https://metrics.example.test',timeout_seconds:300,interval_seconds:30}}})}];
+ const plan=buildPlannerPlan(d,config,accounts); const step=plan.inputs.olam.steps[1];
+ assert.deepEqual(step,{name:'Verify running service',type:'thanos_query',query});
+ const yaml=plannerPlanYaml(plan);assert.ok(yaml.includes(`query: ${JSON.stringify(query)}`));
+ assert.ok(yaml.indexOf('Phase one')<yaml.indexOf('Verify running service'));assert.ok(yaml.indexOf('Verify running service')<yaml.indexOf('Phase two'));
+ assert.ok(!yaml.includes('timeout_seconds'));assert.ok(!yaml.includes('interval_seconds'));
+});
+test('Thanos steps require a query and connection and reject unresolved placeholders and unknown types',()=>{
+ const d=draft();d.steps=[{name:'Check',type:'thanos_query',query:''}];
+ assert.throws(()=>buildPlannerPlan(d,processes,accounts),/PromQL/);
+ d.steps[0].query='vector(1)';assert.throws(()=>buildPlannerPlan(d,processes,accounts),/details.thanos/);
+ d.steps[0].type='typo';assert.throws(()=>buildPlannerPlan(d,processes,accounts),/unknown step/);
+ d.steps[0].type='thanos_query';d.steps[0].query='${UNRESOLVED}';assert.throws(()=>buildPlannerPlan(d,processes,accounts),/placeholders/);
+});
+
+
+test('Thanos query templates save expected version and require a preceding deployment with sites',()=>{
+ const d=draft();
+ const config=[{...processes[0],definition:JSON.stringify({steps:[{driver:'olam',action:'deploy'}],details:{thanos:{url:'https://metrics.example.test'}}})}];
+ const step={name:'Verify',type:'thanos_query',expectedVersion:' 1.97.0 ',query:'metric{region="${DEPLOY_REGION}",version="${EXPECTED_VERSION}"}'};
+ d.steps.push(step);
+ const plan=buildPlannerPlan(d,config,accounts);
+ assert.equal(plan.inputs.olam.steps.at(-1).expected_version,'1.97.0');
+ assert.ok(plannerPlanYaml(plan).includes('expected_version: "1.97.0"'));
+ assert.equal(plan.inputs.olam.steps.at(-1).query,step.query);
+ step.expectedVersion='';assert.throws(()=>buildPlannerPlan(d,config,accounts),/expected exporter version/);
+ step.expectedVersion='1.97.0';d.olamTargets.sites=[];assert.throws(()=>buildPlannerPlan(d,config,accounts),/select deployment sites/);
+ d.olamTargets.sites=['a'];d.steps=[step];assert.throws(()=>buildPlannerPlan(d,config,accounts),/preceding Deploy/);
+});
+
+
+test('per-host checks require the deployed host matcher and preserve host/site metadata',()=>{
+ const d=draft();d.olamTargets={job_mode:'per_host',roles:['service'],sites:['a','b'],hosts:['one','two'],host_sites:{one:'a',two:'b'}};
+ const config=[{...processes[0],definition:JSON.stringify({steps:[{driver:'olam',action:'deploy'}],details:{thanos:{url:'https://metrics.example.test'}}})}];
+ const check={name:'Verify',type:'thanos_query',expectedVersion:'1.97.0',query:'metric{region="${DEPLOY_REGION}",version="${EXPECTED_VERSION}"}'};
+ d.steps.push(check);
+ assert.throws(()=>buildPlannerPlan(d,config,accounts),/per-host validation requires/);
+ check.query='metric{region="${DEPLOY_REGION}",instance=~"${DEPLOY_HOST_REGEX}",version="${EXPECTED_VERSION}"}';
+ const plan=buildPlannerPlan(d,config,accounts);
+ assert.deepEqual(plan.inputs.olam.targets.host_sites,{one:'a',two:'b'});
+ assert.ok(plannerPlanYaml(plan).includes('host_sites: {"one":"a","two":"b"}'));
+ d.olamTargets.job_mode='together';assert.throws(()=>buildPlannerPlan(d,config,accounts),/Separate job per host/);
+});
+
+
+test('Plan keeps the selected query text and never stores a live query-library reference',()=>{
+ const d=draft();
+ const config=[{...processes[0],definition:JSON.stringify({steps:[{driver:'olam',action:'deploy'}],details:{thanos:{url:'https://metrics.example.test'}}})}];
+ d.steps.push({name:'Saved check',type:'thanos_query',query:'vector(1)',validationQueryId:'library-q'});
+ const plan=buildPlannerPlan(d,config,accounts);const yaml=plannerPlanYaml(plan);
+ d.steps.at(-1).query='vector(0)';
+ assert.equal(plan.inputs.olam.steps.at(-1).query,'vector(1)');
+ assert.ok(!yaml.includes('library-q'));assert.ok(yaml.includes('query: "vector(1)"'));
+});

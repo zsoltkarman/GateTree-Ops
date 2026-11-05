@@ -19,7 +19,8 @@ export function plannerTargetInput(snapshot, selection) {
   return {
     job_mode: jobMode,
     roles: snapshot ? [...selection.roles] : [],
-    sites: snapshot ? [...selection.sites] : [],
+    sites: snapshot ? [...new Set(enabled.map(host => host.site))] : [],
+    ...(enabled.length ? { host_sites: Object.fromEntries(enabled.map(host => [host.name, host.site])) } : {}),
     ...(groups ? { inventory_groups: [...new Set(matches.map(host => host.group))] } : { hosts: [...new Set(enabled.map(host => host.name))] }),
   };
 }
@@ -140,7 +141,7 @@ export function mountPlannerTargets(root, { draft, loadInventory = getLocalDeplo
   document.addEventListener("pointerdown", outside);
   render();
   return { processChanged() {
-    if (selected().processId !== draft.processId) { draft.targetSelection = { processId: draft.processId, jobMode: selected().jobMode, roles: [], sites: [], excluded: [], revision: null }; }
+    if (selected().processId !== draft.processId) { draft.targetSelection = { processId: draft.processId, jobMode: selected().jobMode, roles: draft.copySource ? [...selected().roles] : [], sites: [], excluded: [], revision: null }; }
     void refresh();
   }, dispose() { disposed = true; request++; document.removeEventListener("pointerdown", outside); } };
 }

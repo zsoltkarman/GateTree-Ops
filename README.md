@@ -187,6 +187,100 @@ GitHub secrets, first installation, local builds and the publication workflow.
 
 ## Workspace files
 
+**Image Hub** stores a repository inventory in the encrypted workspace. Right-click
+the inventory or a folder to add folders, subfolders, projects or repositories. Repositories have a name, local path, OCID,
+repository URL and type (CloudLab, SCM, GitLab or GitHub). Only the name and type are
+required. Right-click a repository to edit it or move it to another folder; use
+**Edit folder** to rename or move a folder. Non-empty folders cannot be deleted.
+Removing a repository from the inventory keeps its local files. Inventory data
+is included in workspace backups. This initial module manages repository
+metadata, published image versions and local security report snapshots.
+
+**Image Hub → Config** owns all environment-specific endpoints, URL templates,
+artifact repository, team, region, context and SCM profile/authentication mode.
+New workspaces have no built-in service addresses. Enter the values directly or
+use **Import JSON…** to load a configuration file. Settings are encrypted with
+the workspace and included in backups. Changing configuration clears cached
+artifact lookups so values from another environment cannot be reused.
+
+The project summary displays repository names and AF, SLAPS and Build Logs links.
+Each image initially shows only its Latest row. The arrow expands Ansible rows
+for every environment found in the local roles. Set `ansible_dir` in Config to
+an absolute Ansible project directory. Image names and versions are read from
+role defaults, `<role>_global.yml` and `<role>_<environment>.yml` (also `.yaml`),
+in that precedence order. Missing environment overrides inherit the global
+value. Literal variable aliases are supported; other Jinja expressions display
+an unavailable version. No playbooks run. These are deployment configuration
+values, not observations of running containers. Each environment has its own AF
+version link and report icons. Base report URLs open repository overviews;
+version-specific report templates can use `{version}`. No build or scan ID is
+inferred from a version. Reopen Image Hub or Sync Project to reread Ansible files.
+
+Sync Project queries the configured artifact folder API in the background.
+The list displays the latest stored published version while sync runs. It chooses the greatest numeric three-part release tag
+that contains a Docker manifest, and links that version using the configured
+artifact page template. Lookups are cached for one minute. A missing publication
+is distinct from a failed request. On a failed refresh, the last known version
+remains visible with a warning and the failure reason.
+
+SCM Config keys `scm_profile` and `scm_auth` select the OCI CLI identity and
+mode (the existing `scmProfile` and `scmAuth` names also work). They contain
+profile names and authentication modes, not credentials.
+
+Sync Project reports expired OCI authentication separately from repository access
+failures. Optional Config entry `security_auth_command` supplies the terminal
+command shown in that warning; GT never executes that command automatically.
+
+Sync Project also downloads Anchore reports for unique image/version pairs
+from Latest and matching Ansible roles. Config `slaps_api_url` is the HTTPS
+SLAPS service base URL, and `slaps_realm` selects the realm scope for stored
+report snapshots. Requests use `scm_profile` / `scm_auth`. No service addresses
+or profile names are built into the source. The sync result reports how many
+reports were saved and any authentication or scan errors. The raw JSON,
+top-level report sections and indexed finding fields are stored in encrypted
+workspace SQL with history. A failed download is distinct from an empty report.
+
+Click the SLAPS shield to view the local findings table: Severity, Issue,
+Package, Installed, Fixed and Gating. Rows are paged to fit the available height;
+long values are truncated with full text in tooltips. The report view retains
+an Open SLAPS browser link. Downloading an Anchore report does not establish a
+realm-specific release approval: until a verified gating decision is collected,
+the shield stays neutral and the status is unknown.
+
+Projects have a name, an absolute local directory and a type (SCM, GitLab or
+CloudLab). The optional **Project URL / ID** identifies the remote source: an
+OCI DevOps project OCID or Console project URL for SCM, or a GitLab-compatible
+group URL for GitLab/CloudLab. Supplying a full SCM project page URL also
+resolves each repository's browser link automatically from that URL's origin
+and context plus the repository OCID collected during sync. No repository URL
+template is needed in that case, and clone URLs remain unchanged. An OCID-only
+project source needs a configured browser URL template to identify the console.
+Without this field, sync imports local Git
+repositories only. **Save and sync project** discovers repositories immediately;
+**Sync Project** starts a background job and immediately returns control to the
+interface. Its button displays progress as a percentage. Under the list, SCM,
+SLAPS and AF each show their own completed/total counters and details
+for failures or missing configuration. Switching views does not stop the job.
+Locking or changing workspace stops writes from the old session; restarting GT
+marks interrupted jobs so the next sync can continue saved work.
+
+Build Logs are browser links configured by `build_log_url`. Sync Project does
+not fetch build history or download logs. SLAPS reports are collected for the
+latest AF image and the configured Ansible versions. Historical reports are
+reused for one hour; latest-image reports are refreshed on sync.
+
+Project sync calls the installed `oci`, `glab` and `git` executables without
+Codex or npm dependencies. Choose the SCM profile and authentication mode in
+**Image Hub → Config**, configure the appropriate host in `glab`, and set up
+Git/SSH authentication in your terminal first. It never launches a login flow,
+refreshes credentials, disables host-key verification, or stores credentials in
+project URLs. GitLab-compatible groups include subgroups and all result pages.
+OCI Console URLs can supply an explicit `region` query parameter; a bare OCID
+uses the configured region or the selected CLI profile's region. Git uses the clone URL returned by the
+provider. Missing clones are created below the project directory, preserving
+subgroup paths. Existing repositories are checked against their origin and
+kept as they are; sync does not pull, reset, switch branches or delete files.
+
 New workspace directories contain `gatetree-ops.sqlite` (SQLCipher-encrypted data)
 and `gatetree-ops.sqlite.salt` (the master-key derivation salt). Existing
 `pharos.sqlite` / `pharos.sqlite.salt` pairs are recognized in place, without
@@ -197,3 +291,113 @@ The master password is never written to disk. Release builds do not cache the
 derived database key. Debug builds save a local `.gatetree-ops-dev-unlock` file
 with user-only permissions, or read the existing legacy `.pharos-dev-unlock`,
 so the development workspace can reopen automatically.
+
+### Copy a completed Plan
+
+Use **Copy to new Plan** in a completed Plan's header. The Planner opens with the
+source Jira/CX numbers, requester, account reference, role, strategy, deployment
+steps, extra variables and Thanos query/version. Select a Process and fresh
+sites/hosts before saving. An old step-level `ENVIRONMENT` override is omitted so
+the selected Process supplies the destination environment. Review the account
+and other extra variables for that environment. Unchanged copied extra variables
+retain their original types; editing their text uses the normal text editor rules.
+
+Save creates a new queued Plan with a new number and current Process Config.
+The original Plan and its logs are preserved. Host selections, job IDs, job
+results and approvals are not inherited. Start the new Plan separately.
+
+### Saved validation queries
+
+Under **Deployments → Config → Validation Queries**, use **Add Query** to store a
+name, deployment role (selected from the local Ansible project) and PromQL template. Edit or delete entries in the same
+list. Queries live in the encrypted workspace SQL database and are included in
+workspace backups and the deployment config bundle. Editing rejects a stale
+revision instead of silently overwriting a newer change.
+
+In a Planner **Thanos Query** step, select a saved query by its name and role.
+The query text is copied into the step; supply the expected exporter version in
+that Plan. Host and region placeholders still come from deployment targets.
+Editing the text changes the selection to **Custom query**. Selecting a template
+does not overwrite an existing step name or expected version. Saved Plan YAML
+contains the query itself, never a live reference to the library, so later library
+edits or deletion cannot change a queued or running Plan. Polling and connection
+settings stay in Process Config under `details.thanos`.
+
+### Thanos Query in Planner Builder
+
+Each Planner step can be **Deploy** (existing extra variables) or **Thanos Query**
+(name, PromQL query, and an optional expected exporter version). Add connection and polling settings to
+the selected Process under Deployments → Config:
+
+```json
+"thanos": {
+  "url": "https://thanos.example.test",
+  "auth": "none",
+  "timeout_seconds": 300,
+  "interval_seconds": 30
+}
+```
+
+This object belongs inside the existing `details` object. `url` is the Thanos
+base URL; the Agent calls `/api/v1/query` directly. `auth` accepts `none`, `basic`
+or `bearer`; the latter two require an `account` reference from Vaults. No endpoint
+or organization-specific settings are built in.
+
+A query succeeds only with nonempty instant results whose values all equal `1`.
+Zero, other values, empty results or partial-data warnings retry until timeout.
+For example `vector(1)` verifies connectivity, not deployment correctness. Write
+the query to check the required version, target coverage and freshness. An
+application build-info version is not necessarily the container image tag.
+Inside double-quoted query strings, `${DEPLOY_REGION}` is replaced with the
+deployment site's region, and `${EXPECTED_VERSION}` with the step's
+**Expected exporter version** field. Region placeholders require a preceding
+Deploy step and selected sites. With **Separate job per host**, the following
+Thanos Query steps run immediately after each host's deployment, before the next
+host starts. Add `instance=~"${DEPLOY_HOST_REGEX}"` to every such query: this
+placeholder matches only that deployed hostname, with an optional URI scheme
+and port. Hostname dots and other regex characters are escaped. The Builder
+saves `targets.host_sites` so each host gets only its own site's region; older
+single-site Plans can use their single selected site. Missing multi-site context
+is rejected rather than validating a different region.
+
+The host matcher is required for per-host queries to prevent a region-wide check
+from passing because a different host already has the expected version. Standalone
+queries before any deployment retain their literal behavior. **All hosts in one
+job** retains batch validation after the combined deployment; host placeholders
+require Separate job per host. Sites with all hosts excluded are not queried.
+
+By default the region equals the site name. When metric labels differ, add a
+site-to-region map to `details.thanos` in that environment's Process Config:
+
+```json
+"region_map": { "west": "west_staging" }
+```
+
+For example, with expected exporter version `1.97.0`:
+
+```promql
+(
+  count(redis_exporter_build_info{region="${DEPLOY_REGION}",instance=~"${DEPLOY_HOST_REGEX}",version="${EXPECTED_VERSION}"})
+  /
+  count(redis_exporter_build_info{region="${DEPLOY_REGION}",instance=~"${DEPLOY_HOST_REGEX}"})
+) == bool 1 or vector(0)
+```
+
+This example requires data for the host and the expected version on all currently
+visible matching series. It does not prove missing targets or scrape freshness.
+The exporter version must be supplied explicitly; the image tag is not converted.
+Unknown, missing or unquoted placeholders prevent the Plan from being saved.
+Literal queries without placeholders retain their existing behavior. Process-level
+query steps still require complete literal queries.
+
+Invalid queries/authentication fail
+immediately; Stop interrupts polling. Query responses and UTC attempt timestamps
+are saved with the Queue job in the workspace.
+
+Mixed Planner steps require exactly one deploy step in Process Config. Queries
+immediately following a Deploy step run for each host in sequence, or after the
+batch in together mode (once per region when using `${DEPLOY_REGION}`). Zero/no
+data keeps that check polling; the next host remains queued. A timeout or fatal
+query error fails the Plan and leaves later jobs queued. Existing Plans with no step type keep their Deploy
+behavior. Existing Jira/CX reporting can attach `plan_log` to include query
+results; no ticket update is added automatically.

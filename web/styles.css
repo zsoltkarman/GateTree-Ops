@@ -240,7 +240,8 @@ input:focus { border-color: #58d0d5; box-shadow: 0 0 0 3px rgba(88,208,213,.1); 
 .navigation-child-group { display: block; padding: 6px 7px 2px; overflow: hidden; color: var(--text-muted); font-size: 8px; font-weight: 700; letter-spacing: .06em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 .module-navigation-host { min-width: 0; }
 .module-navigation-host .connections-browser,
-.module-navigation-host .notes-browser { width: 100%; border: 0; background: transparent; }
+.module-navigation-host .notes-browser,
+.module-navigation-host .image-hub-browser { width: 100%; border: 0; background: transparent; }
 .module-navigation-host .connection-folder-tree,
 .module-navigation-host .note-folders { padding: 4px 0 5px; }
 .module-navigation-host .connection-folder-tree { --connection-toggle-width: 17px; }
@@ -1231,3 +1232,52 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in sr
 .queue-column-resizer:hover::after, .queue-column-resizer:focus-visible::after { width: 2px; background: var(--accent); }
 .queue-job-row > * { min-width: 0; }
 .queue-module.is-resizing-columns, .queue-module.is-resizing-columns * { cursor: col-resize !important; user-select: none !important; }
+
+.planner-step [data-step-type] { width: 126px; flex-shrink: 0; height: 29px; padding: 4px 7px; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; font: inherit; font-size: 11px; }
+.planner-step [data-step-query] { display: block; width: 100%; min-height: 84px; box-sizing: border-box; margin-top: 7px; padding: 6px 8px; resize: vertical; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 11px; line-height: 1.5; }
+.planner-step [data-step-query]:focus { outline: none; border-color: var(--accent); }
+.planner-query-hint { margin: 6px 0 0; font-size: 11px; line-height: 1.4; color: var(--text-muted); }
+
+.planner-step > label:has([data-step-expected-version]) { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 7px; color: var(--text-muted); font-size: 11px; }
+.planner-step [data-step-expected-version] { min-width: 0; width: 140px; max-width: 100%; height: 28px; padding: 4px 7px; box-sizing: border-box; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; font: inherit; }
+
+.deployment-config-accordion { grid-template-rows: auto auto minmax(0,1fr); }
+.validation-query-library { margin: 0 12px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+.validation-query-library > summary { cursor: pointer; padding: 10px 12px; font-size: 12px; font-weight: 600; }
+.validation-query-library summary small { margin-left: 8px; color: var(--text-muted); font-weight: 400; }
+.validation-query-content { max-height: 340px; overflow: auto; padding: 0 12px 10px; font-size: 12px; }
+.validation-query-content > header, .validation-query-list article, .validation-query-content nav, .validation-query-content footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.validation-query-content button { padding: 5px 9px; font: inherit; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; cursor: pointer; }
+.validation-query-list article { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.validation-query-list code { display: block; margin-top: 3px; color: var(--text-muted); }
+.validation-query-content form { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; margin-top: 12px; }
+.validation-query-content form label { display: grid; gap: 5px; margin: 0; font-size: 11px; }
+.validation-query-content form input, .validation-query-content form textarea { width: 100%; min-width: 0; box-sizing: border-box; padding: 6px 8px; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; font: inherit; }
+.validation-query-content .validation-query-promql, .validation-query-content form > p, .validation-query-content form footer { grid-column: 1 / -1; }
+.validation-query-content form textarea { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; resize: vertical; }
+.validation-query-content form footer { justify-content: flex-end; }
+.planner-step > .planner-saved-query { display: flex; align-items: center; gap: 8px; margin-top: 7px; color: var(--text-muted); font-size: 11px; }
+.planner-saved-query select { flex: 1; min-width: 0; height: 28px; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; font: inherit; }
+
+.validation-query-library { margin: 0 12px 6px; }
+.validation-query-library > summary { display: flex; align-items: center; gap: 7px; padding: 6px 9px; list-style: none; }
+.validation-query-library > summary::-webkit-details-marker { display: none; }
+.validation-query-library > summary::before { content: "▸"; color: var(--text-muted); }
+.validation-query-library[open] > summary::before { content: "▾"; }
+.validation-query-library > summary > span { flex: 1; }
+.validation-query-library button { padding: 3px 7px; font: inherit; font-size: 11px; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
+.validation-query-content { max-height: 270px; padding: 0 9px 6px; font-size: 11px; }
+.validation-query-content:has(> .validation-query-list:empty):not(:has(form)):not(:has(> p)) { display: none; }
+.validation-query-list article { padding: 5px 0; }
+.validation-query-list article > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 12px; min-width: 0; }
+.validation-query-list code { display: inline; margin: 0; font-size: 10px; }
+.validation-query-content form { gap: 6px; margin-top: 6px; }
+.validation-query-content form label { gap: 3px; }
+.validation-query-content form input, .validation-query-content form select, .validation-query-content form textarea { width: 100%; min-width: 0; box-sizing: border-box; padding: 4px 6px; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+.validation-query-content form input, .validation-query-content form select { height: 27px; }
+.validation-query-content form textarea { min-height: 60px; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+.validation-query-content p { margin: 4px 0; }
+
+.queue-plan-progress { flex-shrink: 0; padding: 0 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.queue-toolbar.is-plan-view { height: 34px; justify-content: flex-end; }

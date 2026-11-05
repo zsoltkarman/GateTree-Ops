@@ -16,6 +16,7 @@ pub struct DeploymentConfigResource {
 pub struct DeploymentConfigSnapshot {
     pub drivers: Vec<DeploymentConfigResource>,
     pub processes: Vec<DeploymentConfigResource>,
+    pub validation_queries: Vec<super::validation_queries::ValidationQuery>,
 }
 
 #[derive(Debug, Serialize)]

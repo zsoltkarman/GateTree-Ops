@@ -10,7 +10,7 @@ export const emptyPlannerDraft = () => ({ planName: "", processId: "", cxNo: "",
 
 export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose = () => {}, loadProcesses = getDeploymentConfig, loadAccounts = getVaults, mountTargets = mountPlannerTargets, mountSteps = mountPlannerSteps, savePlan = createDeploymentPlan, onSaved = () => {} } = {}) {
   let disposed = false, saving = false, committed = false;
-  const choices = { processes: [], entries: [] };
+  const choices = { processes: [], entries: [], validationQueries: [] };
   root.innerHTML = `<section class="planner-builder queue-plan-editor" aria-labelledby="planner-builder-title">
     <header class="planner-builder-header">
       <div><p class="planner-builder-eyebrow">New deployment</p><h1 id="planner-builder-title">Planner Builder</h1></div>
@@ -29,9 +29,9 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
       <div data-planner-targets></div>
       <div data-planner-steps></div>
     </div>
-    <footer class="planner-save-footer"><p data-planner-save-message role="status">Save creates a queued Plan. Start it separately from the Queue.</p><button type="button" data-planner-save>Save Plan</button></footer>
+    <footer class="planner-save-footer"><p data-planner-save-message role="status">${draft.copySource ? `Copied from Plan #${escapeHtml(draft.copySource.planNumber)}. Select a Process and deployment targets.` : "Save creates a queued Plan. Start it separately from the Queue."}</p><button type="button" data-planner-save>Save Plan</button></footer>
   </section>`;
-  const disposeSteps = mountSteps(root.querySelector("[data-planner-steps]"), { draft });
+  const disposeSteps = mountSteps(root.querySelector("[data-planner-steps]"), { draft, validationQueries: () => choices.validationQueries });
   const targets = mountTargets(root.querySelector("[data-planner-targets]"), { draft });
   const form = root.querySelector("form");
   form.addEventListener("submit", event => event.preventDefault());
@@ -61,6 +61,7 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
       const snapshot = await load();
       if (disposed || !root.contains(form)) return;
       choices[key] = snapshot[key];
+      if (fieldName === "processId") { choices.validationQueries = snapshot.validationQueries ?? []; disposeSteps.refresh?.(); }
       const items = [...snapshot[key]].sort((a, b) => a.name.localeCompare(b.name));
       select.innerHTML = `<option value="">${items.length ? label : "None available"}</option>${items.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("")}`;
       select.disabled = !items.length;

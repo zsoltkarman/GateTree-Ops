@@ -13,6 +13,8 @@ import { mountAppShell } from "./modules/shell/app-shell.js";
 import { mountConnectionsView } from "./modules/connections/connections-view.js";
 import { focusDetachedTerminalWindow, hasDetachedTerminalWindow, openDetachedTerminalWindow, mountDetachedTerminalWindow } from "./modules/connections/detached-terminal-window.js";
 import { mountNotesView } from "./modules/notes/notes-view.js";
+import { mountImageHubView } from "./modules/image-hub/image-hub-view.js";
+import { mountImageHubConfigView } from "./modules/image-hub/image-hub-config-view.js";
 import { mountVaultsView } from "./modules/vaults/vaults-view.js";
 import { mountBackupView } from "./modules/backup/backup-view.js";
 import { mountAgentView } from "./modules/agent/agent-view.js";
@@ -47,7 +49,7 @@ function renderShell(session) {
   let disposed = false, snapshotRevision = 0;
   const plansById = new Map();
   const excludedSsh = new Set();
-  const labels = { connections: "Connections", notes: "Notes", vaults: "Vaults", backup: "Backup", agent: "Agent", "ai-skills": "AI Skills", help: "Help", deployments: "Deployments" };
+  const labels = { connections: "Connections", notes: "Notes", vaults: "Vaults", backup: "Backup", agent: "Agent", "ai-skills": "AI Skills", "image-hub": "Image Hub", help: "Help", deployments: "Deployments" };
   const fail = cause => { if (!disposed) shell.showMessage(String(cause), true); };
 
   function queueChanged(plans) {
@@ -136,6 +138,9 @@ function renderShell(session) {
       void mountConnectionsView(content, { ...(detail ?? {}), navigationRoot: shell.navigationHost("connections"), onOpenSsh: session => { void attachSsh(session).catch(fail); } });
     } else if (module === "notes") {
       mountNotesView(content, { ...(detail ?? {}), navigationRoot: shell.navigationHost("notes") });
+    } else if (module === "image-hub") {
+      if (detail?.section === "config") void mountImageHubConfigView(content);
+      else void mountImageHubView(content, { ...(detail ?? {}), navigationRoot: shell.navigationHost("image-hub") });
     } else if (module === "vaults") {
       mountVaultsView(content, detail ?? {});
     } else if (module === "backup") {
@@ -214,12 +219,12 @@ function renderShell(session) {
   };
   void refreshSessions();
   const navigationEvents = new AbortController();
-  for (const module of ["connections", "notes"]) {
+  for (const module of ["connections", "notes", "image-hub"]) {
     const host = shell.navigationHost(module);
     host.addEventListener("click", event => {
       if (!event.target.closest("button")) return;
       const context = tabs.get("workspace");
-      if (context?.module === module) {
+      if (context?.module === module && !(module === "image-hub" && context.detail?.section === "config")) {
         if (tabs.activeId() !== "workspace") tabs.activate("workspace");
         return;
       }
@@ -227,6 +232,16 @@ function renderShell(session) {
       const connection = event.target.closest("[data-connection-id]");
       const note = event.target.closest("[data-note-id]");
       const folder = event.target.closest("[data-folder-id]");
+      if (module === "image-hub") {
+        const project = event.target.closest("[data-hub-project]")
+          ?? event.target.closest(".image-hub-tree-project")?.querySelector("[data-hub-project]");
+        const repository = event.target.closest("[data-hub-repository]");
+        const hubFolder = event.target.closest("[data-hub-folder], [data-hub-toggle]");
+        shell.navigate(module, repository ? { repositoryId: repository.dataset.hubRepository }
+          : project ? { projectId: project.dataset.hubProject }
+          : hubFolder ? { folderId: hubFolder.dataset.hubFolder || hubFolder.dataset.hubToggle || null } : null);
+        return;
+      }
       shell.navigate(module, connection ? { connectionId: connection.dataset.connectionId }
         : note ? { noteId: note.dataset.noteId } : folder ? { folderId: folder.dataset.folderId } : null);
     }, { capture: true, signal: navigationEvents.signal });

@@ -65,3 +65,11 @@ test('moving hosts preserves selection and order through refresh and bulk select
   assert(content.querySelectorAll('[data-move-host]').every(n=>n.disabled));
   controller.dispose();
 });
+
+
+test('copied Plans keep the role on environment change and clear old site and host selections',async()=>{
+ const {draft,controller}=await mount();draft.copySource={planNumber:29};draft.processId='production';
+ controller.processChanged();await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(draft.targetSelection.roles,['cache']);assert.deepEqual(draft.targetSelection.sites,[]);assert.deepEqual(draft.olamTargets.hosts,[]);
+ controller.dispose();
+});

@@ -16,3 +16,8 @@ export const getDeploymentConfigBundle = () => invoke("get_deployment_config_bun
 export const getLocalAnsibleSettings = () => invoke("get_local_ansible_settings");
 export const setLocalAnsibleFolder = (path) => invoke("set_local_ansible_folder", { path });
 export const getLocalDeploymentInventory = (processId) => invoke("get_local_deployment_inventory", { processId });
+
+export const saveValidationQuery = (query) => invoke("save_deployment_validation_query", { query });
+export const deleteValidationQuery = (id) => invoke("delete_deployment_validation_query", { id });
+
+export const getLocalDeploymentRoles = () => invoke("get_local_deployment_roles");

@@ -5,6 +5,7 @@ mod jira;
 pub(crate) mod jira_update;
 mod olam;
 mod report;
+pub(crate) mod thanos;
 
 use crate::{AgentCredential, AgentJobStatus};
 
@@ -24,6 +25,7 @@ pub fn execute(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DriverOutcome, String> {
     match (job.driver.as_str(), job.action.as_str()) {
+        ("thanos", "query") => thanos::execute(process_definition, job, credentials, on_output, is_cancelled).map(DriverOutcome::Completed),
         ("jira", "validate") => {
             jira::validate(process_definition, job, credentials).map(DriverOutcome::Completed)
         }

@@ -28,6 +28,7 @@ impl DeploymentsService {
                 Ok(DeploymentConfigSnapshot {
                     drivers: load_resources(connection, ResourceType::Driver)?,
                     processes: load_resources(connection, ResourceType::Process)?,
+                    validation_queries: super::validation_queries::load(connection)?,
                 })
             })
             .map_err(DeploymentError::from)
@@ -211,7 +212,8 @@ impl DeploymentsService {
         let processes = definitions_as_values(&snapshot.processes)?;
         serde_json::to_string_pretty(&json!({
             "schema_version": 2,
-            "processes": processes
+            "processes": processes,
+            "validation_queries": snapshot.validation_queries
         }))
         .map_err(DeploymentError::Json)
     }
@@ -443,6 +445,13 @@ fn validate_process(
             .filter(|step| step.get("driver").and_then(Value::as_str) == Some(alias))
             .filter_map(|step| step.get("action").and_then(Value::as_str))
             .collect();
+        if alias == "thanos" {
+            crate::agent_ipc::validate_thanos_config(&Value::Object(driver_details.clone()))
+                .map_err(DeploymentError::Invalid)?;
+            validate_tool_credential(_connection, &Value::Object(driver_details.clone()))?;
+            if !used_actions.is_empty() { endpoints.push(required_string(driver_details, "url")?); }
+            continue;
+        }
         if alias == "container" {
             crate::agent_ipc::validate_container_config(&Value::Object(driver_details.clone()))
                 .map_err(DeploymentError::Invalid)?;

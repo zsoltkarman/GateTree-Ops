@@ -5,6 +5,7 @@ pub mod connections;
 pub mod deployments;
 pub mod local_terminal;
 pub mod notes;
+pub mod image_hub;
 pub mod vaults;
 pub mod workspace;
 

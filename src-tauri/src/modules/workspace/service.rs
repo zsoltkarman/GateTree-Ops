@@ -28,6 +28,7 @@ pub struct WorkspaceState {
 }
 
 struct ActiveWorkspace {
+    session_id: String,
     database: EncryptedDatabase,
     key: Zeroizing<Vec<u8>>,
     path: PathBuf,
@@ -61,6 +62,7 @@ impl WorkspaceState {
             .lock()
             .map_err(|_| WorkspaceError::StatePoisoned)?;
         *active = Some(ActiveWorkspace {
+            session_id: uuid::Uuid::new_v4().to_string(),
             database,
             key,
             path,
@@ -134,12 +136,49 @@ impl WorkspaceState {
             .map_err(WorkspaceError::from)
     }
 
-    pub(crate) fn backup_encryption_material(&self) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), WorkspaceError> {
-        let active = self.active.lock().map_err(|_| WorkspaceError::StatePoisoned)?;
+    pub(crate) fn backup_encryption_material(
+        &self,
+    ) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), WorkspaceError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| WorkspaceError::StatePoisoned)?;
         let active = active.as_ref().ok_or(WorkspaceError::NotUnlocked)?;
         let salt = fs::read(salt_path(&active.path))?;
-        if salt.len() != SALT_SIZE { return Err(WorkspaceError::InvalidSalt); }
+        if salt.len() != SALT_SIZE {
+            return Err(WorkspaceError::InvalidSalt);
+        }
         Ok((Zeroizing::new(active.key.to_vec()), salt))
+    }
+
+    pub(crate) fn session_id(&self) -> Result<String, WorkspaceError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| WorkspaceError::StatePoisoned)?;
+        Ok(active
+            .as_ref()
+            .ok_or(WorkspaceError::NotUnlocked)?
+            .session_id
+            .clone())
+    }
+
+    pub(crate) fn with_session_connection<T>(
+        &self,
+        session_id: &str,
+        operation: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, WorkspaceError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| WorkspaceError::StatePoisoned)?;
+        let active = active
+            .as_ref()
+            .filter(|active| active.session_id == session_id)
+            .ok_or(WorkspaceError::NotUnlocked)?;
+        operation(active.database.connection())
+            .map_err(StorageError::from)
+            .map_err(WorkspaceError::from)
     }
 
     pub fn with_connection<T>(
@@ -520,6 +559,12 @@ mod tests {
             WorkspaceService::create(&state, path.clone(), "correct horse battery staple")
                 .expect("create workspace");
         assert!(created.cipher_version.starts_with('4'));
+        let original_session = state.session_id().unwrap();
+        assert!(
+            state
+                .with_session_connection(&original_session, |_| Ok(()))
+                .is_ok()
+        );
         assert_ne!(
             &fs::read(database_path(&directory)).expect("read database")[..16],
             b"SQLite format 3\0"
@@ -564,6 +609,17 @@ mod tests {
             WorkspaceService::unlock(&state, path.clone(), "correct horse battery staple")
                 .expect("reopen workspace");
         assert!(state.keepass_password(100, "vault.kdbx").unwrap().is_none());
+        assert_ne!(state.session_id().unwrap(), original_session);
+        let stale_write_executed = std::cell::Cell::new(false);
+        assert!(
+            state
+                .with_session_connection(&original_session, |_| {
+                    stale_write_executed.set(true);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!stale_write_executed.get());
         assert_eq!(
             reopened.path,
             directory.canonicalize().unwrap().to_string_lossy()

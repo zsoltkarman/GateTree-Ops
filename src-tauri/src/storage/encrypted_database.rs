@@ -233,7 +233,7 @@ mod tests {
         database
             .connection
             .execute_batch(
-                "ALTER TABLE deployment_plans DROP COLUMN approve_all; DROP TABLE quick_launch_items; ALTER TABLE connections DROP COLUMN icon; ALTER TABLE connections DROP COLUMN credential_mode; ALTER TABLE connection_folders DROP COLUMN credential_mode; ALTER TABLE connection_folders DROP COLUMN credential_reference; DELETE FROM schema_migrations WHERE version>=20;",
+                "DROP TABLE deployment_validation_queries; DROP TABLE image_hub_build_log_chunks; DROP TABLE image_hub_build_logs; DROP TABLE image_hub_build_images; DROP TABLE image_hub_builds; DROP TABLE image_hub_sync_state; DROP TABLE image_hub_security_findings; DROP TABLE image_hub_security_parts; DROP TABLE image_hub_security_reports; DROP TABLE image_hub_settings; DROP TABLE image_hub_latest_images; DROP TABLE image_hub_repositories; DROP TABLE image_hub_projects; DROP TABLE image_hub_folders; ALTER TABLE deployment_plans DROP COLUMN approve_all; DROP TABLE quick_launch_items; ALTER TABLE connections DROP COLUMN icon; ALTER TABLE connections DROP COLUMN credential_mode; ALTER TABLE connection_folders DROP COLUMN credential_mode; ALTER TABLE connection_folders DROP COLUMN credential_reference; DELETE FROM schema_migrations WHERE version>=20;",
             )
             .unwrap();
         drop(database);

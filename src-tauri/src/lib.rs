@@ -16,6 +16,10 @@ use modules::ai_skills::{
     refresh_ai_skills, run_ai_skill, update_ai_skill_library,
 };
 use modules::backup::{export_backup, import_backup};
+use modules::image_hub::{get_image_hub_security_report, get_image_hub_ansible_images, get_image_hub, save_image_hub_folder, save_image_hub_repository,
+    delete_image_hub_folder, delete_image_hub_repository, save_image_hub_project,
+    delete_image_hub_project, sync_image_hub_project, open_image_hub_report, refresh_image_hub_artifacts,
+    save_image_hub_config, import_image_hub_config, save_image_hub_config_entry, delete_image_hub_config_entry};
 use modules::connections::{
     create_connection_folder, create_connection_item, delete_connection_folder,
     list_connection_folders, list_connection_items, list_quick_launch_items,
@@ -24,12 +28,12 @@ use modules::connections::{
     resolve_connection_account, set_connection_folder_credentials, update_connection_item,
 };
 use modules::deployments::{
-    control_deployment_queue_item, create_deployment_plan, delete_deployment_config_resource,
+    control_deployment_queue_item, get_completed_deployment_plan_copy, create_deployment_plan, delete_deployment_config_resource,
     delete_deployment_plan, duplicate_deployment_config_resource, get_deployment_config,
     get_deployment_config_bundle, get_deployment_queue, get_local_ansible_settings,
-    get_local_deployment_inventory, set_local_ansible_folder, restore_deployment_config_resource,
+    get_local_deployment_inventory, get_local_deployment_roles, set_local_ansible_folder, restore_deployment_config_resource,
     restore_deployment_credentials, save_deployment_config_resource, update_deployment_plan,
-    validate_deployment_config_resource,
+    validate_deployment_config_resource, save_deployment_validation_query, delete_deployment_validation_query,
 };
 use modules::local_terminal::{
     LocalTerminals, close_local_terminal, open_local_terminal, read_local_terminal,
@@ -102,6 +106,22 @@ pub fn run() {
             unlock_workspace_with_biometrics,
             unlock_workspace_for_development,
             list_notes,
+            get_image_hub,
+            get_image_hub_security_report,
+            get_image_hub_ansible_images,
+            save_image_hub_config,
+            save_image_hub_config_entry,
+            delete_image_hub_config_entry,
+            import_image_hub_config,
+            refresh_image_hub_artifacts,
+            open_image_hub_report,
+            save_image_hub_project,
+            delete_image_hub_project,
+            sync_image_hub_project,
+            save_image_hub_folder,
+            save_image_hub_repository,
+            delete_image_hub_folder,
+            delete_image_hub_repository,
             create_note_folder,
             rename_note_folder,
             delete_note_folder,
@@ -162,9 +182,12 @@ pub fn run() {
             read_ai_skill,
             run_ai_skill,
             get_deployment_config,
+            save_deployment_validation_query,
+            delete_deployment_validation_query,
             get_local_ansible_settings,
             set_local_ansible_folder,
             get_local_deployment_inventory,
+            get_local_deployment_roles,
             validate_deployment_config_resource,
             save_deployment_config_resource,
             delete_deployment_config_resource,
@@ -174,6 +197,7 @@ pub fn run() {
             get_deployment_queue,
             restore_deployment_credentials,
             create_deployment_plan,
+            get_completed_deployment_plan_copy,
             update_deployment_plan,
             delete_deployment_plan,
             control_deployment_queue_item

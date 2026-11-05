@@ -1,9 +1,10 @@
+import { copiedPlannerDraft } from "./planner-copy.js";
 import { mountQueueColumns } from "./queue-columns.js";
 import { emptyPlannerDraft, mountPlannerBuilder } from "./planner-builder.js";
 import { reviewDeploymentApproval } from "./approval-dialog.js";
 import { ensureAgentCredentials } from "../agent/credential-recovery.js";
 import { escapeHtml } from "../../shared/ui.js";
-import { controlDeploymentQueueItem, deleteDeploymentPlan, getDeploymentQueue, updateDeploymentPlan } from "./queue-api.js";
+import { getCompletedPlanCopy, controlDeploymentQueueItem, deleteDeploymentPlan, getDeploymentQueue, updateDeploymentPlan } from "./queue-api.js";
 
 export async function mountDeploymentQueueView(root, detail = {}, { onQueueChange = () => {} } = {}) {
   const state = { plans: [], selectedId: detail.planId ?? null, expandedPlans: new Set(detail.planId ? [detail.planId] : []), adding: Boolean(detail.new), plannerDraft: emptyPlannerDraft(), disposeBuilder: null, message: "", error: false, busyKey: null, infoKey: null, onQueueChange, mountId: crypto.randomUUID() };
@@ -54,7 +55,7 @@ function queueMarkup(state) {
     ? state.plans.filter((plan) => plan.id === state.selectedId)
     : state.plans;
   return `<section class="queue-module">
-    ${state.selectedId && visiblePlans.length ? "" : `<header class="queue-toolbar"><strong>Queue</strong><button data-action="add" title="Add Plan" aria-label="Add Plan">${icon("plus")}</button></header>`}
+    <header class="queue-toolbar${state.selectedId && visiblePlans.length ? " is-plan-view" : ""}">${state.selectedId && visiblePlans.length ? "" : "<strong>Queue</strong>"}<button data-action="add" title="Add Plan" aria-label="Add Plan">${icon("plus")}</button></header>
     ${state.message ? `<p class="queue-message${state.error ? " is-error" : ""}">${escapeHtml(state.message)}</p>` : ""}
     <div class="queue-groups">
       ${visiblePlans.length ? visiblePlans.map((plan) => planMarkup(plan, state)).join("") : '<div class="queue-empty">No plans in the Queue.</div>'}
@@ -65,6 +66,11 @@ function queueMarkup(state) {
 function planMarkup(plan, state) {
   const planAction = plan.status === "awaiting_approval" ? "stop" : plan.status === "stopped" ? "restart" : controlAction(plan.status);
   const expanded = Boolean(state.expandedPlans?.has(plan.id));
+  const completed = plan.jobs.filter(job => job.status === "completed").length;
+  const skipped = plan.jobs.filter(job => job.status === "disabled").length;
+  const finished = completed + skipped;
+  const total = plan.jobs.length;
+  const remaining = total - finished;
   const roles = [...new Set(plan.jobs.flatMap(job => {
     if (!["olam", "container"].includes(job.driver)) return [];
     try {
@@ -79,7 +85,8 @@ function planMarkup(plan, state) {
         ${icon("chevron")}<span class="queue-plan-heading"><strong>Plan #${escapeHtml(plan.planNumber)} · ${escapeHtml(plan.name)}</strong><span title="${escapeHtml(subtitle).replaceAll('"', '&quot;')}">${escapeHtml(subtitle)}</span></span>
       </button>
       <div class="queue-plan-actions">
-        ${state.selectedId ? `<button data-action="add" title="Add Plan" aria-label="Add Plan">${icon("plus")}</button>` : ""}
+        ${plan.status === "completed" ? `<button data-duplicate-plan="${escapeHtml(plan.id)}" title="Copy to new Plan" aria-label="Copy to new Plan">${icon("copy")}</button>` : ""}
+        <span class="queue-plan-progress" title="${completed} completed · ${skipped} skipped · ${remaining} remaining">${finished}/${total} steps · ${remaining} left</span>
         <span class="queue-status is-${escapeHtml(plan.status)}">${escapeHtml(plan.status)}</span>
         <button class="queue-approve-all" data-control-plan="${escapeHtml(plan.id)}" data-control-action="${plan.approveAll ? "revoke_approve_all" : "approve_all"}" aria-pressed="${Boolean(plan.approveAll)}" title="${plan.approveAll ? "Turn off automatic approval for upcoming deployments" : "Automatically approve all deployments in this Plan"}" aria-label="${plan.approveAll ? "Revoke Approve all" : "Approve all"}">${icon("approve")}Approve all</button>
         <button data-info="plan-info:${escapeHtml(plan.id)}" title="Plan Info" aria-label="Plan Info">${icon("info")}</button>
@@ -131,7 +138,7 @@ function jobMarkup(plan, job, index) {
   const blocked = job.status === "disabled" || jobAction !== "stop" && plan.jobs.slice(0, index).some((previous) => !["completed", "disabled"].includes(previous.status));
   const blockedTitle = job.status === "disabled" ? "Enable this job before starting it" : "Waiting for previous enabled jobs to complete";
   return `<div class="queue-job-row${job.status === "disabled" ? " is-disabled" : ""}">
-      <span>${job.sequence}</span><strong>${escapeHtml(job.name)}</strong><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code><span class="queue-job-details" title="${escapeHtml(job.details)}">${jobDetailsMarkup(job.status === "disabled" ? "Skipped during execution" : job.details)}</span><span class="queue-status is-${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>
+      <span>${job.sequence}</span><strong>${escapeHtml(job.driver === "thanos" ? "Thanos Query" : job.name)}</strong><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code><span class="queue-job-details" title="${escapeHtml(job.details)}">${jobDetailsMarkup(job.status === "disabled" ? "Skipped during execution" : job.details)}</span><span class="queue-status is-${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>
       <div class="queue-row-actions">
         <button data-control-job="${escapeHtml(job.id)}" data-control-action="${job.status === "disabled" ? "enable" : "disable"}" title="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-label="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-pressed="${job.status === "disabled"}" ${["queued", "stopped", "disabled"].includes(job.status) ? "" : "disabled"}>${icon(job.status === "disabled" ? "enable" : "disable")}</button>
         <button data-control-job="${escapeHtml(job.id)}" data-control-action="${jobAction}" title="${blocked ? blockedTitle : `${actionLabel(jobAction)} Job`}" aria-label="${actionLabel(jobAction)} Job" ${blocked ? "disabled" : ""}>${icon(jobAction)}</button>
@@ -190,6 +197,17 @@ function bindQueue(root, state) {
     button.removeAttribute("title");
   });
   root.querySelector('[data-action="add"]').addEventListener("click", () => { state.adding = true; render(root, state); });
+  root.querySelectorAll("[data-duplicate-plan]").forEach(button => button.addEventListener("click", async () => {
+    if (state.busyKey) return;
+    state.busyKey = `copy:${button.dataset.duplicatePlan}`; button.disabled = true;
+    try {
+      const source = await getCompletedPlanCopy(button.dataset.duplicatePlan);
+      if (!root.isConnected || root.dataset.queueMountId !== state.mountId) return;
+      state.plannerDraft = copiedPlannerDraft(source); state.adding = true; state.infoKey = null;
+      render(root, state);
+    } catch (cause) { window.alert(String(cause)); }
+    finally { state.busyKey = null; button.disabled = false; }
+  }));
   root.querySelectorAll("[data-control-plan]").forEach((button) => button.addEventListener("click", () => controlItem(root, state, "plan", button.dataset.controlPlan, button.dataset.controlAction)));
   root.querySelectorAll("[data-control-job]").forEach((button) => button.addEventListener("click", () => controlItem(root, state, "job", button.dataset.controlJob, button.dataset.controlAction)));
   root.querySelectorAll("[data-info]").forEach((button) => button.addEventListener("click", () => {

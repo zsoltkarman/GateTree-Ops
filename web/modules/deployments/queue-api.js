@@ -6,3 +6,5 @@ export const updateDeploymentPlan = (id, definition) => invoke("update_deploymen
 export const deleteDeploymentPlan = (id) => invoke("delete_deployment_plan", { id });
 export const controlDeploymentQueueItem = (itemType, id, action) =>
   invoke("control_deployment_queue_item", { itemType, id, action });
+
+export const getCompletedPlanCopy = (id) => invoke("get_completed_deployment_plan_copy", { id });

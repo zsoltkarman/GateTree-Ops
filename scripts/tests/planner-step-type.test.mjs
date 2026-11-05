@@ -1,0 +1,59 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+const source=(await readFile(new URL('../../web/modules/deployments/planner-steps.js',import.meta.url),'utf8')).replace(/^import .*;\n/,'').replaceAll('export ','');
+const escapeHtml=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+const {mountPlannerSteps}=new Function('escapeHtml','CSS',source+'\nreturn {mountPlannerSteps};')(escapeHtml,{escape:s=>s});
+class Element {
+ constructor(){this.listeners={};this.value='';}
+ addEventListener(name,fn){this.listeners[name]=fn;}
+ fire(name,value){this.value=value;this.listeners[name]?.({target:this});}
+ focus(){}
+}
+class Root {
+ set innerHTML(html){
+  this.html=html;this.top=new Map(['data-add-step','data-planner-strategy'].map(k=>[k,new Element()]));
+  this.articles=[...html.matchAll(/<article[^>]*data-planner-step="([^"]+)"[^>]*>([\s\S]*?)<\/article>/g)].map(([,id,body])=>{
+   const controls=new Map([...body.matchAll(/\b(data-step-[a-z-]+)/g)].map(m=>[m[1],new Element()]));
+   return {dataset:{plannerStep:id},querySelector:selector=>controls.get(selector.slice(1,-1))??null};
+  });
+ }
+ querySelector(selector){return this.top.get(selector.slice(1,-1))??null;}
+ querySelectorAll(){return this.articles;}
+ replaceChildren(){this.articles=[];}
+}
+test('switching step types shows only the applicable editor and preserves both drafts',()=>{
+ const draft={steps:[{id:'one',name:'Check',extraVarsText:'VERSION: 3'}]};const root=new Root();
+ const dispose=mountPlannerSteps(root,{draft});
+ assert.ok(root.articles[0].querySelector('[data-step-vars]'));
+ root.articles[0].querySelector('[data-step-type]').fire('change','thanos_query');
+ assert.equal(root.articles[0].querySelector('[data-step-vars]'),null);
+ root.articles[0].querySelector('[data-step-query]').fire('input','vector(1)');
+ root.articles[0].querySelector('[data-step-expected-version]').fire('input','1.97.0');
+ assert.equal(draft.steps[0].expectedVersion,'1.97.0');
+ assert.equal(draft.steps[0].query,'vector(1)');
+ root.articles[0].querySelector('[data-step-type]').fire('change','deploy');
+ assert.ok(root.articles[0].querySelector('[data-step-vars]'));assert.equal(draft.steps[0].extraVarsText,'VERSION: 3');
+ root.articles[0].querySelector('[data-step-type]').fire('change','thanos_query');
+ assert.equal(draft.steps[0].query,'vector(1)');
+ assert.equal(draft.steps[0].expectedVersion,'1.97.0');
+ assert.ok(!root.html.includes('data-step-timeout'));assert.ok(!root.html.includes('data-step-interval'));
+ dispose();assert.equal(root.articles.length,0);
+});
+
+
+test('saved query selection copies PromQL without overwriting expected version or following library edits',()=>{
+ const queries=[{id:'q',name:'Exporter version',role:'exporter',query:'metric{version="${EXPECTED_VERSION}"}'}];
+ const draft={steps:[{id:'one',name:'',type:'thanos_query',query:'',expectedVersion:'1.97.0'}]};const root=new Root();
+ const dispose=mountPlannerSteps(root,{draft,validationQueries:()=>queries});
+ assert.ok(root.html.includes('Exporter version · exporter'));
+ root.articles[0].querySelector('[data-step-saved-query]').fire('change','q');
+ assert.equal(draft.steps[0].query,queries[0].query);
+ assert.equal(draft.steps[0].name,'Exporter version');
+ assert.equal(draft.steps[0].expectedVersion,'1.97.0');
+ const frozen=draft.steps[0].query;queries[0].query='vector(0)';dispose.refresh();
+ assert.equal(draft.steps[0].query,frozen);
+ root.articles[0].querySelector('[data-step-query]').fire('input','vector(1)');
+ assert.equal(draft.steps[0].validationQueryId,'');
+ dispose();
+});

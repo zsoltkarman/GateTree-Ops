@@ -23,11 +23,12 @@ test('Planner does not expand an empty selection to all inventory hosts', () => 
 
 test('together mode uses groups for full sites and keeps partial host lists together', () => {
   const selection={jobMode:'together',roles:['service'],sites:['a','b'],excluded:[]};
-  assert.deepEqual(plannerTargetInput(snapshot,selection),{job_mode:'together',roles:['service'],sites:['a','b'],inventory_groups:['env_a','env_b']});
+  assert.deepEqual(plannerTargetInput(snapshot,selection),{job_mode:'together',roles:['service'],sites:['a','b'],host_sites:{one:'a',three:'b'},inventory_groups:['env_a','env_b']});
   selection.excluded=[JSON.stringify(['a','one'])];
-  assert.deepEqual(plannerTargetInput(snapshot,selection),{job_mode:'together',roles:['service'],sites:['a','b'],hosts:['three']});
+  assert.deepEqual(plannerTargetInput(snapshot,selection),{job_mode:'together',roles:['service'],sites:['b'],host_sites:{three:'b'},hosts:['three']});
   selection.excluded.push(JSON.stringify(['b','three']));
   assert.deepEqual(plannerTargetInput(snapshot,selection).hosts,[]);
+  assert.deepEqual(plannerTargetInput(snapshot,selection).sites,[]);
 });
 test('unavailable inventory cannot leave usable stale targets in the Builder draft', () => {
   assert.deepEqual(plannerTargetInput(null,{roles:['service'],sites:['a'],excluded:[]}),{job_mode:'per_host',roles:[],sites:[],hosts:[]});
@@ -38,7 +39,7 @@ test('unavailable inventory cannot leave usable stale targets in the Builder dra
 test('per-host mode is the default and always saves resolved hosts rather than site groups',()=>{
  const selection={roles:['service'],sites:['a','b'],excluded:[]};
  const targets=plannerTargetInput(snapshot,selection);
- assert.deepEqual(targets,{job_mode:'per_host',roles:['service'],sites:['a','b'],hosts:['one','three']});
+ assert.deepEqual(targets,{job_mode:'per_host',roles:['service'],sites:['a','b'],host_sites:{one:'a',three:'b'},hosts:['one','three']});
  selection.jobMode='together';assert.deepEqual(plannerTargetInput(snapshot,selection).inventory_groups,['env_a','env_b']);
  selection.jobMode='per_host';assert.deepEqual(plannerTargetInput(snapshot,selection),targets);
 });

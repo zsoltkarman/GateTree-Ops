@@ -11,6 +11,7 @@ const SIDEBAR_MAX_WIDTH = 420;
 const navigation = [
   ["connections", "Connections", "<path d='M8.5 8.5 6 11a3.5 3.5 0 0 0 5 5l2.5-2.5M15.5 15.5 18 13a3.5 3.5 0 0 0-5-5l-2.5 2.5M9 15l6-6' />"],
   ["deployments", "Deployments", "<path d='M5 6.5h14v4H5zM5 13.5h14v4H5zM8 8.5h.01M8 15.5h.01' />"],
+  ["image-hub", "Image Hub", "<path d='m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5' />"],
   ["ai-skills", "AI Skills", "<path d='m12 3 1.2 4.1L17 8.5l-3.8 1.4L12 14l-1.2-4.1L7 8.5l3.8-1.4L12 3ZM18 14l.7 2.3L21 17l-2.3.7L18 20l-.7-2.3L15 17l2.3-.7L18 14Z' />"],
   ["notes", "Notes", "<path d='M6 3.5h9l3 3V20H6zM14.5 3.5V7H18M9 11h6M9 14.5h6' />"],
   ["vaults", "Vaults", "<rect x='5' y='8.5' width='14' height='11' rx='2' /><path d='M8.5 8.5V6a3.5 3.5 0 0 1 7 0v2.5M12 13v2' />"],
@@ -71,7 +72,7 @@ function queueNavigationMarkup(catalog, expandedGroups) {
 }
 
 function navigationMarkup(id, label, iconPath, index) {
-  const hasModuleNavigation = ["connections", "deployments", "ai-skills", "notes", "help"].includes(id);
+  const hasModuleNavigation = ["connections", "deployments", "image-hub", "ai-skills", "notes", "help"].includes(id);
   const item = `
     <button class="navigation-item${index === 0 ? " is-active" : ""}" data-module="${id}" title="${label}">
       ${icon(iconPath)}
@@ -83,7 +84,11 @@ function navigationMarkup(id, label, iconPath, index) {
     <div class="navigation-group" data-navigation-group="${id}">
       ${item}
       <div class="navigation-children" data-role="${id}-navigation" hidden>
-        ${id === "help" ? `
+        ${id === "image-hub" ? `
+          <button data-image-hub-section="inventory">${icon("<path d='M4 5h16v14H4zM4 10h16M9 10v9'/>")}<span>Inventory</span></button>
+          <div class="module-navigation-host" data-role="image-hub-navigation-host"></div>
+          <button data-image-hub-section="config">${icon("<path d='M5 6h14M5 12h14M5 18h14M9 3v6M15 9v6M9 15v6'/>")}<span>Config</span></button>
+        ` : id === "help" ? `
           <button data-help-check-updates>${icon("<path d='M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 11-2l3 3M4 16l3 3a7 7 0 0 0 11-2'/>")}<span>Check for Updates</span></button>
           <button data-help-module="deployments" aria-expanded="false">${icon("<path d='M5 6.5h14v4H5zM5 13.5h14v4H5zM8 8.5h.01M8 15.5h.01'/>")}<span>Deployments</span>${icon("<path d='m9 7 5 5-5 5'/>")}</button>
           <div class="help-navigation-topics" data-role="help-deployment-topics" hidden>
@@ -374,6 +379,10 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
       parent.classList.toggle("is-active", detail?.module === "deployments" && !detail?.section);
       root.querySelector('[data-role="help-deployment-topics"]').hidden = !helpDeploymentsExpanded;
       root.querySelector('[data-help-section="config"]').classList.toggle("is-active", configSelected);
+    } else if (module === "image-hub") {
+      const section = detail?.section === "config" ? "config" : "inventory";
+      root.querySelectorAll("[data-image-hub-section]").forEach(button => button.classList.toggle("is-active", button.dataset.imageHubSection === section));
+      root.querySelector('[data-role="image-hub-navigation-host"]').hidden = section === "config";
     } else if (module === "ai-skills") {
       selectAiChild(detail ?? { section: "skills" });
     } else if (module === "deployments") {
@@ -411,6 +420,9 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     });
   });
   bindAiChildren();
+  root.querySelectorAll("[data-image-hub-section]").forEach(button => {
+    button.addEventListener("click", () => navigate("image-hub", { section: button.dataset.imageHubSection }));
+  });
   root.querySelector('[data-help-check-updates]').addEventListener("click", onCheckUpdates);
   root.querySelector('[data-help-module="deployments"]').addEventListener("click", () => {
     helpDeploymentsExpanded = !helpDeploymentsExpanded;
