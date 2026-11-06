@@ -18,7 +18,7 @@ use modules::ai_skills::{
 use modules::backup::{export_backup, import_backup};
 use modules::image_hub::{get_image_hub_security_report, get_image_hub_ansible_images, get_image_hub, save_image_hub_folder, save_image_hub_repository,
     delete_image_hub_folder, delete_image_hub_repository, save_image_hub_project,
-    delete_image_hub_project, sync_image_hub_project, open_image_hub_report, refresh_image_hub_artifacts,
+    delete_image_hub_project, sync_image_hub_project, sync_image_hub_inventory, open_image_hub_report, refresh_image_hub_artifacts,
     save_image_hub_config, import_image_hub_config, save_image_hub_config_entry, delete_image_hub_config_entry};
 use modules::connections::{
     create_connection_folder, create_connection_item, delete_connection_folder,
@@ -28,9 +28,9 @@ use modules::connections::{
     resolve_connection_account, set_connection_folder_credentials, update_connection_item,
 };
 use modules::deployments::{
-    control_deployment_queue_item, get_completed_deployment_plan_copy, create_deployment_plan, delete_deployment_config_resource,
-    delete_deployment_plan, duplicate_deployment_config_resource, get_deployment_config,
-    get_deployment_config_bundle, get_deployment_queue, get_local_ansible_settings,
+    control_deployment_queue_item, get_completed_deployment_plan_copy, create_deployment_plan, create_deployment_plan_batch, delete_deployment_config_resource,
+    archive_deployment_plan, delete_deployment_plan, duplicate_deployment_config_resource, get_deployment_config,
+    get_deployment_config_bundle, get_deployment_queue, get_deployment_queue_log, get_local_ansible_settings,
     get_local_deployment_inventory, get_local_deployment_roles, set_local_ansible_folder, restore_deployment_config_resource,
     restore_deployment_credentials, save_deployment_config_resource, update_deployment_plan,
     validate_deployment_config_resource, save_deployment_validation_query, delete_deployment_validation_query,
@@ -118,6 +118,7 @@ pub fn run() {
             save_image_hub_project,
             delete_image_hub_project,
             sync_image_hub_project,
+            sync_image_hub_inventory,
             save_image_hub_folder,
             save_image_hub_repository,
             delete_image_hub_folder,
@@ -195,11 +196,14 @@ pub fn run() {
             restore_deployment_config_resource,
             get_deployment_config_bundle,
             get_deployment_queue,
+            get_deployment_queue_log,
             restore_deployment_credentials,
             create_deployment_plan,
+            create_deployment_plan_batch,
             get_completed_deployment_plan_copy,
             update_deployment_plan,
             delete_deployment_plan,
+            archive_deployment_plan,
             control_deployment_queue_item
         ])
         .build(tauri::generate_context!())

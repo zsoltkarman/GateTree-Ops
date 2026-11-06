@@ -18,13 +18,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod drivers;
+mod regional;
 mod ssh;
 
 pub use ssh::{
     SshAuthentication, SshConnectRequest, SshHostKey, SshSessionStatus, SshTerminalChunk,
 };
 
-pub const PROTOCOL_VERSION: u16 = 21;
+pub const PROTOCOL_VERSION: u16 = 22;
 const ENDPOINT_FILE: &str = "agent-endpoint.json";
 const LOCK_FILE: &str = "agent.lock";
 const JOB_SETS_FILE: &str = "agent-job-sets.json";
@@ -98,6 +99,8 @@ pub struct AgentJobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentJobSetStatus {
+    #[serde(default)]
+    pub retry_scope: Option<Vec<String>>,
     #[serde(default)]
     pub approve_all: bool,
     #[serde(default)]
@@ -627,6 +630,7 @@ struct JobSetManager {
     job_sets: Vec<AgentJobSetStatus>,
     credentials: HashMap<String, Vec<AgentCredential>>,
     execution_generations: HashMap<String, u64>,
+    parallel_coordinators: HashMap<String, u64>,
 }
 
 impl JobSetManager {
@@ -676,6 +680,7 @@ impl JobSetManager {
             job_sets,
             credentials: HashMap::new(),
             execution_generations: HashMap::new(),
+            parallel_coordinators: HashMap::new(),
         };
         if changed {
             manager.persist()?;
@@ -704,6 +709,7 @@ impl JobSetManager {
             ));
         }
         let mut job_set = AgentJobSetStatus {
+            retry_scope: None,
             approve_all: submission.approve_all,
             execution_revision: 3,
             credentials_required: false,
@@ -746,6 +752,7 @@ impl JobSetManager {
                 .collect(),
         };
         job_set.jobs.sort_by_key(|job| job.sequence);
+        regional::Schedule::parse(&job_set.plan_definition).and_then(|schedule| schedule.validate_jobs(&job_set)).map_err(AgentIpcError::InvalidJobSet)?;
 
         self.job_sets
             .retain(|item| item.id == job_set.id || !item.name.eq_ignore_ascii_case(&job_set.name));
@@ -809,10 +816,71 @@ impl JobSetManager {
                 "Enable this job before retrying it.".into(),
             ));
         }
-        if set.status == "running"
-            || set.jobs[..index]
-                .iter()
-                .any(|job| !matches!(job.status.as_str(), "completed" | "disabled"))
+        let schedule = regional::Schedule::parse(&set.plan_definition).unwrap_or_default();
+        if let Some(end) = deployment_pair_end(set, index) {
+            if !schedule.preceding_complete(set, index)
+                || set
+                    .retry_scope
+                    .as_ref()
+                    .is_some_and(|scope| !scope.contains(&set.jobs[index].id))
+            {
+                return Err(AgentIpcError::InvalidJobSet(
+                    "Complete the preceding steps or current retry pair first.".into(),
+                ));
+            }
+            if credentials.is_empty() && !self.credentials.contains_key(&set.id) {
+                return Err(AgentIpcError::InvalidJobSet(
+                    "Unlock KeePass before retrying the deployment.".into(),
+                ));
+            }
+            if !credentials.is_empty() {
+                self.credentials.insert(set.id.clone(), credentials);
+            }
+            // An inactive Plan retries only this pair. An already-running
+            // regional Plan retains its other active lanes unchanged.
+            if !matches!(set.status.as_str(), "running" | "awaiting_approval") {
+                set.retry_scope = Some(
+                    set.jobs[index..end]
+                        .iter()
+                        .map(|job| job.id.clone())
+                        .collect(),
+                );
+            }
+            for job in &mut set.jobs[index..end] {
+                if job.status == "disabled" {
+                    continue;
+                }
+                append_job_log(
+                    &mut job.log,
+                    &format!(
+                        "Deployment pair retry requested. Previous deployment job: {:?}; validation job: {:?}.",
+                        job.deployment_job_id, job.validation_job_id
+                    ),
+                );
+                job.status = "queued".into();
+                job.finished_at = None;
+                job.validation_job_id = None;
+                job.deployment_job_id = None;
+                job.phase = if matches!(job.driver.as_str(), "olam" | "container") {
+                    Some(
+                        if job.action == "deploy" {
+                            "deployment"
+                        } else {
+                            "validation"
+                        }
+                        .into(),
+                    )
+                } else {
+                    None
+                };
+            }
+            set.status = "running".into();
+            let result = set.clone();
+            self.persist()?;
+            return Ok(result);
+        }
+        if matches!(set.status.as_str(), "running" | "awaiting_approval")
+            || !schedule.preceding_complete(set, index)
         {
             return Err(AgentIpcError::InvalidJobSet(
                 "Stop the Plan and complete preceding jobs before retrying".into(),
@@ -834,19 +902,107 @@ impl JobSetManager {
         if !credentials.is_empty() {
             self.credentials.insert(set.id.clone(), credentials);
         }
+        if let Some(scope) = &set.retry_scope {
+            if !scope.contains(&set.jobs[index].id) {
+                return Err(AgentIpcError::InvalidJobSet(
+                    "Finish the selected deployment pair before retrying other jobs.".into(),
+                ));
+            }
+            let job = &mut set.jobs[index];
+            if job.status != "stopped" {
+                job.validation_job_id = None;
+                job.deployment_job_id = None;
+                if matches!(job.driver.as_str(), "olam" | "container") {
+                    job.phase = Some(
+                        if job.action == "deploy" {
+                            "deployment"
+                        } else {
+                            "validation"
+                        }
+                        .into(),
+                    );
+                }
+            }
+            job.status = "queued".into();
+            job.finished_at = None;
+            set.status = "running".into();
+            let result = set.clone();
+            self.persist()?;
+            return Ok(result);
+        }
         // Stopping monitoring does not cancel the remote OLAM job. Reattach to
         // that execution without resetting its IDs, phase, or following jobs.
         let job = &mut set.jobs[index];
-        let existing_olam_job = if job.phase.as_deref() == Some("deployment") || job.action == "deploy" {
-            job.deployment_job_id
-        } else {
-            job.validation_job_id
-        };
-        if job.driver == "olam" && job.status == "stopped" && existing_olam_job.is_some_and(|id| id > 0) {
+        let existing_olam_job =
+            if job.phase.as_deref() == Some("deployment") || job.action == "deploy" {
+                job.deployment_job_id
+            } else {
+                job.validation_job_id
+            };
+        if job.driver == "olam"
+            && job.status == "stopped"
+            && existing_olam_job.is_some_and(|id| id > 0)
+        {
             job.status = "running".into();
             job.finished_at = None;
-            append_job_log(&mut job.log, &format!("Resuming monitoring of existing OLAM job {}. No new job will be launched.", existing_olam_job.unwrap()));
+            append_job_log(
+                &mut job.log,
+                &format!(
+                    "Resuming monitoring of existing OLAM job {}. No new job will be launched.",
+                    existing_olam_job.unwrap()
+                ),
+            );
+            if schedule.limit > 1 {
+                for job in &mut set.jobs {
+                    if job.status == "stopped" {
+                        job.status = "queued".into();
+                    }
+                }
+            }
             set.status = "running".into();
+            let result = set.clone();
+            self.persist()?;
+            return Ok(result);
+        }
+        if schedule.limit > 1 {
+            // A completed regional job cannot be replayed underneath already
+            // completed validation. Copy the Plan for a fresh deployment.
+            if set.jobs[index].status == "completed" {
+                return Err(AgentIpcError::InvalidJobSet(
+                    "Copy the Plan to rerun completed regional work.".into(),
+                ));
+            }
+            if matches!(
+                set.jobs[index].status.as_str(),
+                "failed" | "warning" | "denied"
+            ) {
+                let job = &mut set.jobs[index];
+                job.validation_job_id = None;
+                job.deployment_job_id = None;
+                if matches!(job.driver.as_str(), "olam" | "container") && job.action != "validate" {
+                    job.phase = Some(
+                        if job.action == "deploy" {
+                            "deployment"
+                        } else {
+                            "validation"
+                        }
+                        .into(),
+                    );
+                }
+            }
+            set.jobs[index].status = "queued".into();
+            set.jobs[index].finished_at = None;
+            // Resume all stopped monitors; the coordinator will honour lanes.
+            for job in &mut set.jobs {
+                if job.status == "stopped" {
+                    job.status = "queued".into();
+                }
+            }
+            set.status = "running".into();
+            append_job_log(
+                &mut set.jobs[index].log,
+                "Retry requested; completed regional work is preserved.",
+            );
             let result = set.clone();
             self.persist()?;
             return Ok(result);
@@ -864,7 +1020,9 @@ impl JobSetManager {
             job.log.clear();
             job.validation_job_id = None;
             job.deployment_job_id = None;
-            job.phase = if matches!(job.driver.as_str(), "olam" | "container") && job.action != "validate" {
+            job.phase = if matches!(job.driver.as_str(), "olam" | "container")
+                && job.action != "validate"
+            {
                 Some(
                     if job.action == "deploy" {
                         "deployment"
@@ -957,7 +1115,7 @@ impl JobSetManager {
             .iter_mut()
             .find(|job| job.id == job_id)
             .expect("job was located above");
-        if set.status != "awaiting_approval" || job.status != "awaiting_approval" {
+        if !matches!(set.status.as_str(), "running" | "awaiting_approval") || job.status != "awaiting_approval" {
             return Err(AgentIpcError::InvalidJobSet(
                 "only a validated job awaiting approval can be denied".into(),
             ));
@@ -967,7 +1125,9 @@ impl JobSetManager {
             &mut job.log,
             "Deployment denied by the operator. The Plan has stopped.",
         );
-        set.status = "denied".into();
+        if regional::Schedule::parse(&set.plan_definition).is_ok_and(|schedule| schedule.limit > 1) {
+            set.status = "running".into();
+        } else { set.status = "denied".into(); }
         self.persist()
     }
 
@@ -1018,10 +1178,9 @@ impl JobSetManager {
             && !self.credentials.contains_key(id) {
             return Err(AgentIpcError::InvalidJobSet("Unlock KeePass to restore Agent credentials first.".into()));
         }
-        if enabled && set.status == "awaiting_approval" {
-            let job_id = set.jobs.iter().find(|job| job.status == "awaiting_approval")
-                .ok_or_else(|| AgentIpcError::InvalidJobSet("No deployment is awaiting approval.".into()))?.id.clone();
-            self.approve(&job_id)?;
+        if enabled && matches!(set.status.as_str(), "running" | "awaiting_approval") {
+            let waiting: Vec<_> = set.jobs.iter().filter(|job| job.status == "awaiting_approval").map(|job| job.id.clone()).collect();
+            for id in waiting { self.approve(&id)?; }
         }
         self.job_sets[index].approve_all = enabled;
         let result = self.job_sets[index].clone();
@@ -1039,6 +1198,11 @@ impl JobSetManager {
             return Err(AgentIpcError::InvalidJobSet(
                 "Restart the Plan to regenerate jobs from Process steps.".into(),
             ));
+        }
+        let approval_index = job_set.jobs.iter().position(|job| job.id == job_id).expect("job was located above");
+        if regional::Schedule::parse(&job_set.plan_definition).is_ok_and(|schedule|
+            schedule.limit > 1 && schedule.blocked(job_set, &job_set.jobs[approval_index])) {
+            return Err(AgentIpcError::InvalidJobSet("This region has a failed step. Retry it before approving further deployments in the same region.".into()));
         }
         let job = job_set
             .jobs
@@ -1075,10 +1239,10 @@ impl JobSetManager {
             .find(|job_set| job_set.id == id)
             .ok_or_else(|| AgentIpcError::InvalidJobSet("job set was not found".into()))?;
         job_set.status = "stopped".into();
-        if let Some(job) = job_set
+        for job in job_set
             .jobs
             .iter_mut()
-            .find(|job| matches!(job.status.as_str(), "running" | "awaiting_approval"))
+            .filter(|job| matches!(job.status.as_str(), "running" | "awaiting_approval"))
         {
             job.status = "stopped".into();
         }
@@ -1589,210 +1753,457 @@ fn dispatch_ssh_request(
     Ok(())
 }
 
+// The following same-target Thanos checks belong to this exact deployment.
+// Never cross another Ansible/global step or infer a pair from a service name.
+fn deployment_pair_end(set: &AgentJobSetStatus, index: usize) -> Option<usize> {
+    let deploy = set.jobs.get(index)?;
+    if deploy.status != "completed"
+        || !matches!(deploy.driver.as_str(), "olam" | "container")
+        || !matches!(deploy.action.as_str(), "deploy" | "validate_deploy")
+        || deploy.target.is_none()
+    {
+        return None;
+    }
+    let end = (index + 1..set.jobs.len())
+        .find(|&i| {
+            set.jobs[i].driver != "thanos"
+                || set.jobs[i].action != "query"
+                || set.jobs[i].target != deploy.target
+        })
+        .unwrap_or(set.jobs.len());
+    let checks = &set.jobs[index + 1..end];
+    (!checks.is_empty()
+        && checks.iter().any(|job| job.status == "failed")
+        && checks
+            .iter()
+            .all(|job| !matches!(job.status.as_str(), "running" | "awaiting_approval")))
+    .then_some(end)
+}
+
 fn spawn_job_set_execution(
     job_sets: Arc<Mutex<JobSetManager>>,
     job_set_id: String,
     credentials: Vec<AgentCredential>,
 ) {
-    let generation = {
+    let (generation, schedule, regional_execution) = {
         let mut manager = job_sets.lock().expect("job set lock");
+        let schedule = manager
+            .job_sets
+            .iter()
+            .find(|set| set.id == job_set_id)
+            .and_then(|set| regional::Schedule::parse(&set.plan_definition).ok())
+            .unwrap_or_default();
+        let regional_execution = schedule.limit > 1
+            || manager
+                .job_sets
+                .iter()
+                .any(|set| set.id == job_set_id && set.retry_scope.is_some());
+        if regional_execution
+            && manager.parallel_coordinators.get(&job_set_id)
+                == manager.execution_generations.get(&job_set_id)
+            && manager.parallel_coordinators.contains_key(&job_set_id)
+        {
+            return;
+        }
         let generation = manager
             .execution_generations
             .entry(job_set_id.clone())
             .or_default();
         *generation += 1;
-        *generation
+        let generation = *generation;
+        if regional_execution {
+            manager
+                .parallel_coordinators
+                .insert(job_set_id.clone(), generation);
+        }
+        (generation, schedule, regional_execution)
     };
     thread::spawn(move || {
-        loop {
-            let current = {
-                let manager = job_sets.lock().expect("job set lock");
-                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
-                    return;
-                }
-                manager
-                    .job_sets
-                    .iter()
-                    .find(|set| set.id == job_set_id && set.status == "running")
-                    .and_then(|set| {
-                        set.jobs
-                            .iter()
-                            .find(|job| job.status == "running")
-                            .cloned()
-                            .map(|job| {
-                                (
-                                    set.process_definition.clone(),
-                                    set.plan_definition.clone(),
-                                    job,
-                                    set.clone(),
-                                )
-                            })
-                    })
-            };
-            let Some((process_definition, plan_definition, job, report_context)) = current else {
-                return;
-            };
-            {
-                let mut manager = job_sets.lock().expect("job set lock");
-                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
-                    return;
-                }
-                if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
-                    && let Some(active) = set.jobs.iter_mut().find(|item| item.id == job.id)
-                {
-                    if job.driver == "container" && job.action == "deploy" {
-                        if job.phase.as_deref() == Some("deployment") {
-                            active.deployment_job_id = None;
-                        } else {
-                            active.validation_job_id = None;
-                            active.deployment_job_id = None;
-                        }
-                    }
-                    append_job_log(
-                        &mut active.log,
-                        &format!(
-                            "Starting {} {} for {}…",
-                            job.driver.to_uppercase(),
-                            job.phase.as_deref().unwrap_or(&job.action),
-                            job.target.as_deref().unwrap_or("plan")
-                        ),
-                    );
-                    let _ = manager.persist();
-                }
+        if regional_execution {
+            run_regional_jobs(job_sets, job_set_id, credentials, generation, schedule);
+        } else {
+            run_jobs(job_sets, job_set_id, credentials, generation, None);
+        }
+    });
+}
+
+fn run_regional_jobs(
+    job_sets: Arc<Mutex<JobSetManager>>,
+    job_set_id: String,
+    credentials: Vec<AgentCredential>,
+    generation: u64,
+    schedule: regional::Schedule,
+) {
+    let mut admitted = std::collections::HashSet::new();
+    let mut workers = HashMap::<String, thread::JoinHandle<()>>::new();
+    loop {
+        workers.retain(|_, worker| !worker.is_finished());
+        let mut manager = job_sets.lock().expect("job set lock");
+        if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+            return;
+        }
+        let current_credentials = manager
+            .credentials
+            .get(&job_set_id)
+            .cloned()
+            .unwrap_or_else(|| credentials.clone());
+        let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id) else {
+            return;
+        };
+        if !matches!(set.status.as_str(), "running" | "awaiting_approval") {
+            break;
+        }
+        let previous_status = set.status.clone();
+        let mut changed = false;
+        // Preserve the failed row, and stop only remaining work in its region.
+        let blocked: Vec<_> = set
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, job)| {
+                set.retry_scope.is_none()
+                    && matches!(job.status.as_str(), "queued" | "awaiting_approval")
+                    && schedule.region(job).is_some()
+                    && schedule.blocked(set, job)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for index in blocked {
+            set.jobs[index].status = "stopped".into();
+            append_job_log(
+                &mut set.jobs[index].log,
+                "Region stopped because a step in this region failed. Other regions continue.",
+            );
+            changed = true;
+        }
+        let candidates = if let Some(scope) = &set.retry_scope {
+            set.jobs
+                .iter()
+                .enumerate()
+                .find(|(_, job)| scope.contains(&job.id) && !regional::done(job))
+                .filter(|(_, job)| {
+                    matches!(
+                        job.status.as_str(),
+                        "queued" | "running" | "awaiting_approval"
+                    )
+                })
+                .map(|(index, _)| vec![index])
+                .unwrap_or_default()
+        } else {
+            schedule.candidates(set, &mut admitted)
+        };
+        let has_pending = !candidates.is_empty();
+        for index in candidates {
+            let job = &set.jobs[index];
+            if workers.contains_key(&job.id) {
+                continue;
             }
-            let on_started = |phase: &str, external_id: i64| {
-                let mut manager = job_sets.lock().expect("job set lock");
-                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
-                    return;
+            let region = schedule.region(job);
+            if set.jobs.iter().any(|other| {
+                workers.contains_key(&other.id)
+                    && (region.is_none() || schedule.region(other) == region)
+            }) {
+                continue;
+            }
+            if job.status == "queued" {
+                activate_job(set, index);
+                changed = true;
+            }
+            if set.jobs[index].status == "awaiting_approval" && set.approve_all {
+                apply_automatic_approval(set, index);
+                changed = true;
+            }
+            if set.jobs[index].status != "running" {
+                continue;
+            }
+            set.status = "running".into();
+            let id = set.jobs[index].id.clone();
+            let worker_sets = job_sets.clone();
+            let worker_set_id = job_set_id.clone();
+            let worker_credentials = current_credentials.clone();
+            let worker_id = id.clone();
+            workers.insert(id, thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                    run_jobs(worker_sets.clone(), worker_set_id.clone(), worker_credentials, generation, Some(worker_id.clone()))));
+                if result.is_err() {
+                    let mut manager = worker_sets.lock().expect("job set lock");
+                    if manager.execution_generations.get(&worker_set_id) == Some(&generation)
+                        && let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == worker_set_id)
+                        && let Some(job) = set.jobs.iter_mut().find(|job| job.id == worker_id && job.status == "running") {
+                        job.status = "failed".into();
+                        append_job_log(&mut job.log, "Execution worker failed unexpectedly. Review the remote job before retrying.");
+                        let _ = manager.persist();
+                    }
                 }
-                if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
-                    && set.status == "running"
-                    && let Some(active) = set.jobs.iter_mut().find(|active| active.id == job.id)
-                    && active.status == "running"
-                    && active.phase.as_deref() == Some(phase)
-                {
-                    record_olam_launch(active, phase, external_id);
-                    let _ = manager.persist();
-                }
-            };
-            let log_prefix = std::cell::RefCell::new(None::<String>);
-            let on_output = |output: &str| {
-                let mut manager = job_sets.lock().expect("job set lock");
-                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
-                    return;
-                }
-                if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
-                    && set.status == "running"
-                    && let Some(active) = set.jobs.iter_mut().find(|active| active.id == job.id)
-                    && active.status == "running"
-                    && active.phase == job.phase
-                {
-                    let mut prefix = log_prefix.borrow_mut();
-                    let prefix = prefix.get_or_insert_with(|| active.log.clone());
-                    active.log.clone_from(prefix);
-                    append_job_log(&mut active.log, output);
-                    let _ = manager.persist();
-                }
-            };
-            let checkpoint = |key: &str, value: &str| -> Result<(), String> {
-                let mut manager = job_sets.lock().map_err(|_| "Agent job set lock failed.")?;
-                if manager.execution_generations.get(&job_set_id) != Some(&generation) {
-                    return Err("Update report stopped before the next operation.".into());
-                }
-                let set = manager
-                    .job_sets
-                    .iter_mut()
-                    .find(|set| set.id == job_set_id && set.status == "running")
-                    .ok_or("Update report is no longer running.")?;
-                let active = set
-                    .jobs
-                    .iter_mut()
-                    .find(|active| active.id == job.id && active.status == "running")
-                    .ok_or("Update report job is no longer running.")?;
-                active.report_progress.insert(key.into(), value.into());
-                manager
-                    .persist()
-                    .map_err(|e| format!("Could not persist update report progress: {e}"))
-            };
-            let result = if matches!(job.driver.as_str(), "jira" | "cx") && job.action == "update" {
-                let update = if job.driver == "cx" {
-                    drivers::cx_update::update
-                } else {
-                    drivers::jira_update::update
-                };
-                update(&report_context, &job, &credentials, &checkpoint, &on_output)
-                    .map(drivers::DriverOutcome::Completed)
+            }));
+        }
+        let failed = regional::Schedule::failed(set).map(str::to_owned);
+        if workers.is_empty() {
+            let pair_complete = set.retry_scope.as_ref().is_some_and(|scope| {
+                set.jobs
+                    .iter()
+                    .filter(|job| scope.contains(&job.id))
+                    .all(regional::done)
+            });
+            if pair_complete {
+                set.retry_scope = None;
+                set.status = failed.clone().unwrap_or_else(|| {
+                    if set.jobs.iter().all(regional::done) {
+                        "completed"
+                    } else {
+                        "stopped"
+                    }
+                    .into()
+                });
+            } else if set
+                .jobs
+                .iter()
+                .any(|job| job.status == "awaiting_approval" && !schedule.blocked(set, job))
+            {
+                set.status = "awaiting_approval".into();
+            } else if failed.is_some() && !has_pending {
+                set.status = failed.unwrap();
+            } else if set.jobs.iter().all(regional::done) {
+                set.status = "completed".into();
+            } else if set.jobs.iter().any(|job| job.status == "awaiting_approval") {
+                set.status = "awaiting_approval".into();
+            } else if !has_pending {
+                set.status = "stopped".into();
             } else {
-                drivers::execute(
-                    &process_definition,
-                    &plan_definition,
-                    &job,
-                    &credentials,
-                    &on_started,
-                    &on_output,
-                    &|| {
-                        let manager = job_sets.lock().expect("job set lock");
-                        manager.execution_generations.get(&job_set_id) != Some(&generation)
-                            || !manager.job_sets.iter().any(|set| set.id == job_set_id && set.status == "running")
-                    },
-                )
-            };
+                set.status = "running".into();
+            }
+        } else {
+            set.status = "running".into();
+        }
+        let finished = !matches!(set.status.as_str(), "running" | "awaiting_approval");
+        if changed || set.status != previous_status {
+            let _ = manager.persist();
+        }
+        if finished {
+            // Release coordinator ownership under the same lock as the terminal
+            // status, so an immediate Retry cannot attach to an exiting runner.
+            manager.parallel_coordinators.remove(&job_set_id);
+            return;
+        }
+        drop(manager);
+        thread::sleep(Duration::from_millis(100));
+    }
+    let mut manager = job_sets.lock().expect("job set lock");
+    if manager.parallel_coordinators.get(&job_set_id) == Some(&generation) {
+        manager.parallel_coordinators.remove(&job_set_id);
+    }
+}
+
+fn run_jobs(
+    job_sets: Arc<Mutex<JobSetManager>>,
+    job_set_id: String,
+    credentials: Vec<AgentCredential>,
+    generation: u64,
+    only_job: Option<String>,
+) {
+    loop {
+        let current = {
+            let manager = job_sets.lock().expect("job set lock");
+            if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                return;
+            }
+            manager
+                .job_sets
+                .iter()
+                .find(|set| set.id == job_set_id && set.status == "running")
+                .and_then(|set| {
+                    set.jobs
+                        .iter()
+                        .find(|job| {
+                            job.status == "running"
+                                && only_job.as_ref().is_none_or(|id| id == &job.id)
+                        })
+                        .cloned()
+                        .map(|job| {
+                            (
+                                set.process_definition.clone(),
+                                set.plan_definition.clone(),
+                                job,
+                                set.clone(),
+                            )
+                        })
+                })
+        };
+        let Some((process_definition, plan_definition, job, report_context)) = current else {
+            return;
+        };
+        {
             let mut manager = job_sets.lock().expect("job set lock");
             if manager.execution_generations.get(&job_set_id) != Some(&generation) {
                 return;
             }
-            let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id) else {
-                return;
-            };
-            if set.status != "running" {
-                return;
-            }
-            let Some(index) = set.jobs.iter().position(|item| item.id == job.id) else {
-                return;
-            };
-            // Replace the live snapshot with the final output rather than duplicating it.
-            if let Some(prefix) = log_prefix.into_inner() {
-                set.jobs[index].log = prefix;
-            }
-            match result {
-                Ok(drivers::DriverOutcome::Completed(log)) => {
-                    set.jobs[index].status = "completed".into();
-                    set.jobs[index].finished_at = Some(chrono::Utc::now().to_rfc3339());
-                    append_job_log(&mut set.jobs[index].log, &log);
-                    if index + 1 < set.jobs.len() {
-                        activate_job(set, index + 1);
+            if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
+                && let Some(active) = set.jobs.iter_mut().find(|item| item.id == job.id)
+            {
+                if job.driver == "container" && job.action == "deploy" {
+                    if job.phase.as_deref() == Some("deployment") {
+                        active.deployment_job_id = None;
                     } else {
-                        set.status = "completed".into();
+                        active.validation_job_id = None;
+                        active.deployment_job_id = None;
                     }
                 }
-                Ok(drivers::DriverOutcome::AwaitingApproval(log)) => {
-                    set.jobs[index].status = "awaiting_approval".into();
-                    set.jobs[index].phase = Some("deployment".into());
-                    append_job_log(&mut set.jobs[index].log, &log);
-                    set.status = "awaiting_approval".into();
-                    apply_automatic_approval(set, index);
+                append_job_log(
+                    &mut active.log,
+                    &format!(
+                        "Starting {} {} for {}…",
+                        job.driver.to_uppercase(),
+                        job.phase.as_deref().unwrap_or(&job.action),
+                        job.target.as_deref().unwrap_or("plan")
+                    ),
+                );
+                let _ = manager.persist();
+            }
+        }
+        let on_started = |phase: &str, external_id: i64| {
+            let mut manager = job_sets.lock().expect("job set lock");
+            if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                return;
+            }
+            if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
+                && set.status == "running"
+                && let Some(active) = set.jobs.iter_mut().find(|active| active.id == job.id)
+                && active.status == "running"
+                && active.phase.as_deref() == Some(phase)
+            {
+                record_olam_launch(active, phase, external_id);
+                let _ = manager.persist();
+            }
+        };
+        let log_prefix = std::cell::RefCell::new(None::<String>);
+        let on_output = |output: &str| {
+            let mut manager = job_sets.lock().expect("job set lock");
+            if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                return;
+            }
+            if let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id)
+                && set.status == "running"
+                && let Some(active) = set.jobs.iter_mut().find(|active| active.id == job.id)
+                && active.status == "running"
+                && active.phase == job.phase
+            {
+                let mut prefix = log_prefix.borrow_mut();
+                let prefix = prefix.get_or_insert_with(|| active.log.clone());
+                active.log.clone_from(prefix);
+                append_job_log(&mut active.log, output);
+                let _ = manager.persist();
+            }
+        };
+        let checkpoint = |key: &str, value: &str| -> Result<(), String> {
+            let mut manager = job_sets.lock().map_err(|_| "Agent job set lock failed.")?;
+            if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+                return Err("Update report stopped before the next operation.".into());
+            }
+            let set = manager
+                .job_sets
+                .iter_mut()
+                .find(|set| set.id == job_set_id && set.status == "running")
+                .ok_or("Update report is no longer running.")?;
+            let active = set
+                .jobs
+                .iter_mut()
+                .find(|active| active.id == job.id && active.status == "running")
+                .ok_or("Update report job is no longer running.")?;
+            active.report_progress.insert(key.into(), value.into());
+            manager
+                .persist()
+                .map_err(|e| format!("Could not persist update report progress: {e}"))
+        };
+        let result = if matches!(job.driver.as_str(), "jira" | "cx") && job.action == "update" {
+            let update = if job.driver == "cx" {
+                drivers::cx_update::update
+            } else {
+                drivers::jira_update::update
+            };
+            update(&report_context, &job, &credentials, &checkpoint, &on_output)
+                .map(drivers::DriverOutcome::Completed)
+        } else {
+            let execution_job = if job.driver == "thanos" {
+                drivers::thanos_version::resolve(&report_context, &job)
+            } else { Ok(job.clone()) };
+            execution_job.and_then(|execution_job| drivers::execute(
+                &process_definition,
+                &plan_definition,
+                &execution_job,
+                &credentials,
+                &on_started,
+                &on_output,
+                &|| {
+                    let manager = job_sets.lock().expect("job set lock");
+                    manager.execution_generations.get(&job_set_id) != Some(&generation)
+                        || !manager
+                            .job_sets
+                            .iter()
+                            .any(|set| set.id == job_set_id && set.status == "running")
+                },
+            ))
+        };
+        let mut manager = job_sets.lock().expect("job set lock");
+        if manager.execution_generations.get(&job_set_id) != Some(&generation) {
+            return;
+        }
+        let Some(set) = manager.job_sets.iter_mut().find(|set| set.id == job_set_id) else {
+            return;
+        };
+        if set.status != "running" {
+            return;
+        }
+        let Some(index) = set.jobs.iter().position(|item| item.id == job.id) else {
+            return;
+        };
+        // Replace the live snapshot with the final output rather than duplicating it.
+        if let Some(prefix) = log_prefix.into_inner() {
+            set.jobs[index].log = prefix;
+        }
+        match result {
+            Ok(drivers::DriverOutcome::Completed(log)) => {
+                set.jobs[index].status = "completed".into();
+                set.jobs[index].finished_at = Some(chrono::Utc::now().to_rfc3339());
+                append_job_log(&mut set.jobs[index].log, &log);
+                if only_job.is_none() && index + 1 < set.jobs.len() {
+                    activate_job(set, index + 1);
+                } else if only_job.is_none() {
+                    set.status = "completed".into();
                 }
-                Ok(drivers::DriverOutcome::Warning(log)) => {
-                    set.jobs[index].status = "warning".into();
-                    append_job_log(&mut set.jobs[index].log, &log);
+            }
+            Ok(drivers::DriverOutcome::AwaitingApproval(log)) => {
+                set.jobs[index].status = "awaiting_approval".into();
+                set.jobs[index].phase = Some("deployment".into());
+                append_job_log(&mut set.jobs[index].log, &log);
+                if only_job.is_none() {
+                    set.status = "awaiting_approval".into();
+                }
+                apply_automatic_approval(set, index);
+            }
+            Ok(drivers::DriverOutcome::Warning(log)) => {
+                set.jobs[index].status = "warning".into();
+                append_job_log(&mut set.jobs[index].log, &log);
+                if only_job.is_none() {
                     set.status = "warning".into();
                 }
-                Err(log) => {
-                    set.jobs[index].status = "failed".into();
-                    append_job_log(&mut set.jobs[index].log, &log);
+            }
+            Err(log) => {
+                set.jobs[index].status = "failed".into();
+                append_job_log(&mut set.jobs[index].log, &log);
+                if only_job.is_none() {
                     set.status = "failed".into();
                 }
             }
-            let should_stop = matches!(
-                set.status.as_str(),
-                "failed" | "warning" | "awaiting_approval"
-            );
-            let _ = manager.persist();
-            if should_stop {
-                return;
-            }
         }
-    });
+        let should_stop = matches!(
+            set.status.as_str(),
+            "failed" | "warning" | "awaiting_approval"
+        );
+        let _ = manager.persist();
+        if should_stop || only_job.is_some() {
+            return;
+        }
+    }
 }
 
 // Approve starts the selected deployment; validation steps still run in order.
@@ -1841,6 +2252,8 @@ fn activate_job(set: &mut AgentJobSetStatus, index: usize) {
 }
 
 fn apply_automatic_approval(set: &mut AgentJobSetStatus, index: usize) {
+    if regional::Schedule::parse(&set.plan_definition).is_ok_and(|schedule|
+        schedule.limit > 1 && schedule.blocked(set, &set.jobs[index])) { return; }
     if set.approve_all {
         let job = &mut set.jobs[index];
         job.status = "running".into();

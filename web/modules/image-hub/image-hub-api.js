@@ -8,6 +8,7 @@ export const deleteImageHubRepository = id => invoke("delete_image_hub_repositor
 export const saveImageHubProject = input => invoke("save_image_hub_project", { input });
 export const deleteImageHubProject = id => invoke("delete_image_hub_project", { id });
 export const syncImageHubProject = id => invoke("sync_image_hub_project", { id });
+export const syncImageHubInventory = () => invoke("sync_image_hub_inventory");
 export const openImageHubReport = url => invoke("open_image_hub_report", { url });
 export const refreshImageHubArtifacts = id => invoke("refresh_image_hub_artifacts", { id });
 export const saveImageHubConfig = input => invoke("save_image_hub_config", { input });

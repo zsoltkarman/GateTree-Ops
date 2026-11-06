@@ -10,19 +10,25 @@ export async function mountDeploymentConfigView(root, detail = {}, { onCatalogCh
   const state = { processes: [], editors: new Map(), expanded: new Set(), selectedId: detail.resourceId ?? null, busy: null, onCatalogChange };
   const mountId = crypto.randomUUID(); root.dataset.configMountId = mountId;
   const alive = () => root.isConnected && root.dataset.configMountId === mountId;
-  root.innerHTML = `<div class="deployment-config-module deployment-config-accordion"><div data-local-ansible-settings></div><div data-validation-queries></div><section class="deployment-config-list" data-config-list><p class="deployment-config-loading">Loading deployment config…</p></section></div>`;
-  mountLocalAnsibleSource(root.querySelector("[data-local-ansible-settings]"));
+  const queriesOnly = detail.configSection === "queries";
+  root.innerHTML = queriesOnly
+    ? `<div class="deployment-config-module deployment-queries-page"><div data-validation-queries><p class="deployment-config-loading">Loading Thanos queries…</p></div></div>`
+    : `<div class="deployment-config-module deployment-config-accordion"><div data-local-ansible-settings></div><section class="deployment-config-list" data-config-list><p class="deployment-config-loading">Loading deployment config…</p></section></div>`;
+  if (!queriesOnly) mountLocalAnsibleSource(root.querySelector("[data-local-ansible-settings]"));
   try {
     const snapshot = await getDeploymentConfig();
     if (!alive()) return;
     state.processes = snapshot.processes;
-    mountValidationQueries(root.querySelector("[data-validation-queries]"), { queries: snapshot.validationQueries ?? [] });
+    if (queriesOnly) {
+      mountValidationQueries(root.querySelector("[data-validation-queries]"), { queries: snapshot.validationQueries ?? [] });
+      return;
+    }
     if (detail.resourceId && state.processes.some(p => p.id === detail.resourceId)) state.expanded.add(detail.resourceId);
     if (detail.new) { editorState(state, NEW_CONFIG); state.expanded.add(NEW_CONFIG); }
     notifyCatalog(state); renderList(root, state);
     if (detail.new) focusEditor(root, NEW_CONFIG);
   } catch (cause) {
-    if (alive()) root.querySelector("[data-config-list]").innerHTML = `<p class="deployment-config-error">${escapeHtml(cause)}</p>`;
+    if (alive()) root.querySelector(queriesOnly ? "[data-validation-queries]" : "[data-config-list]").innerHTML = `<p class="deployment-config-error">${escapeHtml(cause)}</p>`;
   }
 }
 
@@ -39,8 +45,8 @@ function resourceMarkup(resource, state) {
   const revision = resource ? `Revision ${resource.revision}` : "Not saved";
   return `<article class="deployment-config-group" data-config-id="${escapeHtml(id)}">
     <header class="deployment-json-toolbar">
-      <button type="button" class="deployment-config-toggle" data-toggle-config="${escapeHtml(id)}" aria-expanded="${expanded}" aria-controls="config-body-${escapeHtml(id)}">${icon("chevron")}<span><strong>${escapeHtml(resource?.name || "New Config")}</strong><small data-config-revision>${revision}${edit.draft !== edit.original ? " · Unsaved" : ""}</small></span></button>
-      <nav><button type="button" class="deployment-delete" data-delete-config="${escapeHtml(id)}" title="${resource ? "Delete Config" : "Discard new Config"}" aria-label="${resource ? "Delete Config" : "Discard new Config"}" ${state.busy ? "disabled" : ""}>${icon("trash")}</button><button type="button" class="deployment-save" data-save-config="${escapeHtml(id)}" title="Save and validate Config" aria-label="Save and validate Config" ${state.busy ? "disabled" : ""}>${icon("save")}</button></nav>
+      <div class="deployment-config-name"><strong>${escapeHtml(resource?.name || "New Config")}</strong><small data-config-revision>${revision}${edit.draft !== edit.original ? " · Unsaved" : ""}</small></div>
+      <nav>${expanded ? `<button type="button" data-cancel-config="${escapeHtml(id)}" ${state.busy ? "disabled" : ""}>Cancel</button><button type="button" class="deployment-save" data-save-config="${escapeHtml(id)}" title="Save and validate Config" ${state.busy ? "disabled" : ""}>Save</button>` : `<button type="button" data-edit-config="${escapeHtml(id)}">Edit</button>`}<button type="button" class="deployment-delete" data-delete-config="${escapeHtml(id)}" title="${resource ? "Delete Config" : "Discard new Config"}" aria-label="${resource ? "Delete Config" : "Discard new Config"}" ${state.busy ? "disabled" : ""}>${icon("trash")}</button></nav>
     </header>
     <div class="deployment-config-body" id="config-body-${escapeHtml(id)}" ${expanded ? "" : "hidden"}>
       <textarea class="deployment-json-editor" data-config-editor="${escapeHtml(id)}" aria-label="${escapeHtml(resource?.name || "New Config")} JSON" spellcheck="false">${escapeHtml(edit.draft)}</textarea>
@@ -50,22 +56,21 @@ function resourceMarkup(resource, state) {
 }
 function renderList(root, state) {
   const list = root.querySelector("[data-config-list]"); const scrollTop = list.scrollTop;
-  list.innerHTML = `<header class="deployment-config-list-heading"><strong>Config</strong><nav><button type="button" data-config-help title="Process Config help (F1)" aria-label="Process Config help">${icon("help")}</button><button type="button" data-add-config title="Add Config" aria-label="Add Config" ${state.busy ? "disabled" : ""}>${icon("plus")}</button></nav></header><div class="deployment-config-groups">${state.processes.map(p => resourceMarkup(p, state)).join("")}${state.editors.has(NEW_CONFIG) ? resourceMarkup(null, state) : ""}${!state.processes.length && !state.editors.has(NEW_CONFIG) ? '<p class="deployment-config-empty">No Process configs yet. Use + to add one.</p>' : ""}</div>`;
+  list.innerHTML = `<header class="deployment-config-list-heading"><strong>Deploy</strong><nav><button type="button" data-config-help title="Process Config help (F1)" aria-label="Process Config help">${icon("help")}</button><button type="button" data-add-config title="Add Config" aria-label="Add Config" ${state.busy ? "disabled" : ""}>${icon("plus")}</button></nav></header><div class="deployment-config-groups">${state.processes.map(p => resourceMarkup(p, state)).join("")}${state.editors.has(NEW_CONFIG) ? resourceMarkup(null, state) : ""}${!state.processes.length && !state.editors.has(NEW_CONFIG) ? '<p class="deployment-config-empty">No Process configs yet. Use + to add one.</p>' : ""}</div>`;
   bindEvents(root, state); list.scrollTop = scrollTop;
 }
 function focusEditor(root, id) { requestAnimationFrame(() => root.querySelector(`[data-config-editor="${CSS.escape(id)}"]`)?.focus()); }
-function setExpanded(group, state, id, expanded) {
-  if (expanded) state.expanded.add(id); else state.expanded.delete(id);
-  group.querySelector("[data-toggle-config]").setAttribute("aria-expanded", String(expanded));
-  group.querySelector(".deployment-config-body").hidden = !expanded;
-}
 function bindEvents(root, state) {
   const list = root.querySelector("[data-config-list]");
   list.querySelector("[data-config-help]").addEventListener("click", showDeploymentHelp);
   list.querySelector("[data-add-config]").addEventListener("click", () => { editorState(state, NEW_CONFIG); state.expanded.add(NEW_CONFIG); renderList(root, state); focusEditor(root, NEW_CONFIG); });
-  list.querySelectorAll("[data-toggle-config]").forEach(button => button.addEventListener("click", () => {
-    const id = button.dataset.toggleConfig;
-    setExpanded(button.closest("[data-config-id]"), state, id, !state.expanded.has(id));
+  list.querySelectorAll("[data-edit-config]").forEach(button => button.addEventListener("click", () => {
+    const id = button.dataset.editConfig;
+    state.expanded.add(id); renderList(root, state); focusEditor(root, id);
+  }));
+  list.querySelectorAll("[data-cancel-config]").forEach(button => button.addEventListener("click", () => {
+    const id = button.dataset.cancelConfig;
+    state.expanded.delete(id); state.editors.delete(id); renderList(root, state);
   }));
   list.querySelectorAll("[data-config-editor]").forEach(editor => {
     editor.addEventListener("input", () => {
@@ -91,7 +96,7 @@ function bindEvents(root, state) {
       if (index >= 0) state.processes[index] = saved; else state.processes.push(saved);
       state.processes.sort((a,b) => a.name.localeCompare(b.name));
       state.editors.delete(id); state.expanded.delete(id); state.expanded.add(saved.id);
-      editorState(state, saved.id).message = `${saved.name} saved.`; state.selectedId = saved.id; notifyCatalog(state);
+      editorState(state, saved.id).message = `${saved.name} saved.`; state.expanded.delete(saved.id); state.selectedId = saved.id; notifyCatalog(state);
     });
   }));
   list.querySelectorAll("[data-delete-config]").forEach(button => button.addEventListener("click", async () => {

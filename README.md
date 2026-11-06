@@ -188,7 +188,8 @@ GitHub secrets, first installation, local builds and the publication workflow.
 ## Workspace files
 
 **Image Hub** stores a repository inventory in the encrypted workspace. Right-click
-the inventory or a folder to add folders, subfolders, projects or repositories. Repositories have a name, local path, OCID,
+the inventory or a folder to add folders, subfolders or repositories. Add and edit
+projects under **Image Hub → Config → Projects**. Repositories have a name, local path, OCID,
 repository URL and type (CloudLab, SCM, GitLab or GitHub). Only the name and type are
 required. Right-click a repository to edit it or move it to another folder; use
 **Edit folder** to rename or move a folder. Non-empty folders cannot be deleted.
@@ -203,7 +204,17 @@ use **Import JSON…** to load a configuration file. Settings are encrypted with
 the workspace and included in backups. Changing configuration clears cached
 artifact lookups so values from another environment cannot be reused.
 
-The project summary displays repository names and AF, SLAPS and Build Logs links.
+Inventory combines all repositories across every folder and project in one table,
+including their folder/project, latest image, AF, SLAPS and Build Logs links.
+Search by repository, folder, project or local path, and combine folder (including
+subfolders), project and type filters. Sort by folder/repository or repository
+name. Project source settings and add/edit actions live in Config; selecting a
+project in Inventory filters the list and retains its Sync Project action. The full
+inventory also offers **Sync all projects**: one native background batch processes
+all configured projects in order, with an overall percentage and per-project
+SCM/SLAPS/AF results below the list. A project failure does not skip the remaining
+projects. Navigation can change while the batch continues; concurrent syncs are
+blocked until it finishes.
 Each image initially shows only its Latest row. The arrow expands Ansible rows
 for every environment found in the local roles. Set `ansible_dir` in Config to
 an absolute Ansible project directory. Image names and versions are read from
@@ -292,10 +303,36 @@ derived database key. Debug builds save a local `.gatetree-ops-dev-unlock` file
 with user-only permissions, or read the existing legacy `.pharos-dev-unlock`,
 so the development workspace can reopen automatically.
 
+Queue polling runs database and Agent reads off the UI thread. Active visible
+queues refresh every 1.5 seconds; idle queues refresh every 5 seconds. Hidden
+panes and background windows pause polling. Routine snapshots omit log contents;
+opening a log loads it separately, with subsequent reads returning only the new
+text when the previous prefix still matches. Replaced or restarted logs reset
+safely. SQL rows are updated only when their values change. Status refreshes
+preserve existing controls, open log nodes, column widths and unsaved payload
+edits. Full log snapshots remain available for approval and report recovery.
+
+Within each Plan, jobs are grouped by status with counts. Running (including
+awaiting approval) and Failed / Stopped are expanded initially; Queued, Completed
+and Skipped are collapsed. Each group's expansion is retained during refreshes.
+Grouping preserves execution sequence numbers and original job dependencies. A failed Thanos check also brings its
+completed deployment into Failed / Stopped, with **Restart deploy + Thanos**.
+That action launches a fresh Ansible execution and reruns only its following
+same-target Thanos checks. Approval gates remain in place. On an inactive Plan,
+the retry scope is persisted across Agent restarts and other jobs or Jira/CX
+updates are not restarted. Healthy lanes already running in parallel continue.
+
+Use **Archive Plan** on a successfully completed Plan to move it from Success
+to **Queue → Archived**, the last Queue group. Archived Plans are omitted from
+the normal Queue, retain their original jobs/payloads/logs, and are read-only.
+They can still be opened or copied into a new queued Plan. The archive marker is
+stored in the encrypted workspace metadata and survives Agent synchronization,
+workspace reopening and backups.
+
 ### Copy a completed Plan
 
 Use **Copy to new Plan** in a completed Plan's header. The Planner opens with the
-source Jira/CX numbers, requester, account reference, role, strategy, deployment
+source Jira/CX numbers, requester, account reference, role, strategy, region concurrency, deployment
 steps, extra variables and Thanos query/version. Select a Process and fresh
 sites/hosts before saving. An old step-level `ENVIRONMENT` override is omitted so
 the selected Process supplies the destination environment. Review the account
@@ -306,19 +343,38 @@ Save creates a new queued Plan with a new number and current Process Config.
 The original Plan and its logs are preserved. Host selections, job IDs, job
 results and approvals are not inherited. Start the new Plan separately.
 
+### Multi Role Plan
+
+The Planner offers **Single Role Plan** and **Multi Role Plan** tabs. Multi Role
+shares a group name, Process, Vault account, Jira/CX references, execution strategy
+and parallel-region limit. Use **Add Role** for each service. Every role has its
+own inventory sites/hosts, optional extra variables and optional saved Thanos
+query; queries are previewed read-only and maintained under Config.
+
+**Create Plans** validates every role before committing a single SQL transaction.
+A failure leaves the Queue unchanged. Retrying the same successful request returns
+the original Plan IDs. Each role becomes a separate queued Plan under a shared
+Queue group and must be started separately. Existing per-host Deploy → Thanos
+ordering, approvals, regional isolation and report steps apply to every Plan.
+Parallel regions is a limit per role Plan. Tab switching preserves both drafts.
+
 ### Saved validation queries
 
-Under **Deployments → Config → Validation Queries**, use **Add Query** to store a
-name, deployment role (selected from the local Ansible project) and PromQL template. Edit or delete entries in the same
-list. Queries live in the encrypted workspace SQL database and are included in
+Under **Deployments → Config → Thanos Queries**, use **Add Query** to store a
+name and PromQL template. Queries are independent of deployment roles. Edit or
+delete entries in the same list. Queries live in the encrypted workspace SQL database and are included in
 workspace backups and the deployment config bundle. Editing rejects a stale
 revision instead of silently overwriting a newer change.
 
-In a Planner **Thanos Query** step, select a saved query by its name and role.
+Thanos steps are optional; a Plan may contain only Deploy steps.
+In a Planner **Thanos Query** step, select a saved query by its name.
+The selected PromQL appears in a read-only preview.
 The query text is copied into the step; supply the expected exporter version in
 that Plan. Host and region placeholders still come from deployment targets.
-Editing the text changes the selection to **Custom query**. Selecting a template
-does not overwrite an existing step name or expected version. Saved Plan YAML
+The Planner only offers saved queries; create and edit PromQL under
+**Config → Thanos Queries**. Selecting a template does not overwrite an existing
+step name or expected version. Copied Plans match their query text to a saved
+entry; unmatched queries require a new selection before saving. Saved Plan YAML
 contains the query itself, never a live reference to the library, so later library
 edits or deletion cannot change a queued or running Plan. Polling and connection
 settings stay in Process Config under `details.thanos`.
@@ -351,7 +407,12 @@ application build-info version is not necessarily the container image tag.
 Inside double-quoted query strings, `${DEPLOY_REGION}` is replaced with the
 deployment site's region, and `${EXPECTED_VERSION}` with the step's
 **Expected exporter version** field. Region placeholders require a preceding
-Deploy step and selected sites. With **Separate job per host**, the following
+Deploy step and selected sites. `${DEPLOY_IMAGE_VERSION}` instead uses the
+resolved role `IMAGE_VERSION` from the matching host's completed deployment
+validation log; it requires **Separate job per host** and a preceding Deploy.
+Missing, ambiguous or unresolved version evidence fails the check. Use it only
+when the application's metric version matches its container image tag.
+With **Separate job per host**, the following
 Thanos Query steps run immediately after each host's deployment, before the next
 host starts. Add `instance=~"${DEPLOY_HOST_REGEX}"` to every such query: this
 placeholder matches only that deployed hostname, with an optional URI scheme
@@ -359,6 +420,26 @@ and port. Hostname dots and other regex characters are escaped. The Builder
 saves `targets.host_sites` so each host gets only its own site's region; older
 single-site Plans can use their single selected site. Missing multi-site context
 is rejected rather than validating a different region.
+
+Set **Parallel regions** in Planner Builder to run up to that many deployment
+sites together (1–16, default 1). Values above 1 require **Separate job per host**
+and a host-to-site mapping from the selected inventory. The Plan saves this as
+`inputs.olam.parallel_regions` (or `inputs.ansible.parallel_regions` for a container
+Process). Within each region, each Deploy and its following Thanos checks finish
+before the next host starts. A region holds its slot while waiting for approval;
+when it finishes, the next region starts. Process steps outside the regional jobs,
+including Jira/CX validation and updates, remain sequential barriers.
+
+If a deployment or query fails, only that region stops: its failed row is kept,
+and its remaining jobs become Stopped. Healthy regions continue their Deploy →
+Thanos sequences, including regions waiting for an available slot. Failed regions
+release their slots. Approvals remain available in healthy regions. Once all
+healthy regions finish, the Plan retains its failure status and does not send
+final success updates. Global prerequisite failures still stop the whole Plan.
+Stop stops monitoring all active lanes; remote OLAM jobs retain their IDs. Retrying a failed step preserves completed regional work, and stopped OLAM
+monitors reconnect to their existing jobs. Completed regional jobs require a
+copied Plan for a fresh run, except that a deployment paired with a failed Thanos
+check can be retried individually. Use matching GUI and Agent builds for this feature.
 
 The host matcher is required for per-host queries to prevent a region-wide check
 from passing because a different host already has the expected version. Standalone

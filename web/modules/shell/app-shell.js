@@ -46,6 +46,7 @@ function escapeHtml(value) {
 }
 
 function queuePlanGroup(plan) {
+  if (plan?.archived) return "archived";
   const jobs = plan?.jobs ?? [];
   if (jobs.length && jobs.every(job => ["completed", "disabled"].includes(job.status))) return "success";
   if (jobs.length && jobs.every(job => job.status === "queued")) return "queued";
@@ -53,7 +54,7 @@ function queuePlanGroup(plan) {
 }
 
 function queueNavigationMarkup(catalog, expandedGroups) {
-  return [["running", "Running"], ["queued", "Queued"], ["success", "Success"]].map(([id, label]) => {
+  return [["running", "Running"], ["queued", "Queued"], ["success", "Success"], ["archived", "Archived"]].map(([id, label]) => {
     const plans = catalog.plans.filter(plan => queuePlanGroup(plan) === id)
       .sort((a, b) => (b.planNumber ?? 0) - (a.planNumber ?? 0));
     const expanded = expandedGroups.has(id);
@@ -102,7 +103,11 @@ function navigationMarkup(id, label, iconPath, index) {
           <button data-deployment-section="queue">${icon("<path d='M5 6h14M5 12h14M5 18h14M8 4v4M8 10v4M8 16v4'/>")}<span>Queue</span>${icon("<path d='m9 7 5 5-5 5'/>")}</button>
           <div data-role="deployment-queue-links"></div>
           <button data-deployment-section="config">${icon("<path d='M5 5h4v4H5zM15 5h4v4h-4zM10 7h5M17 9v5M15 14h4v4h-4zM9 16h6M5 14h4v4H5zM7 9v5'/>")}<span>Config</span>${icon("<path d='m9 7 5 5-5 5'/>")}</button>
-          <div data-role="deployment-process-links"></div>
+          <div data-role="deployment-config-links" hidden>
+            <button data-deployment-config="deploy"><span>Deploy</span></button>
+            <div data-role="deployment-process-links"></div>
+            <button data-deployment-config="queries"><span>Thanos Queries</span></button>
+          </div>
           </div>` : `<div class="module-navigation-host" data-role="${id}-navigation-host"></div>`}
       </div>
     </div>`;
@@ -184,6 +189,7 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
   let deploymentQueueExpanded = false;
   const expandedQueueGroups = new Set(["running", "queued"]);
   let deploymentConfigExpanded = false;
+  let deploymentConfigSection = "deploy";
   let ansibleExpanded = false;
   let helpDeploymentsExpanded = false;
 
@@ -258,13 +264,6 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     toolButton.classList.toggle("is-expanded", ansibleExpanded);
     toolButton.setAttribute("aria-expanded", String(ansibleExpanded));
     root.querySelector('[data-role="ansible-navigation"]').hidden = !ansibleExpanded;
-    const renderLinks = (host, section, entries) => {
-      host.innerHTML = entries.map((entry) => `
-        <button class="deployment-navigation-resource${deploymentCatalog.section === section && deploymentCatalog.selectedId === entry.id ? " is-active" : ""}"
-                data-deployment-resource="${escapeHtml(entry.id)}" data-deployment-resource-section="${section}" title="${escapeHtml(entry.name)}">
-          ${icon("<path d='M7 6.5h10v11H7zM9.5 9.5h5M9.5 12h5M9.5 14.5h3'/>")}<span>${escapeHtml(entry.name)}</span>
-        </button>`).join("");
-    };
     const queueButton = root.querySelector('[data-deployment-section="queue"]');
     const queueLinks = root.querySelector('[data-role="deployment-queue-links"]');
     const hasPlans = deploymentCatalog.plans.length > 0;
@@ -279,6 +278,7 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
         if (expandedQueueGroups.has(id)) expandedQueueGroups.delete(id);
         else expandedQueueGroups.add(id);
         renderDeploymentCatalog();
+        navigate("deployments", { section: "queue", archived: id === "archived" });
       });
     });
     queueLinks.querySelectorAll("[data-queue-plan]").forEach((button) => {
@@ -286,12 +286,16 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     });
     const configButton = root.querySelector('[data-deployment-section="config"]');
     const processLinks = root.querySelector('[data-role="deployment-process-links"]');
-    const hasConfigs = deploymentCatalog.processes.length > 0;
-    configButton.classList.toggle("has-children", hasConfigs);
-    configButton.classList.toggle("is-expanded", hasConfigs && deploymentConfigExpanded);
-    configButton.querySelector("svg:last-child").hidden = !hasConfigs;
-    processLinks.hidden = !hasConfigs || !deploymentConfigExpanded;
-    renderLinks(processLinks, "config", deploymentCatalog.processes);
+    configButton.classList.add("has-children");
+    configButton.classList.toggle("is-expanded", deploymentConfigExpanded);
+    configButton.setAttribute("aria-expanded", String(deploymentConfigExpanded));
+    configButton.querySelector("svg:last-child").hidden = false;
+    root.querySelector('[data-role="deployment-config-links"]').hidden = !deploymentConfigExpanded;
+    root.querySelectorAll("[data-deployment-config]").forEach(button => {
+      button.classList.toggle("is-active", deploymentCatalog.section === "config" && button.dataset.deploymentConfig === deploymentConfigSection);
+    });
+    processLinks.hidden = true;
+    processLinks.replaceChildren();
     root.querySelectorAll("[data-deployment-resource]").forEach((button) => {
       button.addEventListener("click", () => navigate("deployments", {
         section: "config",
@@ -388,6 +392,10 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     } else if (module === "deployments") {
       if (["queue", "config"].includes(detail?.section)) ansibleExpanded = true;
       deploymentCatalog.section = detail?.section || null;
+      if (detail?.section === "config") {
+        deploymentConfigSection = detail.configSection === "queries" ? "queries" : "deploy";
+        deploymentConfigExpanded = true;
+      }
       deploymentCatalog.selectedId = detail?.resourceId || null;
       deploymentCatalog.selectedPlanId = detail?.planId || null;
       const selectedPlan = deploymentCatalog.plans.find(plan => plan.id === detail?.planId);
@@ -440,14 +448,19 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     renderDeploymentCatalog();
     if (ansibleExpanded) navigate("deployments", { section: "overview" });
   });
+  root.querySelectorAll("[data-deployment-config]").forEach(button => {
+    button.addEventListener("click", () => {
+      const configSection = button.dataset.deploymentConfig;
+      navigate("deployments", { section: "config", configSection });
+    });
+  });
   root.querySelectorAll("[data-deployment-section]").forEach((button) => {
     button.addEventListener("click", () => {
       if (button.dataset.deploymentSection === "queue" && deploymentCatalog.plans.length > 0) {
         deploymentQueueExpanded = !deploymentQueueExpanded;
         renderDeploymentCatalog();
-        if (!deploymentQueueExpanded) return;
       }
-      if (button.dataset.deploymentSection === "config" && deploymentCatalog.processes.length > 0) {
+      if (button.dataset.deploymentSection === "config") {
         deploymentConfigExpanded = !deploymentConfigExpanded;
         renderDeploymentCatalog();
         if (!deploymentConfigExpanded) return;

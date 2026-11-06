@@ -34,3 +34,13 @@ test("active and completed jobs cannot be disabled", () => {
     assert.match(button(html, "disable"), / disabled>/);
   }
 });
+
+test('parallel region rows allow approvals and lane-specific retries without bypassing global or same-region dependencies',()=>{
+ const a={...job,id:'a',region:'a',status:'failed'};const b={...job,id:'b',region:'b',status:'awaiting_approval'};
+ const plan={parallelRegions:3,status:'running',jobs:[a,b]};
+ assert(!/ disabled[ >]/.test(button(jobMarkup(plan,b,1),'approve')));
+ b.status='failed';plan.status='failed';
+ assert(!/ disabled[ >]/.test(button(jobMarkup(plan,b,1),'restart')));
+ b.region='a';assert.match(button(jobMarkup(plan,b,1),'restart'),/ disabled>/);
+ b.region='b';a.region=null;assert.match(button(jobMarkup(plan,b,1),'restart'),/ disabled>/);
+});

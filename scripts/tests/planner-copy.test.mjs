@@ -19,7 +19,9 @@ test('completed Plan copy preserves tickets, account, role, extra variables and 
  const processes=[{id:'prod',name:'Deploy production',definition:JSON.stringify({steps:[{driver:'olam',action:'deploy'}],details:{thanos:{url:'https://metrics.example.test'}}})}];const accounts=[{id:'account',name:'deployment'}];
  assert.throws(()=>buildPlannerPlan(d,processes,accounts),/Select a Process/);
  d.processId='prod';d.olamTargets={job_mode:'per_host',roles:['exporter'],sites:['east'],hosts:['new-host'],host_sites:{'new-host':'east'}};
- const plan=buildPlannerPlan(d,processes,accounts);const yaml=plannerPlanYaml(plan);
+ assert.throws(()=>buildPlannerPlan(d,processes,accounts,[]),/select a saved Thanos query/);
+ d.steps[1].validationQueryId='saved';
+ const plan=buildPlannerPlan(d,processes,accounts,[{id:'saved'}]);const yaml=plannerPlanYaml(plan);
  assert.equal(plan.process,'Deploy production');assert.equal(plan.inputs.olam.steps[0].extra_vars.COUNT,3);assert.deepEqual(plan.inputs.olam.steps[0].extra_vars.OPTIONS,{enabled:true});
  assert.ok(yaml.includes('requester: "operator@example.test"'));assert.ok(yaml.includes('new-host'));assert.ok(!yaml.includes('old-host'));assert.ok(!yaml.includes('ENVIRONMENT'));
  assert.equal(JSON.stringify(source),untouched);assert.notEqual(copiedPlannerDraft(source).steps[0].id,d.steps[0].id);
@@ -27,4 +29,10 @@ test('completed Plan copy preserves tickets, account, role, extra variables and 
 test('generic Ansible alias copies into the same reusable Planner draft',()=>{
  const source=sourcePlan();source.plan.inputs.ansible=source.plan.inputs.olam;delete source.plan.inputs.olam;
  const d=copiedPlannerDraft(source);assert.equal(d.steps.length,2);assert.deepEqual(d.targetSelection.roles,['exporter']);
+});
+
+test('copy preserves the Plan region concurrency setting',()=>{
+ const source=sourcePlan(); source.plan.inputs.olam.parallel_regions=3;
+ assert.equal(copiedPlannerDraft(source).parallelRegions,3);
+ delete source.plan.inputs.olam.parallel_regions; assert.equal(copiedPlannerDraft(source).parallelRegions,1);
 });

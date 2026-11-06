@@ -6,6 +6,7 @@ pub(crate) mod jira_update;
 mod olam;
 mod report;
 pub(crate) mod thanos;
+pub(crate) mod thanos_version;
 
 use crate::{AgentCredential, AgentJobStatus};
 

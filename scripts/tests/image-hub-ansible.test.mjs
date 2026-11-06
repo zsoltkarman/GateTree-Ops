@@ -102,3 +102,11 @@ test('a repository name opens its saved HTTP URL without demanding config or OCI
   await button.onclick({target: {closest: () => null}, preventDefault() {}});
   assert.deepEqual(opened, ['https://source.example.test/service']);
 });
+
+test('latest and expanded environment rows stay aligned with the combined inventory columns',()=>{
+ const {state,imageRows}=setup();state.expandedImages.add(repo.id);
+ const rows=[...imageRows({...repo,inventoryFolder:'Applications / Exporters',inventoryProject:'Monitoring'}).matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)];
+ assert.equal(rows.length,5);
+ for(const [,row] of rows)assert.equal((row.match(/<td(?:\s|>)/g)||[]).length,6);
+ assert.ok(rows[0][1].includes('Applications / Exporters'));assert.ok(rows[0][1].includes('Monitoring'));
+});

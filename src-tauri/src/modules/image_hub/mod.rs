@@ -18,4 +18,4 @@ pub use commands::{
     save_image_hub_folder, save_image_hub_project, save_image_hub_repository,
 };
 
-pub use sync_job::sync_image_hub_project;
+pub use sync_job::{sync_image_hub_project, sync_image_hub_inventory};

@@ -41,7 +41,10 @@ export function mountQueueColumns(root, { onResizing = () => {} } = {}) {
     try { if (current.handle.hasPointerCapture(current.id)) current.handle.releasePointerCapture(current.id); } catch (_) {}
     save(); onResizing(false);
   }
-  module.querySelectorAll("[data-resize-queue-column]").forEach(handle => {
+  const bound = new WeakSet();
+  function bindHandles() { module.querySelectorAll("[data-resize-queue-column]").forEach(handle => {
+    if (bound.has(handle)) return;
+    bound.add(handle);
     const boundary = Number(handle.dataset.resizeQueueColumn);
     handle.addEventListener("pointerdown", event => {
       if (event.button !== 0 || drag) return;
@@ -74,5 +77,8 @@ export function mountQueueColumns(root, { onResizing = () => {} } = {}) {
     });
     handle.addEventListener("dblclick", event => { event.preventDefault(); event.stopPropagation(); reset(); });
   });
+  }
+  bindHandles();
+  finish.refresh = bindHandles;
   return finish;
 }

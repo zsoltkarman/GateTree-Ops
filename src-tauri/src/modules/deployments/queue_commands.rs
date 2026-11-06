@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{Manager, State};
 use zeroize::Zeroizing;
 
 use crate::{agent_ipc, modules::workspace::WorkspaceState};
@@ -9,9 +9,19 @@ use super::{
 };
 
 #[tauri::command]
-pub fn get_deployment_queue(state: State<'_, WorkspaceState>) -> Result<QueueSnapshot, String> {
-    QueueService::synchronize_agent(&state).map_err(|error| error.to_string())?;
-    QueueService::snapshot(&state).map_err(|error| error.to_string())
+pub async fn get_deployment_queue(app: tauri::AppHandle, include_logs: Option<bool>) -> Result<QueueSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<WorkspaceState>();
+        QueueService::synchronize_agent(&state).map_err(|error| error.to_string())?;
+        if include_logs.unwrap_or(true) { QueueService::snapshot(&state) } else { QueueService::summary_snapshot(&state) }.map_err(|error| error.to_string())
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_deployment_queue_log(app: tauri::AppHandle, plan_id: String, job_id: Option<String>, offset: usize, hash: Option<String>) -> Result<super::queue_model::QueueLogChunk, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        QueueService::log_chunk(&app.state::<WorkspaceState>(), &plan_id, job_id.as_deref(), offset, hash.as_deref()).map_err(|error| error.to_string())
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -34,6 +44,13 @@ pub fn create_deployment_plan(
 }
 
 #[tauri::command]
+pub fn create_deployment_plan_batch(state: State<'_, WorkspaceState>, group_id: String, group_name: String, definitions: Vec<String>) -> Result<super::queue_model::CreatedBatchSnapshot, String> {
+    let ids = QueueService::create_batch(&state,&group_id,&group_name,definitions).map_err(|e|e.to_string())?;
+    let queue = QueueService::summary_snapshot(&state).map_err(|e|e.to_string())?;
+    Ok(super::queue_model::CreatedBatchSnapshot { queue, created_plan_ids: ids })
+}
+
+#[tauri::command]
 pub fn update_deployment_plan(
     state: State<'_, WorkspaceState>,
     id: String,
@@ -41,6 +58,13 @@ pub fn update_deployment_plan(
 ) -> Result<QueueSnapshot, String> {
     QueueService::update(&state, &id, definition).map_err(|error| error.to_string())?;
     QueueService::snapshot(&state).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn archive_deployment_plan(state: State<'_, WorkspaceState>, id: String) -> Result<QueueSnapshot, String> {
+    QueueService::synchronize_agent(&state).map_err(|error|error.to_string())?;
+    QueueService::archive(&state,&id).map_err(|error|error.to_string())?;
+    QueueService::summary_snapshot(&state).map_err(|error|error.to_string())
 }
 
 #[tauri::command]
@@ -63,6 +87,7 @@ pub fn control_deployment_queue_item(
     id: String,
     action: String,
 ) -> Result<QueueSnapshot, String> {
+    QueueService::require_unarchived(&state, &id, item_type == "job").map_err(|error|error.to_string())?;
     if item_type == "plan" && matches!(action.as_str(), "approve_all" | "revoke_approve_all") {
         let enabled = action == "approve_all";
         let status = agent_ipc::status().map_err(|error| error.to_string())?;

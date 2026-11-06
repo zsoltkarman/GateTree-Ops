@@ -107,19 +107,22 @@ fn persist(db: &Connection, status: &SyncStatus) -> rusqlite::Result<()> {
     Ok(())
 }
 pub fn load(db: &Connection) -> rusqlite::Result<Vec<SyncStatus>> {
-    let mut statement = db.prepare("SELECT status_json FROM image_hub_sync_state")?;
-    let rows = statement
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
     let active = ACTIVE_JOB
         .lock()
         .map_err(|_| rusqlite::Error::InvalidQuery)?
         .clone();
+    load_with_active(db, active.as_deref())
+}
+fn load_with_active(db: &Connection, active: Option<&str>) -> rusqlite::Result<Vec<SyncStatus>> {
+    let mut statement = db.prepare("SELECT status_json FROM image_hub_sync_state")?;
+    let rows = statement
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut result = Vec::new();
     for row in rows {
         let mut status: SyncStatus =
             serde_json::from_str(&row).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if status.running && active.as_ref() != Some(&status.run_id) {
+        if status.running && active != Some(status.run_id.as_str()) {
             status.running = false;
             status.error =
                 Some("Sync interrupted. Run Sync Project to continue saved work.".into());
@@ -221,6 +224,61 @@ pub fn sync_image_hub_project(app: tauri::AppHandle, id: String) -> Result<SyncS
     Ok(result)
 }
 
+/// Reserve the existing single sync worker for the whole inventory. Each
+/// project keeps its own persisted counters while sharing the batch run ID.
+#[tauri::command]
+pub fn sync_image_hub_inventory(app: tauri::AppHandle) -> Result<Vec<SyncStatus>, String> {
+    let state = app.state::<WorkspaceState>();
+    let session = state.session_id().map_err(|error| error.to_string())?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let reservation = {
+        let mut active = ACTIVE_JOB
+            .lock()
+            .map_err(|_| "Sync state is unavailable.")?;
+        if active.is_some() {
+            return Err("Another project sync is running in the background.".into());
+        }
+        *active = Some(run_id.clone());
+        Reservation(run_id.clone())
+    };
+    let initial = state
+        .with_session_connection(&session, |db| prepare_inventory_sync(db, &run_id))
+        .map_err(|error| error.to_string())?;
+    if initial.is_empty() {
+        return Err(
+            "Add a project under Image Hub → Config → Projects before syncing inventory.".into(),
+        );
+    }
+    let result = initial.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _reservation = reservation;
+        let state = app.state::<WorkspaceState>();
+        for status in initial {
+            let id = status.project_id.clone();
+            let mut tracker = Tracker {
+                state: &state,
+                session: &session,
+                status,
+            };
+            let operation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::commands::run_image_hub_sync(&app, &id, &session, &mut tracker)
+            }));
+            let error = match operation {
+                Ok(Ok(_)) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => {
+                    super::project_sync::SYNC_LOCK.clear_poison();
+                    Some("The project sync worker stopped unexpectedly. Retry Sync Project to continue saved work.".into())
+                }
+            };
+            if tracker.finish(error).is_err() {
+                break;
+            } // Workspace closed/changed.
+        }
+    });
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +311,96 @@ mod tests {
         assert!(!loaded[0].running);
         assert_eq!(loaded[0].percent, 45);
         assert!(loaded[0].error.as_ref().unwrap().contains("interrupted"));
+    }
+}
+
+fn prepare_inventory_sync(db: &Connection, run_id: &str) -> rusqlite::Result<Vec<SyncStatus>> {
+    let mut statement =
+        db.prepare("SELECT id FROM image_hub_projects ORDER BY name COLLATE NOCASE,id")?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let statuses: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            let mut status = SyncStatus::new(id);
+            status.run_id = run_id.to_string();
+            status
+        })
+        .collect();
+    let transaction = db.unchecked_transaction()?;
+    for status in &statuses {
+        persist(&transaction, status)?;
+    }
+    transaction.commit()?;
+    Ok(statuses)
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+    fn database() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE image_hub_projects(id TEXT PRIMARY KEY,name TEXT); CREATE TABLE image_hub_sync_state(project_id TEXT PRIMARY KEY,status_json TEXT NOT NULL); INSERT INTO image_hub_projects VALUES('b','Bravo'),('a','Alpha');").unwrap();
+        db
+    }
+    #[test]
+    fn inventory_batch_is_ordered_and_queued_projects_share_the_active_reservation() {
+        let db = database();
+        let initial = prepare_inventory_sync(&db, "batch").unwrap();
+        assert_eq!(
+            initial
+                .iter()
+                .map(|status| status.project_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert!(
+            initial
+                .iter()
+                .all(|status| status.running && status.run_id == "batch")
+        );
+        let running = load_with_active(&db, Some("batch")).unwrap();
+        assert_eq!(running.len(), 2);
+        assert!(
+            running
+                .iter()
+                .all(|status| status.running && status.error.is_none()),
+            "queued batch members must not be marked interrupted"
+        );
+        let stopped = load_with_active(&db, None).unwrap();
+        assert!(stopped.iter().all(|status| {
+            !status.running
+                && status
+                    .error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("interrupted"))
+        }));
+        assert!(
+            load_with_active(&db, Some("another"))
+                .unwrap()
+                .iter()
+                .all(|status| !status.running)
+        );
+    }
+    #[test]
+    fn preparing_a_batch_is_atomic_if_any_project_status_cannot_be_saved() {
+        let db = database();
+        prepare_inventory_sync(&db, "original").unwrap();
+        db.execute_batch("CREATE TRIGGER reject_update BEFORE UPDATE ON image_hub_sync_state WHEN NEW.project_id='b' BEGIN SELECT RAISE(ABORT,'failed'); END;").unwrap();
+        assert!(prepare_inventory_sync(&db, "replacement").is_err());
+        assert!(
+            load_with_active(&db, Some("original"))
+                .unwrap()
+                .iter()
+                .all(|status| status.run_id == "original" && status.running)
+        );
+    }
+    #[test]
+    fn an_empty_inventory_does_not_create_placeholder_project_statuses() {
+        let db = database();
+        db.execute("DELETE FROM image_hub_projects", []).unwrap();
+        assert!(prepare_inventory_sync(&db, "empty").unwrap().is_empty());
+        assert!(load_with_active(&db, Some("empty")).unwrap().is_empty());
     }
 }

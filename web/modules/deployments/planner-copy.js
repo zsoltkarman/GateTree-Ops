@@ -22,7 +22,7 @@ export function copiedPlannerDraft({ plan, planNumber, accountId = "" }) {
   return {
     planName: `${plan.plan_name} · Copy`, processId: "", accountId,
     jiraNo: plan.inputs?.jira?.issue ?? "", cxNo: plan.inputs?.cx?.request ?? "",
-    cxRequester: plan.inputs?.cx?.requester ?? "", strategy: deployment.strategy || "linear", steps,
+    cxRequester: plan.inputs?.cx?.requester ?? "", strategy: deployment.strategy || "linear", parallelRegions: deployment.parallel_regions ?? 1, steps,
     copySource: { planNumber },
     targetSelection: { processId: "", jobMode, roles: [...roles], sites: [], excluded: [], revision: null },
   };

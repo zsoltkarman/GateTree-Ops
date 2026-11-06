@@ -1,8 +1,9 @@
+import { inventoryRepositories } from "./inventory.js";
 import { escapeHtml } from "../../shared/ui.js";
 import { createModuleRoot } from "../../shared/module-root.js";
 import { imageHubUrl, imageHubRepositoryUrl } from "./url-template.js";
-import { syncButtonLabel, sourceProgressLabel } from "./sync-progress.js";
-import { getImageHub, saveImageHubFolder, saveImageHubRepository, deleteImageHubFolder, deleteImageHubRepository, saveImageHubProject, deleteImageHubProject, syncImageHubProject, openImageHubReport, getImageHubAnsibleImages, getImageHubSecurityReport } from "./image-hub-api.js";
+import { syncButtonLabel, inventorySyncButtonLabel, sourceProgressLabel } from "./sync-progress.js";
+import { getImageHub, saveImageHubFolder, saveImageHubRepository, deleteImageHubFolder, deleteImageHubRepository, saveImageHubProject, deleteImageHubProject, syncImageHubProject, syncImageHubInventory, openImageHubReport, getImageHubAnsibleImages, getImageHubSecurityReport } from "./image-hub-api.js";
 
 const types = { cloudlab: "CloudLab", scm: "SCM", gitlab: "GitLab", github: "GitHub" };
 const projectTypes = { scm: "SCM", gitlab: "GitLab", cloudlab: "CloudLab" };
@@ -12,7 +13,7 @@ const attr = value => e(String(value ?? "")).replaceAll('"', "&quot;").replaceAl
 export async function mountImageHubView(contentRoot, options = {}) {
   const root = createModuleRoot(contentRoot, options.navigationRoot);
   const state = { folders: [], repositories: [], projects: [], latestImages: [], config: {}, runtimeConfig: {}, syncStatuses: [], securityReports: [], securitySelection: null, securityPage: null, securityBusy: false, securityError: "", securityRevision: 0, expandedImages: new Set(), ansibleImages: [], ansibleStatus: "idle", ansibleError: "", artifactRequests: new Set(), projectId: options.projectId ?? null, syncReport: null, folderId: options.folderId ?? null,
-    repositoryId: options.repositoryId ?? null, expanded: new Set(), mode: "list", dirty: false, busy: false, message: "", error: false };
+    query: "", repoTypeFilter: "", inventorySort: "folder", repositoryId: options.repositoryId ?? null, expanded: new Set(), mode: "list", dirty: false, busy: false, message: "", error: false };
   const mountId = crypto.randomUUID();
   contentRoot.dataset.imageHubMountId = mountId;
   let syncPollTimer = null;
@@ -59,9 +60,9 @@ export async function mountImageHubView(contentRoot, options = {}) {
     return `<option value="">Image Hub (root)</option>${walk(null)}`;
   }
   function tree(parent = null, seen = new Set()) {
-    const folders = state.folders.filter(f => f.parentId === parent && !seen.has(f.id));
-    const repos = state.repositories.filter(r => r.folderId === parent && !r.projectId);
-    const projects = state.projects.filter(p => p.folderId === parent);
+    const folders = state.folders.filter(f => f.parentId === parent && !seen.has(f.id)).sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric:true,sensitivity:"base"}));
+    const repos = state.repositories.filter(r => r.folderId === parent && !r.projectId).sort((a,b) => a.name.localeCompare(b.name));
+    const projects = state.projects.filter(p => p.folderId === parent).sort((a,b) => a.name.localeCompare(b.name));
     return folders.map(f => {
       const open = state.expanded.has(f.id), next = new Set([...seen, f.id]);
       return `<div class="image-hub-tree-folder">
@@ -129,15 +130,26 @@ export async function mountImageHubView(contentRoot, options = {}) {
     }).join("") + (status?.error ? `<p class="image-hub-message is-error" role="alert">${e(status.error)}</p>` : "");
   }
   function syncResults() {
-    if (!state.projectId || state.mode !== "list") return "";
-    return `<section class="image-hub-sync-status" data-hub-sync-status aria-label="Project sync status" aria-live="polite">${syncRows(selectedSync())}</section>`;
+    if (state.mode !== "list") return "";
+    if (state.projectId) return `<section class="image-hub-sync-status" data-hub-sync-status aria-label="Project sync status" aria-live="polite">${syncRows(selectedSync())}</section>`;
+    if (options.manageProjects || !state.syncStatuses.length) return "";
+    return `<section class="image-hub-sync-status" data-hub-sync-status aria-label="Inventory sync status" aria-live="polite">${inventorySyncRows()}</section>`;
+  }
+  function inventorySyncRows() {
+    return [...state.projects].sort((a,b)=>a.name.localeCompare(b.name)).map(project => {
+      const status = state.syncStatuses.find(status=>status.projectId===project.id);
+      const partial = ["scm","slaps","af"].some(source=>status?.[source]?.state === "error");
+      return `<details class="image-hub-inventory-sync"${status?.running || status?.error || partial ? " open" : ""}><summary>${e(project.name)}${status ? ` · ${status.running ? `${Math.max(0,Math.min(99,Number(status.percent)||0))}%` : status.error ? "Failed" : partial ? "Partial" : "Finished"}` : ""}</summary>${syncRows(status)}</details>`;
+    }).join("");
   }
   function updateSyncWidgets() {
     const status = selectedSync();
     const footer = root.querySelector("[data-hub-sync-status]");
-    if (footer) footer.innerHTML = syncRows(status);
+    if (footer) footer.innerHTML = state.projectId ? syncRows(status) : inventorySyncRows();
     const button = root.querySelector('[data-hub-action="sync-project"]');
     if (button) { button.textContent = syncButtonLabel(status); button.disabled = state.syncStatuses.some(status => status.running); }
+    const allButton = root.querySelector('[data-hub-action="sync-inventory"]');
+    if (allButton) { allButton.textContent = inventorySyncButtonLabel(state.syncStatuses,state.projects); allButton.disabled = !state.projects.length || state.syncStatuses.some(status=>status.running); }
   }
   function scheduleSyncPoll() {
     if (syncPollTimer || !state.syncStatuses.some(status => status.running)) return;
@@ -163,29 +175,33 @@ export async function mountImageHubView(contentRoot, options = {}) {
     }, 800);
   }
   function list() {
-    const folders = state.projectId ? [] : state.folders.filter(f => f.parentId === state.folderId);
-    const projects = state.projectId ? [] : state.projects.filter(p => p.folderId === state.folderId);
-    const repos = state.repositories.filter(r => state.projectId ? r.projectId === state.projectId : r.folderId === state.folderId && !r.projectId);
-    if (state.projectId) {
-      return `<div class="image-hub-list"><div class="image-hub-table-scroll"><table class="image-hub-table">
-        <thead><tr><th>Repo name</th><th>Source</th><th>AF</th><th>SLAPS</th><th>Build Logs</th></tr></thead>
-        <tbody>${repos.map(imageRows).join("")}</tbody>
-      </table></div></div>`;
+    if (options.manageProjects) {
+      const projects = [...state.projects].sort((a,b) => a.name.localeCompare(b.name,undefined,{numeric:true,sensitivity:"base"}));
+      return `<div class="image-hub-list"><div class="image-hub-table-scroll"><table class="image-hub-table image-hub-project-table"><thead><tr><th>Project</th><th>Type</th><th>Local path</th><th>Actions</th></tr></thead><tbody>${projects.map(project => `<tr><td><strong>${e(project.name)}</strong><small>${e(folderPath(project.folderId))}</small></td><td>${e(projectTypes[project.projectType] ?? project.projectType)}</td><td><code>${e(project.localPath)}</code></td><td><div class="image-hub-toolbar"><button type="button" data-hub-action="edit-project" data-project-id="${e(project.id)}">Edit</button><button type="button" data-hub-action="sync-project" data-project-id="${e(project.id)}"${state.syncStatuses.some(status => status.running) ? " disabled" : ""}>Sync Project</button><button type="button" data-hub-action="delete-project" data-project-id="${e(project.id)}">Delete</button></div></td></tr>`).join("") || '<tr><td colspan="4">No projects yet. Add a project to collect its repositories.</td></tr>'}</tbody></table></div></div>`;
     }
+    const repos = inventoryRepositories(state, { query: state.query, folderId: state.folderId, projectId: state.projectId, repoType: state.repoTypeFilter, sort: state.inventorySort });
     return `<div class="image-hub-list">
-      ${folders.length ? `<div class="image-hub-folder-cards">${folders.map(f => `<button data-hub-folder="${e(f.id)}">${icon("folder")}<span>${e(f.name)}</span></button>`).join("")}</div>` : ""}
-      ${projects.length ? `<div class="image-hub-folder-cards">${projects.map(p => `<button data-hub-project="${e(p.id)}">${icon("project")}<span>${e(p.name)} · ${e(projectTypes[p.projectType])}</span></button>`).join("")}</div>` : ""}
-      ${repos.length ? `<div class="image-hub-table-scroll"><table class="image-hub-table"><thead><tr><th>Repository</th><th>Type</th><th>Local path</th><th>OCID</th><th>URL</th></tr></thead><tbody>${repos.map(r => `<tr><td><button data-hub-repository="${e(r.id)}">${e(r.name)}</button></td><td>${e(types[r.repoType] ?? r.repoType)}</td><td>${e(r.localPath || "—")}</td><td>${e(r.ocid || "—")}</td><td>${e(r.url || "—")}</td></tr>`).join("")}</tbody></table></div>` : ""}
-      ${!repos.length && !folders.length && !projects.length ? '<div class="image-hub-empty"><h2>No repositories yet</h2><p>Right-click to add a folder, project or repository.</p></div>' : ""}
+      <div class="image-hub-inventory-filters">
+        <label class="image-hub-inventory-search">Search<input type="search" data-hub-filter="query" value="${e(state.query)}" placeholder="Repository, folder or project…" aria-label="Search inventory"></label>
+        <label>Folder<select data-hub-filter="folder">${folderOptions(state.folderId).replace('Image Hub (root)', 'All folders')}</select></label>
+        <label>Project<select data-hub-filter="project"><option value="">All projects</option>${[...state.projects].sort((a,b)=>a.name.localeCompare(b.name)).map(project=>`<option value="${e(project.id)}"${state.projectId===project.id?' selected':''}>${e(project.name)}</option>`).join("")}</select></label>
+        <label>Type<select data-hub-filter="type"><option value="">All types</option>${Object.entries(types).map(([key,label])=>`<option value="${key}"${state.repoTypeFilter===key?' selected':''}>${label}</option>`).join("")}</select></label>
+        <label>Sort<select data-hub-filter="sort"><option value="folder"${state.inventorySort==='folder'?' selected':''}>Folder / repository</option><option value="name"${state.inventorySort==='name'?' selected':''}>Repository name</option></select></label>
+        <span class="image-hub-inventory-count" role="status">${repos.length} / ${state.repositories.length} repositories</span>
+      </div>
+      <div class="image-hub-table-scroll"><table class="image-hub-table image-hub-inventory-table">
+        <thead><tr><th>Folder / Project</th><th>Repo name</th><th>Source</th><th>AF</th><th>SLAPS</th><th>Build Logs</th></tr></thead>
+        <tbody>${repos.map(imageRows).join("") || '<tr><td colspan="6">No repositories match the current filters.</td></tr>'}</tbody>
+      </table></div>
     </div>`;
   }
   function imageRows(repo) {
     const expanded = state.expandedImages.has(repo.id);
-    const latest = `<tr class="image-hub-latest-row"><td><div class="image-hub-image-name"><button type="button" class="image-hub-image-toggle" title="Show or hide Ansible environments" data-hub-image-toggle="${e(repo.id)}" aria-expanded="${expanded}" aria-label="${expanded ? "Collapse" : "Expand"} Ansible environments for ${e(repo.name)}">${expanded ? "▾" : "▸"}</button><button type="button" data-hub-repository="${e(repo.id)}" title="Open repository">${e(repo.name)}</button></div></td><td>Latest</td><td data-hub-af="${e(repo.id)}">${artifactCell(repo)}</td><td data-hub-slaps="${e(repo.id)}">${reportLink(repo, "slaps")}</td><td>${reportLink(repo, "build")}</td></tr>`;
+    const latest = `<tr class="image-hub-latest-row"><td class="image-hub-inventory-location"><span>${e(repo.inventoryFolder || "Root")}</span><small>${e(repo.inventoryProject || "")}</small></td><td><div class="image-hub-image-name"><button type="button" class="image-hub-image-toggle" title="Show or hide Ansible environments" data-hub-image-toggle="${e(repo.id)}" aria-expanded="${expanded}" aria-label="${expanded ? "Collapse" : "Expand"} Ansible environments for ${e(repo.name)}">${expanded ? "▾" : "▸"}</button><button type="button" data-hub-repository="${e(repo.id)}" title="Open repository">${e(repo.name)}</button></div></td><td>Latest</td><td data-hub-af="${e(repo.id)}">${artifactCell(repo)}</td><td data-hub-slaps="${e(repo.id)}">${reportLink(repo, "slaps")}</td><td>${reportLink(repo, "build")}</td></tr>`;
     return latest + (expanded ? ansibleRows(repo) : "");
   }
   function ansibleRows(repo) {
-    const notice = text => `<tr class="image-hub-ansible-row"><td></td><td>Ansible</td><td colspan="3" class="image-hub-hint">${e(text)}</td></tr>`;
+    const notice = text => `<tr class="image-hub-ansible-row"><td></td><td></td><td>Ansible</td><td colspan="3" class="image-hub-hint">${e(text)}</td></tr>`;
     if (state.ansibleStatus === "idle" || state.ansibleStatus === "loading") return notice("Loading Ansible versions…");
     if (state.ansibleStatus === "error") return notice(state.ansibleError);
     const exact = state.ansibleImages.filter(image => image.imageName === repo.name);
@@ -195,7 +211,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
       const imageRepo = { ...repo, name: image.imageName };
       const url = image.version && imageHubUrl(state.runtimeConfig.artifactPageUrlTemplate, state.runtimeConfig, imageRepo, image.version);
       const version = image.version ? (url ? `<a class="image-hub-version-link" data-hub-report href="${e(url)}" target="_blank" rel="noopener noreferrer">${e(image.version)}</a>` : e(image.version)) : "—";
-      return `<tr class="image-hub-ansible-row"><td></td><td title="${e(image.imageName)} · ${e(image.role)} · ${e(image.source)}">Ansible · ${e(image.environment)}</td><td title="${e(image.error || "Version configured in Ansible")}">${version}</td><td>${reportLink(imageRepo, "slaps", image.version || "")}</td><td>${reportLink(repo, "build", image.version || "")}</td></tr>`;
+      return `<tr class="image-hub-ansible-row"><td></td><td></td><td title="${e(image.imageName)} · ${e(image.role)} · ${e(image.source)}">Ansible · ${e(image.environment)}</td><td title="${e(image.error || "Version configured in Ansible")}">${version}</td><td>${reportLink(imageRepo, "slaps", image.version || "")}</td><td>${reportLink(repo, "build", image.version || "")}</td></tr>`;
     }).join("");
   }
   async function loadAnsibleImages() {
@@ -250,17 +266,20 @@ export async function mountImageHubView(contentRoot, options = {}) {
     bindReportLinks(); bindSecurityLinks();
   }
   function render() {
+    const focusedFilter = root.querySelector("[data-hub-filter]:focus");
+    const focusedKey = focusedFilter?.dataset.hubFilter;
+    const selection = focusedKey === "query" ? focusedFilter.selectionStart : null;
     closeContextMenu();
     const selectedFolder = state.folders.find(f => f.id === state.folderId);
     const selectedProject = state.projects.find(p => p.id === state.projectId);
-    root.innerHTML = `<div class="image-hub-module${options.navigationRoot ? " is-main-navigation-layout" : ""}">
-      <aside class="image-hub-browser" aria-label="Image Hub inventory">
-        <button class="image-hub-root${!state.folderId && !state.projectId && state.mode === "list" ? " is-active" : ""}" data-hub-folder="">${icon("repo")}<span>Repositories</span><small>${state.repositories.length}</small></button>
+    root.innerHTML = `<div class="image-hub-module${options.manageProjects ? " is-project-settings" : options.navigationRoot ? " is-main-navigation-layout" : ""}">
+      <aside class="image-hub-browser" aria-label="Image Hub inventory"${options.manageProjects ? " hidden" : ""}>
+        <button class="image-hub-root${!state.folderId && !state.projectId && state.mode === "list" ? " is-active" : ""}" data-hub-folder="">${icon("repo")}<span>All repositories</span><small>${state.repositories.length}</small></button>
         <div class="image-hub-tree">${tree()}</div>
       </aside>
       <section class="image-hub-workspace">
-        <header class="image-hub-header"><div><h1>Image Hub</h1><p>${e(folderPath(state.folderId))}${selectedProject ? ` / ${e(selectedProject.name)}` : ""}</p></div>
-          ${selectedProject ? `<div class="image-hub-toolbar"><button data-hub-action="sync-project"${state.syncStatuses.some(status => status.running) ? " disabled" : ""}>${e(syncButtonLabel(selectedSync()))}</button><button data-hub-action="edit-project">Edit project</button><button data-hub-action="delete-project">Delete project</button></div>` : selectedFolder ? '<div class="image-hub-toolbar"><button data-hub-action="edit-folder">Edit folder</button><button data-hub-action="delete-folder">Delete folder</button></div>' : ""}
+        <header class="image-hub-header"><div><h1>${options.manageProjects ? "Projects" : "Inventory"}</h1><p>${options.manageProjects ? "Project sources and local repository discovery" : selectedProject ? e(selectedProject.name) : selectedFolder ? e(folderPath(state.folderId)) : "All repositories across every folder and project"}</p></div>
+          ${options.manageProjects ? '<div class="image-hub-toolbar"><button type="button" data-hub-action="add-project">+ Add project</button></div>' : selectedProject ? `<div class="image-hub-toolbar"><button data-hub-action="sync-project"${state.syncStatuses.some(status => status.running) ? " disabled" : ""}>${e(syncButtonLabel(selectedSync()))}</button></div>` : selectedFolder ? '<div class="image-hub-toolbar"><button data-hub-action="edit-folder">Edit folder</button><button data-hub-action="delete-folder">Delete folder</button></div>' : state.mode === "list" ? `<div class="image-hub-toolbar"><button type="button" data-hub-action="sync-inventory"${!state.projects.length || state.syncStatuses.some(status=>status.running) ? " disabled" : ""}>${e(inventorySyncButtonLabel(state.syncStatuses,state.projects))}</button></div>` : ""}
         </header>
         <div class="image-hub-message${state.error ? " is-error" : ""}" role="${state.error ? "alert" : "status"}"${state.message ? "" : " hidden"}>${e(state.message)}</div>
         ${state.mode === "security" ? securityView() : state.mode === "repository" ? repositoryForm() : state.mode === "folder" ? folderForm() : state.mode === "project" ? projectForm() : list()}
@@ -270,6 +289,11 @@ export async function mountImageHubView(contentRoot, options = {}) {
     bind();
     if (options.navigationRoot) root.mountNavigation(".image-hub-browser");
     root.querySelector("[autofocus]")?.focus();
+    if (focusedKey) {
+      const filter = root.querySelector(`[data-hub-filter="${focusedKey}"]`);
+      filter?.focus({preventScroll:true});
+      if (selection !== null) { try { filter?.setSelectionRange(selection,selection); } catch (_) {} }
+    }
   }
   function discard() { return !state.dirty || window.confirm("Discard unsaved Image Hub changes?"); }
   function navigate(folderId, repositoryId = null, projectId = null) {
@@ -370,6 +394,22 @@ export async function mountImageHubView(contentRoot, options = {}) {
   }
   function bind() {
     bindReportLinks(); bindSecurityLinks();
+    root.querySelectorAll("[data-hub-filter]").forEach(control => {
+      const update = () => {
+        const key = control.dataset.hubFilter;
+        const position = key === "query" ? control.selectionStart : null;
+        if (key === "query") state.query = control.value;
+        else if (key === "folder") state.folderId = control.value || null;
+        else if (key === "project") state.projectId = control.value || null;
+        else if (key === "type") state.repoTypeFilter = control.value;
+        else state.inventorySort = control.value;
+        render();
+        const next = root.querySelector(`[data-hub-filter="${key}"]`);
+        next?.focus({preventScroll:true});
+        if (position !== null) { try { next?.setSelectionRange(position,position); } catch (_) {} }
+      };
+      if (control.dataset.hubFilter === "query") control.oninput = update; else control.onchange = update;
+    });
     root.querySelectorAll("[data-hub-image-toggle]").forEach(button => button.onclick = event => {
       event.preventDefault();
       event.stopPropagation();
@@ -412,7 +452,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
       try {
         const url = imageHubRepositoryUrl(state.runtimeConfig, r);
         if (!url) {
-          if (!state.runtimeConfig.repositoryUrlTemplate) throw new Error("Set the SCM project page URL under Edit project → Project URL / ID, then run Sync Project to collect repository OCIDs. Alternatively set a repository HTTP(S) URL or repositoryUrlTemplate. Use the ▸ arrow to expand Ansible versions.");
+          if (!state.runtimeConfig.repositoryUrlTemplate) throw new Error("Set the SCM project page URL under Image Hub → Config → Projects → Edit → Project URL / ID, then run Sync Project to collect repository OCIDs. Alternatively set a repository HTTP(S) URL or repositoryUrlTemplate. Use the ▸ arrow to expand Ansible versions.");
           if (state.runtimeConfig.repositoryUrlTemplate.includes("{ocid}") && !r?.ocid) throw new Error("This repository has no OCID yet. Run Sync Project with a configured SCM source, or set its Repository URL (HTTP/HTTPS). Use the ▸ arrow to expand Ansible versions.");
           throw new Error("The repository URL template could not be resolved. Check repositoryUrlTemplate and its placeholders in Image Hub → Config.");
         }
@@ -428,13 +468,23 @@ export async function mountImageHubView(contentRoot, options = {}) {
       captureDraft(); render();
     });
     root.querySelectorAll("[data-hub-action]").forEach(b => b.onclick = async () => {
+      if (options.manageProjects && b.dataset.projectId) state.projectId = b.dataset.projectId;
       switch (b.dataset.hubAction) {
+        case "add-project": newItem("project", null); break;
+        case "sync-inventory":
+          if (!discard()) return;
+          state.mode = "list"; state.dirty = false; state.ansibleStatus = "idle"; state.message = ""; state.error = false;
+          await mutate(() => syncImageHubInventory(), statuses => {
+            const ids = new Set(statuses.map(status=>status.projectId));
+            state.syncStatuses = [...state.syncStatuses.filter(status=>!ids.has(status.projectId)), ...statuses];
+          }, "");
+          break;
         case "security-back": state.securityRevision++; navigate(state.folderId, null, state.projectId); break;
         case "security-prev": void loadSecurityPage((state.securityPage?.page || 0) - 1); break;
         case "security-next": void loadSecurityPage((state.securityPage?.page || 0) + 1); break;
         case "cancel": navigate(state.folderId, null, state.projectId); break;
         case "edit-project":
-          if (!discard()) return;
+          if (!options.manageProjects || !discard()) return;
           state.mode = "project"; state.repositoryId = null; state.dirty = false;
           state.draft = { ...state.projects.find(p => p.id === state.projectId) }; render(); break;
         case "sync-project":
@@ -516,8 +566,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
     menu.className = "connection-context-menu image-hub-context-menu";
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", `Add to ${folderPath(folderId)}`);
-    menu.innerHTML = `${projectId ? "" : `<button type="button" role="menuitem" data-hub-create="folder">${icon("folder-plus")}<span>New folder</span></button>
-      <button type="button" role="menuitem" data-hub-create="project">${icon("project")}<span>Add project</span></button>`}
+    menu.innerHTML = options.manageProjects ? `<button type="button" role="menuitem" data-hub-create="project">${icon("project")}<span>Add project</span></button>` : `${projectId ? "" : `<button type="button" role="menuitem" data-hub-create="folder">${icon("folder-plus")}<span>New folder</span></button>`}
       <button type="button" role="menuitem" data-hub-create="repository">${icon("repo")}<span>Add repository</span></button>
       ${repositoryId ? `<button type="button" role="menuitem" data-hub-edit-repository>${icon("repo")}<span>Edit repository</span></button>` : ""}`;
     root.querySelector(".image-hub-module").append(menu);

@@ -1,4 +1,5 @@
 import { escapeHtml as e } from "../../shared/ui.js";
+import { mountImageHubView } from "./image-hub-view.js";
 import { getImageHub, saveImageHubConfigEntry, deleteImageHubConfigEntry, importImageHubConfig } from "./image-hub-api.js";
 
 export async function mountImageHubConfigView(root) {
@@ -13,9 +14,15 @@ export async function mountImageHubConfigView(root) {
   function render() {
     const entries = Object.entries(state.config).filter(([, value]) => typeof value === "string" && value !== "")
       .sort(([left], [right]) => left.localeCompare(right));
-    root.innerHTML = `<section class="image-hub-workspace image-hub-config">
+    if (!root.querySelector("[data-config-settings]")) {
+      root.innerHTML = `<section class="image-hub-workspace image-hub-config">
       <header class="image-hub-header"><div><h1>Image Hub</h1><p>Config</p></div><button type="button" data-import-config>Import JSON…</button></header>
-      <div class="vaults-module">
+      <section class="image-hub-project-settings" aria-label="Project configuration"><div data-hub-project-settings></div></section>
+      <section data-config-settings aria-label="Configuration entries"></section>
+      </section>`;
+      void mountImageHubView(root.querySelector("[data-hub-project-settings]"), { manageProjects: true });
+    }
+    root.querySelector("[data-config-settings]").innerHTML = `<div class="vaults-module">
         <form class="vault-entry-editor" data-config-entry-form>
           <label><span>Name</span><input data-config-name value="${e(state.name)}" maxlength="120" required autocomplete="off"></label>
           <label><span>Value</span><input data-config-value value="${e(state.value)}" required autocomplete="off" spellcheck="false"></label>
@@ -32,15 +39,14 @@ export async function mountImageHubConfigView(root) {
             <span class="vault-entry-actions"><button type="button" data-config-edit="${e(name)}" title="Edit entry" aria-label="Edit ${e(name)}">${icon("pencil")}</button><button type="button" data-config-delete="${e(name)}" title="Delete entry" aria-label="Delete ${e(name)}">${icon("trash")}</button></span>
           </div>`).join("") : '<p class="vault-empty">No configuration entries saved.</p>'}
         </section>
-      </div>
-    </section>`;
+      </div>`;
     bind();
   }
 
   async function run(action, message, clear = true) {
     if (state.busy) return;
     state.busy = true;
-    const controls = [...root.querySelectorAll("button, input")]; controls.forEach(c => { c.disabled = true; });
+    const controls = [...root.querySelectorAll("[data-config-settings] button, [data-config-settings] input, [data-import-config]")]; controls.forEach(c => { c.disabled = true; });
     try {
       const config = await action();
       if (config === null) return;
@@ -75,12 +81,12 @@ export async function mountImageHubConfigView(root) {
       if (!window.confirm(`Delete configuration entry “${name}”?`)) return;
       void run(() => deleteImageHubConfigEntry(name), "Configuration entry deleted.", state.originalName === name);
     }));
-    root.querySelector("[data-import-config]").addEventListener("click", () => {
+    root.querySelector("[data-import-config]").onclick = () => {
       void run(async () => {
         const path = await window.__TAURI__.dialog.open({ multiple: false, filters: [{ name: "Image Hub configuration", extensions: ["json"] }], title: "Import Image Hub configuration" });
         return path ? importImageHubConfig(path) : null;
       }, "Configuration imported.");
-    });
+    };
   }
 }
 

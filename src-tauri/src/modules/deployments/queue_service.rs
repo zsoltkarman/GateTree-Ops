@@ -52,6 +52,7 @@ struct CxInput {
 #[serde(default)]
 struct OlamInput {
     strategy: String,
+    parallel_regions: Option<u8>,
     account: String,
     targets: OlamTargets,
     steps: Vec<PlanStep>,
@@ -167,13 +168,13 @@ impl QueueService {
                 )?;
                 if !current_run { continue; }
                 transaction.execute(
-                    "UPDATE deployment_plans SET status = ?2, approve_all = ?3, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                    "UPDATE deployment_plans SET status = ?2, approve_all = ?3, updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND (status IS NOT ?2 OR approve_all IS NOT ?3)",
                     params![set.id, set.status, set.approve_all],
                 )?;
                 for job in &set.jobs {
                     transaction.execute(
                         "UPDATE deployment_jobs SET status = ?2, log_output = ?3, details = ?4
-                         WHERE id = ?1 AND plan_id = ?5",
+                         WHERE id = ?1 AND plan_id = ?5 AND (status IS NOT ?2 OR log_output IS NOT ?3 OR details IS NOT ?4)",
                         params![job.id, job.status, job.log, agent_job_details(job), set.id],
                     )?;
                 }
@@ -196,72 +197,77 @@ impl QueueService {
             .with_connection(|connection| {
                 compact_queued_endpoint_checks(connection)?;
                 Ok(QueueSnapshot {
-                    plans: load_plans(connection)?,
+                    plans: load_plans(connection, true)?,
                 })
             })
             .map_err(map_workspace_error)
     }
 
+    pub fn summary_snapshot(state: &WorkspaceState) -> Result<QueueSnapshot, QueueError> {
+        state.with_connection(|connection| Ok(QueueSnapshot { plans: load_plans(connection, false)? })).map_err(map_workspace_error)
+    }
+
+    pub fn log_chunk(state: &WorkspaceState, plan_id: &str, job_id: Option<&str>, offset: usize, hash: Option<&str>) -> Result<super::queue_model::QueueLogChunk, QueueError> {
+        use sha2::{Digest, Sha256};
+        let log = state.with_connection(|connection| {
+            if let Some(job_id) = job_id {
+                return connection.query_row("SELECT log_output FROM deployment_jobs WHERE plan_id=?1 AND id=?2", params![plan_id,job_id], |row| row.get::<_,String>(0));
+            }
+            let mut statement = connection.prepare("SELECT sequence,name,target,log_output FROM deployment_jobs WHERE plan_id=?1 AND log_output<>'' ORDER BY sequence")?;
+            let rows = statement.query_map([plan_id], |row| {
+                let sequence:i64=row.get(0)?; let name:String=row.get(1)?; let target:Option<String>=row.get(2)?; let log:String=row.get(3)?;
+                Ok(format!("[{sequence}] {name}{}\n{log}", target.filter(|target| !target.is_empty()).map(|target| format!(" — {target}")).unwrap_or_default()))
+            })?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows.join("\n\n"))
+        }).map_err(map_workspace_error)?;
+        let can_append = offset <= log.len() && log.is_char_boundary(offset) && hash.is_some_and(|hash| hash == format!("{:x}",Sha256::digest(&log.as_bytes()[..offset])));
+        Ok(super::queue_model::QueueLogChunk { reset: !can_append, text: log[if can_append {offset} else {0}..].into(), total_bytes: log.len(), hash: format!("{:x}", Sha256::digest(log.as_bytes())) })
+    }
+
     pub fn create(state: &WorkspaceState, definition: String) -> Result<String, QueueError> {
-        let input: PlanInput = serde_yaml::from_str(&definition)?;
-        validate_input(&input)?;
-        state
-            .with_connection(|connection| {
-                let process_definition = load_process_definition(connection, &input)?;
-                let process: JsonValue = serde_json::from_str(&process_definition)
-                    .map_err(|error| to_sql_error(QueueError::Json(error)))?;
-                let jobs = generate_jobs(&input, &process).map_err(to_sql_error)?;
-                validate_references(connection, &input, &jobs).map_err(to_sql_error)?;
-                let plan_id = Uuid::new_v4().to_string();
-                let transaction = connection.unchecked_transaction()?;
-                transaction.execute(
-                    "UPDATE workspace_metadata
-                     SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
-                     WHERE key = 'deployment_plan_sequence'",
-                    [],
-                )?;
-                let plan_number: i64 = transaction.query_row(
-                    "SELECT CAST(value AS INTEGER) FROM workspace_metadata
-                     WHERE key = 'deployment_plan_sequence'",
-                    [],
-                    |row| row.get(0),
-                )?;
-                transaction.execute(
-                    "INSERT INTO deployment_plans(id, plan_number, name, process_name, definition_yaml, process_definition_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        plan_id,
-                        plan_number,
-                        input.plan_name.trim(),
-                        input.process.trim(),
-                        definition,
-                        process_definition
-                    ],
-                )?;
-                for (index, job) in jobs.into_iter().enumerate() {
-                    transaction.execute(
-                        "INSERT INTO deployment_jobs(id, plan_id, sequence, name, target, details, payload_json, driver, action)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        params![
-                            Uuid::new_v4().to_string(),
-                            plan_id,
-                            index as i64 + 1,
-                            job.name,
-                            job.target,
-                            job.details,
-                            job.payload,
-                            job.driver,
-                            job.action
-                        ],
-                    )?;
+        state.with_connection(|connection| {
+            let tx = connection.unchecked_transaction()?;
+            let id = create_in_transaction(&tx, &definition)?;
+            tx.commit()?;
+            Ok(id)
+        }).map_err(map_workspace_error)
+    }
+
+    pub fn create_batch(state: &WorkspaceState, group_id: &str, group_name: &str, definitions: Vec<String>) -> Result<Vec<String>, QueueError> {
+        if Uuid::parse_str(group_id).is_err() || group_name.trim().is_empty() || group_name.len() > 160 || definitions.is_empty() || definitions.len() > 100 {
+            return Err(QueueError::Invalid("Enter a group name and between 1 and 100 role Plans.".into()));
+        }
+        let group = json!({"id":group_id,"name":group_name.trim()});
+        state.with_connection(|connection| {
+            let tx = connection.unchecked_transaction()?;
+            let key = format!("deployment_plan_batch:{group_id}");
+            let previous: Option<String> = tx.query_row("SELECT value FROM workspace_metadata WHERE key=?1",[&key],|row|row.get(0)).optional()?;
+            if let Some(previous) = previous {
+                let previous: JsonValue = serde_json::from_str(&previous).map_err(|e|to_sql_error(QueueError::Json(e)))?;
+                if previous["definitions"] != json!(definitions) || previous["group"] != group {
+                    return Err(to_sql_error(QueueError::Invalid("This multi-role request was already saved with different contents. Open a new Planner.".into())));
                 }
-                transaction.commit()?;
-                Ok(plan_id)
-            })
-            .map_err(map_workspace_error)
+                return serde_json::from_value(previous["ids"].clone()).map_err(|e|to_sql_error(QueueError::Json(e)));
+            }
+            let mut roles = std::collections::HashSet::new();
+            let mut ids = Vec::new();
+            for definition in &definitions {
+                let input: PlanInput = serde_yaml::from_str(definition).map_err(|e|to_sql_error(QueueError::Yaml(e)))?;
+                if input.inputs.olam.targets.roles.len() != 1 || !roles.insert(input.inputs.olam.targets.roles[0].trim().to_owned()) {
+                    return Err(to_sql_error(QueueError::Invalid("Select a different single role for each multi-role Plan.".into())));
+                }
+                let id = create_in_transaction(&tx, definition)?;
+                tx.execute("INSERT INTO workspace_metadata(key,value) VALUES(?1,?2)",params![format!("deployment_plan_group:{id}"),group.to_string()])?;
+                ids.push(id);
+            }
+            tx.execute("INSERT INTO workspace_metadata(key,value) VALUES(?1,?2)",params![key,json!({"group":group,"definitions":definitions,"ids":ids}).to_string()])?;
+            tx.commit()?;
+            Ok(ids)
+        }).map_err(map_workspace_error)
     }
 
     pub fn update(state: &WorkspaceState, id: &str, definition: String) -> Result<(), QueueError> {
+        Self::require_unarchived(state, id, false)?;
         let input: PlanInput = serde_yaml::from_str(&definition)?;
         validate_input(&input)?;
         state
@@ -318,6 +324,7 @@ impl QueueService {
         id: &str,
         restart: bool,
     ) -> Result<(), QueueError> {
+        Self::require_unarchived(state, id, false)?;
         state
             .with_connection(compact_queued_endpoint_checks)
             .map_err(QueueError::from)?;
@@ -341,10 +348,35 @@ impl QueueService {
     pub fn delete(state: &WorkspaceState, id: &str) -> Result<(), QueueError> {
         state
             .with_connection(|connection| {
-                connection.execute("DELETE FROM deployment_plans WHERE id = ?1", [id])?;
+                let transaction = connection.unchecked_transaction()?;
+                transaction.execute("DELETE FROM deployment_plans WHERE id = ?1", [id])?;
+                transaction.execute("DELETE FROM workspace_metadata WHERE key IN ('deployment_plan_archived:' || ?1,'deployment_plan_group:' || ?1)",[id])?;
+                transaction.commit()?;
                 Ok(())
             })
             .map_err(QueueError::from)
+    }
+
+    pub fn archive(state: &WorkspaceState, id: &str) -> Result<(), QueueError> {
+        state.with_connection(|db| {
+            let transaction = db.unchecked_transaction()?;
+            let status: String = transaction.query_row("SELECT status FROM deployment_plans WHERE id=?1",[id],|row|row.get(0))?;
+            let (total,unfinished):(i64,i64) = transaction.query_row("SELECT COUNT(*),COALESCE(SUM(status NOT IN ('completed','disabled')),0) FROM deployment_jobs WHERE plan_id=?1",[id],|row|Ok((row.get(0)?,row.get(1)?)))?;
+            if status != "completed" || total == 0 || unfinished != 0 {
+                return Err(to_sql_error(QueueError::Invalid("Only successfully completed Plans can be archived.".into())));
+            }
+            transaction.execute("INSERT INTO workspace_metadata(key,value) VALUES('deployment_plan_archived:' || ?1,'1') ON CONFLICT(key) DO NOTHING",[id])?;
+            transaction.commit()
+        }).map_err(map_workspace_error)
+    }
+
+    pub fn require_unarchived(state: &WorkspaceState, id: &str, job: bool) -> Result<(), QueueError> {
+        state.with_connection(|db| {
+            let plan_id = if job { db.query_row("SELECT plan_id FROM deployment_jobs WHERE id=?1",[id],|row|row.get::<_,String>(0))? } else { id.to_string() };
+            let archived: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM workspace_metadata WHERE key='deployment_plan_archived:' || ?1 AND value='1')",[plan_id],|row|row.get(0))?;
+            if archived { return Err(to_sql_error(QueueError::Invalid("Archived Plans are read-only. Use Copy to new Plan to run it again.".into()))); }
+            Ok(())
+        }).map_err(map_workspace_error)
     }
 
     pub fn agent_submission(
@@ -352,6 +384,7 @@ impl QueueService {
         id: &str,
         keepass_password: Option<&str>,
     ) -> Result<AgentJobSetSubmission, QueueError> {
+        Self::require_unarchived(state, id, false)?;
         state
             .with_connection(|connection| {
                 let plan = connection
@@ -437,6 +470,7 @@ impl QueueService {
                 "Disable and enable apply only to individual jobs.".into(),
             ));
         }
+        Self::require_unarchived(state, id, item_type == "job")?;
         state
             .with_connection(|connection| {
                 let transaction = connection.unchecked_transaction()?;
@@ -1052,6 +1086,17 @@ fn load_process_definition(connection: &Connection, input: &PlanInput) -> rusqli
 }
 
 fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefinition>, QueueError> {
+    let parallel = input.inputs.olam.parallel_regions.unwrap_or(1);
+    if !(1..=16).contains(&parallel) { return Err(QueueError::Invalid("Parallel regions must be a whole number from 1 to 16.".into())); }
+    if parallel > 1 {
+        let targets = &input.inputs.olam.targets;
+        if targets.job_mode != Some(OlamJobMode::PerHost) || !targets.inventory_groups.is_empty() || targets.hosts.is_empty() {
+            return Err(QueueError::Invalid("Parallel regions requires Separate job per host.".into()));
+        }
+        if targets.hosts.iter().any(|host| targets.host_sites.get(host).is_none_or(|site| !targets._sites.contains(site))) {
+            return Err(QueueError::Invalid("Every host needs a selected deployment region. Select deployment targets again.".into()));
+        }
+    }
     let steps = process
         .get("steps")
         .and_then(JsonValue::as_array)
@@ -1355,6 +1400,9 @@ fn resolve_thanos_query(template: &str, region: Option<&str>, version: Option<&s
                 "DEPLOY_REGION" => region,
                 "EXPECTED_VERSION" => version,
                 "DEPLOY_HOST_REGEX" => host_regex.as_deref(),
+                // Bound to the completed deployment's resolved role variables
+                // by the Agent, never to the current local checkout.
+                "DEPLOY_IMAGE_VERSION" => Some("${DEPLOY_IMAGE_VERSION}"),
                 _ => return Err(QueueError::Invalid(format!("Unknown query placeholder: ${{{key}}}."))),
             }.filter(|v| !v.trim().is_empty()).ok_or_else(|| QueueError::Invalid(format!("Missing value for query placeholder ${{{key}}}.")))?;
             let encoded = serde_json::to_string(value)?;
@@ -1368,13 +1416,16 @@ fn resolve_thanos_query(template: &str, region: Option<&str>, version: Option<&s
         }
     }
     if template.contains("${") && quote.is_some() { return Err(QueueError::Invalid("Query contains an unterminated quoted string.".into())); }
-    if result.contains("${") { return Err(QueueError::Invalid("Resolved Thanos query contains an unresolved placeholder.".into())); }
+    if result.replace("${DEPLOY_IMAGE_VERSION}", "").contains("${") { return Err(QueueError::Invalid("Resolved Thanos query contains an unresolved placeholder.".into())); }
     if result.len() > 32768 { return Err(QueueError::Invalid("Resolved Thanos query exceeds 32768 bytes.".into())); }
     Ok(result)
 }
 
 fn build_thanos_jobs(step: &PlanStep, targets: &OlamTargets, process: &JsonValue, preceding_deploy: bool, host: Option<&str>) -> Result<Vec<JobDefinition>, QueueError> {
     let template = step.query.as_deref().unwrap_or("").trim();
+    if template.contains("${DEPLOY_IMAGE_VERSION}") && (!preceding_deploy || host.is_none()) {
+        return Err(QueueError::Invalid("DEPLOY_IMAGE_VERSION requires a preceding Deploy step and Separate job per host.".into()));
+    }
     let version = step.expected_version.as_deref().map(str::trim);
     let mut regions = Vec::new();
     if template.contains("${DEPLOY_REGION}") {
@@ -1437,6 +1488,22 @@ fn build_olam_payload(
         payload.insert("ticket_system".into(), json!("JIRA"));
     }
     serde_json::to_string_pretty(&JsonValue::Object(payload)).map_err(QueueError::from)
+}
+
+fn create_in_transaction(connection: &Connection, definition: &str) -> rusqlite::Result<String> {
+    let input: PlanInput = serde_yaml::from_str(definition).map_err(|e|to_sql_error(QueueError::Yaml(e)))?;
+    validate_input(&input).map_err(to_sql_error)?;
+    let process_definition = load_process_definition(connection, &input)?;
+    let process: JsonValue = serde_json::from_str(&process_definition).map_err(|e|to_sql_error(QueueError::Json(e)))?;
+    let jobs = generate_jobs(&input, &process).map_err(to_sql_error)?;
+    validate_references(connection, &input, &jobs).map_err(to_sql_error)?;
+    let id = Uuid::new_v4().to_string();
+    connection.execute("UPDATE workspace_metadata SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='deployment_plan_sequence'",[])?;
+    let number: i64 = connection.query_row("SELECT CAST(value AS INTEGER) FROM workspace_metadata WHERE key='deployment_plan_sequence'",[],|row|row.get(0))?;
+    connection.execute("INSERT INTO deployment_plans(id,plan_number,name,process_name,definition_yaml,process_definition_json) VALUES(?1,?2,?3,?4,?5,?6)",
+        params![id,number,input.plan_name.trim(),input.process.trim(),definition,process_definition])?;
+    insert_jobs(connection,&id,jobs)?;
+    Ok(id)
 }
 
 fn insert_jobs(
@@ -1502,14 +1569,19 @@ fn compact_queued_endpoint_checks(connection: &Connection) -> rusqlite::Result<(
     Ok(())
 }
 
-fn load_plans(connection: &Connection) -> rusqlite::Result<Vec<QueuePlan>> {
+fn load_plans(connection: &Connection, include_logs: bool) -> rusqlite::Result<Vec<QueuePlan>> {
     let mut statement = connection.prepare(
-        "SELECT id, plan_number, name, process_name, definition_yaml, status, created_at, approve_all
-         FROM deployment_plans ORDER BY created_at DESC, rowid DESC",
+        "SELECT p.id, p.plan_number, p.name, p.process_name, p.definition_yaml, p.status, p.created_at, p.approve_all,
+            EXISTS(SELECT 1 FROM workspace_metadata m WHERE m.key='deployment_plan_archived:' || p.id AND m.value='1'),
+            (SELECT value FROM workspace_metadata WHERE key='deployment_plan_group:' || p.id)
+         FROM deployment_plans p ORDER BY p.created_at DESC, p.rowid DESC",
     )?;
     let plans = statement
         .query_map([], |row| {
             Ok(QueuePlan {
+                group: row.get::<_,Option<String>>(9)?.and_then(|value|serde_json::from_str(&value).ok()),
+                archived: row.get(8)?,
+                parallel_regions: 1,
                 approve_all: row.get(7)?,
                 id: row.get(0)?,
                 plan_number: row.get(1)?,
@@ -1525,13 +1597,17 @@ fn load_plans(connection: &Connection) -> rusqlite::Result<Vec<QueuePlan>> {
     plans
         .into_iter()
         .map(|mut plan| {
-            let mut jobs = connection.prepare(
-                "SELECT id, sequence, name, target, details, payload_json, log_output, driver, action, status
-                 FROM deployment_jobs WHERE plan_id = ?1 ORDER BY sequence",
-            )?;
+            let log_column = if include_logs { "log_output" } else { "''" };
+            let mut jobs = connection.prepare(&format!(
+                "SELECT id, sequence, name, target, details, payload_json, {log_column}, driver, action, status,
+                    CASE WHEN driver='jira' AND action='update' THEN instr(lower(log_output),'unconfirmed')>0 ELSE 0 END
+                 FROM deployment_jobs WHERE plan_id = ?1 ORDER BY sequence"
+            ))?;
             plan.jobs = jobs
                 .query_map([&plan.id], |row| {
                     Ok(QueueJob {
+                        report_unconfirmed: row.get(10)?,
+                        region: None,
                         id: row.get(0)?,
                         sequence: row.get(1)?,
                         name: row.get(2)?,
@@ -1545,6 +1621,14 @@ fn load_plans(connection: &Connection) -> rusqlite::Result<Vec<QueuePlan>> {
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            if let Ok(input) = serde_yaml::from_str::<PlanInput>(&plan.definition) {
+                plan.parallel_regions = input.inputs.olam.parallel_regions.unwrap_or(1);
+                for job in &mut plan.jobs {
+                    if job.driver == "thanos" || matches!(job.driver.as_str(), "olam" | "container") && matches!(job.action.as_str(), "deploy" | "validate_deploy" | "validate_deployment") {
+                        job.region = job.target.as_ref().and_then(|host| input.inputs.olam.targets.host_sites.get(host)).cloned();
+                    }
+                }
+            }
             Ok(plan)
         })
         .collect()
@@ -1626,6 +1710,49 @@ inputs:
     }
 
     #[test]
+    fn multi_role_batch_is_atomic_idempotent_and_persists_group_metadata() {
+        let directory = std::env::temp_dir().join(format!("gt-multi-role-{}",Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let state = WorkspaceState::default();
+        WorkspaceService::create(&state,directory.to_string_lossy().into_owned(),"test workspace password").unwrap();
+        let config = json!({"steps":[{"name":"Deploy","driver":"olam","action":"deploy","workflow":["approve","deploy"]}],"details":{"olam":{"account":"deployment","payload_defaults":{"ENVIRONMENT":"test"}}}});
+        state.with_connection(|db| {
+            db.execute("INSERT INTO deployment_processes(id,name,definition_json) VALUES('process','Deploy',?1)",[config.to_string()])?;
+            db.execute("INSERT INTO vault_entries(id,name,entry_path) VALUES('account','deployment','Accounts/deployment')",[])?;
+            Ok(())
+        }).unwrap();
+        let definition = |role: &str, host: &str| format!("plan_name: Batch - {role}\nprocess: Deploy\ninputs:\n  olam:\n    strategy: linear\n    account: deployment\n    targets: {{roles: [{role}], hosts: [{host}]}}\n    steps: [{{name: Deploy}}]\n");
+        let group = Uuid::new_v4().to_string();
+        let definitions = vec![definition("collector","consumer"),definition("maintainer","redis")];
+        let mut invalid = definitions.clone(); invalid[1]=invalid[1].replace("process: Deploy","process: Missing");
+        assert!(QueueService::create_batch(&state,&group,"November",invalid).is_err());
+        state.with_connection(|db| {
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM deployment_plans",[],|r|r.get::<_,i64>(0))?,0);
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM deployment_jobs",[],|r|r.get::<_,i64>(0))?,0);
+            assert_eq!(db.query_row("SELECT value FROM workspace_metadata WHERE key='deployment_plan_sequence'",[],|r|r.get::<_,String>(0))?,"0");
+            Ok(())
+        }).unwrap();
+        let ids = QueueService::create_batch(&state,&group,"November",definitions.clone()).unwrap();
+        assert_eq!(ids.len(),2);
+        assert_eq!(QueueService::create_batch(&state,&group,"November",definitions.clone()).unwrap(),ids);
+        assert!(QueueService::create_batch(&state,&group,"Changed",definitions).is_err());
+        let duplicate = vec![definition("collector","consumer"),definition("collector","other")];
+        assert!(QueueService::create_batch(&state,&Uuid::new_v4().to_string(),"Duplicate",duplicate).is_err());
+        state.lock().unwrap();
+        WorkspaceService::unlock(&state,directory.to_string_lossy().into_owned(),"test workspace password").unwrap();
+        let snapshot = QueueService::summary_snapshot(&state).unwrap();
+        assert_eq!(snapshot.plans.len(),2);
+        for plan in snapshot.plans {
+            assert_eq!(plan.group.as_ref().unwrap().id,group);
+            assert_eq!(plan.group.as_ref().unwrap().name,"November");
+            assert_eq!(plan.status,"queued");
+            assert!(plan.jobs.iter().all(|job|job.status=="queued"));
+            assert!(plan.plan_number==1 || plan.plan_number==2);
+        }
+        state.lock().unwrap(); fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn completed_plan_copy_is_read_only_and_resolves_the_account_reference() {
         let directory = std::env::temp_dir().join(format!("gt-plan-copy-{}",Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
@@ -1674,6 +1801,12 @@ query: 'metric{instance=~"${DEPLOY_HOST_REGEX}"}'
         }
         assert!(jobs[8..12].iter().all(|j| j.driver == "olam"));
         assert_eq!(jobs[12].driver, "jira");
+        input.inputs.olam.steps[1].query = Some(r#"metric{instance=~"${DEPLOY_HOST_REGEX}",version="${DEPLOY_IMAGE_VERSION}"}"#.into());
+        let dynamic = generate_jobs(&input, &process).unwrap();
+        assert!(dynamic[1].payload.as_deref().unwrap().contains("${DEPLOY_IMAGE_VERSION}"));
+        validate_thanos_query_template(r#"metric{version="${DEPLOY_IMAGE_VERSION}"}"#).unwrap();
+        assert!(validate_thanos_query_template("${DEPLOY_IMAGE_VERSION}").is_err());
+        assert!(build_thanos_jobs(&input.inputs.olam.steps[1], &input.inputs.olam.targets, &process, true, None).is_err());
         input.inputs.olam.steps[1].query = Some("vector(1)".into());
         assert!(generate_jobs(&input, &process).unwrap_err().to_string().contains("DEPLOY_HOST_REGEX"));
         process["details"].as_object_mut().unwrap().remove("thanos");
@@ -1993,6 +2126,27 @@ query: 'metric{region="${DEPLOY_REGION}",instance=~"${DEPLOY_HOST_REGEX}",versio
         input.inputs.olam.targets.roles.truncate(1);
         input.inputs.olam.steps.truncate(1);
         assert_eq!(generate_jobs(&input, &config).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parallel_regions_validate_grouping_and_inventory_mapping_without_changing_job_payloads() {
+        let config = process_config(json!([{"name":"Deploy", "driver":"olam", "action":"deploy", "workflow":["approve","deploy"]}]));
+        let mut input = plan_input();
+        input.inputs.olam.targets.roles = vec!["service".into()];
+        input.inputs.olam.targets.hosts = vec!["host-1".into(), "host-2".into()];
+        input.inputs.olam.targets.job_mode = Some(OlamJobMode::PerHost);
+        let linear = generate_jobs(&input, &config).unwrap();
+        input.inputs.olam.parallel_regions = Some(3);
+        assert!(generate_jobs(&input, &config).is_err());
+        input.inputs.olam.targets._sites = vec!["west".into(), "east".into()];
+        input.inputs.olam.targets.host_sites = [("host-1".into(),"west".into()),("host-2".into(),"east".into())].into();
+        let parallel = generate_jobs(&input, &config).unwrap();
+        assert_eq!(linear.len(),parallel.len());
+        for (a,b) in linear.iter().zip(&parallel) { assert_eq!(a.payload,b.payload); assert_eq!(a.target,b.target); }
+        input.inputs.olam.targets.job_mode = Some(OlamJobMode::Together);
+        assert!(generate_jobs(&input, &config).is_err());
+        input.inputs.olam.parallel_regions = Some(0);
+        assert!(generate_jobs(&input, &config).is_err());
     }
 
     #[test]
@@ -2439,6 +2593,96 @@ query: 'metric{region="${DEPLOY_REGION}",instance=~"${DEPLOY_HOST_REGEX}",versio
     }
 
     #[test]
+    fn successful_plans_can_be_archived_without_changing_jobs_and_survive_workspace_reopen() {
+        let directory = std::env::temp_dir().join(format!("gt-archive-{}",Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let password = "archive test password";
+        let state = WorkspaceState::default();
+        WorkspaceService::create(&state,directory.to_string_lossy().into_owned(),password).unwrap();
+        let definition = "plan_name: Release\nprocess: Deploy\ninputs: {olam: {account: deploy}}\n";
+        state.with_connection(|db| {
+            db.execute("INSERT INTO deployment_plans(id,name,process_name,definition_yaml,status,plan_number) VALUES('success','Release','Deploy',?1,'completed',1)",[definition])?;
+            db.execute("INSERT INTO deployment_jobs(id,plan_id,sequence,name,driver,action,target,payload_json,details,status,log_output) VALUES('job','success',1,'Check','jira','validate','APP-1','{}','Saved details','completed','Saved log')",[])?;
+            db.execute("INSERT INTO deployment_plans(id,name,process_name,definition_yaml,status,plan_number) VALUES('empty','Empty','Deploy','{}','completed',2)",[])?;
+            Ok(())
+        }).unwrap();
+        assert!(QueueService::archive(&state,"empty").is_err());
+        for (plan,job) in [("running","completed"),("queued","completed"),("failed","completed"),("stopped","completed"),("awaiting_approval","completed"),("completed","failed"),("completed","queued")] {
+            state.with_connection(|db| { db.execute("UPDATE deployment_plans SET status=?1 WHERE id='success'",[plan])?;db.execute("UPDATE deployment_jobs SET status=?1 WHERE id='job'",[job])?;Ok(()) }).unwrap();
+            assert!(QueueService::archive(&state,"success").is_err());
+        }
+        state.with_connection(|db| {db.execute("UPDATE deployment_plans SET status='completed' WHERE id='success'",[])?;db.execute("UPDATE deployment_jobs SET status='completed' WHERE id='job'",[])?;Ok(())}).unwrap();
+        let before = serde_json::to_value(QueueService::snapshot(&state).unwrap().plans.into_iter().find(|plan|plan.id=="success").unwrap()).unwrap();
+        QueueService::archive(&state,"success").unwrap();QueueService::archive(&state,"success").unwrap();
+        let mut after = serde_json::to_value(QueueService::snapshot(&state).unwrap().plans.into_iter().find(|plan|plan.id=="success").unwrap()).unwrap();
+        assert_eq!(after["archived"],true);after["archived"]=json!(false);assert_eq!(after,before,"archiving must retain status, payload and logs");
+        assert!(QueueService::prepare_plan_start(&state,"success",true).is_err());
+        assert!(QueueService::update(&state,"success","invalid YAML".into()).is_err());
+        assert!(QueueService::control(&state,"job","job","restart").is_err());
+        assert!(QueueService::agent_submission(&state,"success",None).is_err());
+        assert_eq!(QueueService::completed_plan_copy(&state,"success").unwrap()["plan"]["plan_name"],"Release");
+        let set:AgentJobSetStatus=serde_json::from_value(json!({"id":"success","name":"Release","processName":"Deploy","planDefinition":definition,"processDefinition":"{}","status":"completed","jobs":[{"id":"job","sequence":1,"name":"Check","driver":"jira","action":"validate","target":"APP-1","details":"Saved details","payload":"{}","status":"completed","log":"Saved log"}]})).unwrap();
+        QueueService::synchronize_job_sets(&state,&[set]).unwrap();
+        assert!(QueueService::summary_snapshot(&state).unwrap().plans.iter().find(|plan|plan.id=="success").unwrap().archived);
+        state.lock().unwrap();WorkspaceService::unlock(&state,directory.to_string_lossy().into_owned(),password).unwrap();
+        let reopened=QueueService::snapshot(&state).unwrap();let plan=reopened.plans.iter().find(|plan|plan.id=="success").unwrap();
+        assert!(plan.archived);assert_eq!(plan.jobs[0].log,"Saved log");
+        QueueService::delete(&state,"success").unwrap();
+        state.with_connection(|db| { let markers:i64=db.query_row("SELECT COUNT(*) FROM workspace_metadata WHERE key='deployment_plan_archived:success'",[],|row|row.get(0))?;assert_eq!(markers,0);Ok(()) }).unwrap();
+        state.lock().unwrap();fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn queue_poll_is_read_only_when_unchanged_and_log_reads_are_incremental() {
+        let directory = std::env::temp_dir().join(format!("gt-queue-poll-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let state = WorkspaceState::default();
+        WorkspaceService::create(&state, directory.to_string_lossy().into_owned(), "queue test password").unwrap();
+        state.with_connection(|db| {
+            db.execute("INSERT INTO deployment_plans(id,name,process_name,definition_yaml,plan_number) VALUES('plan','Upgrade','Deploy','{}',1)",[])?;
+            for (id,sequence) in [("one",1),("two",2)] {
+                db.execute("INSERT INTO deployment_jobs(id,plan_id,sequence,name,driver,action,target,payload_json,details) VALUES(?1,'plan',?2,'Report','jira','update','APP-1','{}','Pending')",params![id,sequence])?;
+            }
+            Ok(())
+        }).unwrap();
+        let mut set: AgentJobSetStatus = serde_json::from_value(json!({
+            "id":"plan","name":"Upgrade","planNumber":1,"processName":"Deploy","planDefinition":"{}","processDefinition":"{}","status":"running",
+            "jobs":[
+                {"id":"one","sequence":1,"name":"Report","driver":"jira","action":"update","target":"APP-1","details":"Running","payload":"{}","status":"running","log":format!("árvíz — unconfirmed\n{}", "example log line\n".repeat(10000))},
+                {"id":"two","sequence":2,"name":"Report","driver":"jira","action":"update","target":"APP-1","details":"Pending","payload":"{}","status":"queued","log":""}
+            ]
+        })).unwrap();
+        let changes = || state.with_connection(|db| db.query_row("SELECT total_changes()",[],|row|row.get::<_,i64>(0))).unwrap();
+        QueueService::synchronize_job_sets(&state, std::slice::from_ref(&set)).unwrap();
+        let before = changes();
+        QueueService::synchronize_job_sets(&state, std::slice::from_ref(&set)).unwrap();
+        assert_eq!(changes(), before, "an unchanged Agent snapshot must not write rows");
+        let summary = QueueService::summary_snapshot(&state).unwrap();
+        assert!(summary.plans[0].jobs.iter().all(|job| job.log.is_empty()));
+        assert!(summary.plans[0].jobs[0].report_unconfirmed);
+        let full = QueueService::snapshot(&state).unwrap();
+        assert!(serde_json::to_vec(&summary).unwrap().len() * 10 < serde_json::to_vec(&full).unwrap().len());
+        let first = QueueService::log_chunk(&state,"plan",Some("one"),0,None).unwrap();
+        assert!(first.reset); assert_eq!(first.text, set.jobs[0].log);
+        let same = QueueService::log_chunk(&state,"plan",Some("one"),first.total_bytes,Some(&first.hash)).unwrap();
+        assert!(!same.reset); assert!(same.text.is_empty());
+        set.jobs[0].log.push_str("új sor\n");
+        let before = changes();
+        QueueService::synchronize_job_sets(&state,std::slice::from_ref(&set)).unwrap();
+        assert_eq!(changes(),before+1,"only the changed job is written");
+        let appended = QueueService::log_chunk(&state,"plan",Some("one"),first.total_bytes,Some(&first.hash)).unwrap();
+        assert!(!appended.reset); assert_eq!(appended.text,"új sor\n");
+        set.jobs[0].log = "replacement log".into();
+        QueueService::synchronize_job_sets(&state,std::slice::from_ref(&set)).unwrap();
+        let replacement = QueueService::log_chunk(&state,"plan",Some("one"),appended.total_bytes,Some(&appended.hash)).unwrap();
+        assert!(replacement.reset); assert_eq!(replacement.text,"replacement log");
+        let plan = QueueService::log_chunk(&state,"plan",None,0,None).unwrap();
+        assert_eq!(plan.text,"[1] Report — APP-1\nreplacement log");
+        assert!(QueueService::log_chunk(&state,"other",Some("one"),0,None).is_err());
+        state.lock().unwrap(); fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn queue_details_follow_live_validation_approval_and_deployment_states() {
         let directory =
             std::env::temp_dir().join(format!("gatetree-ops-queue-state-{}", Uuid::new_v4()));
@@ -2456,6 +2700,7 @@ query: 'metric{region="${DEPLOY_REGION}",instance=~"${DEPLOY_HOST_REGEX}",versio
             Ok(())
         }).unwrap();
         let mut set = AgentJobSetStatus {
+            retry_scope: None,
             approve_all: false,
             execution_revision: 2,
             credentials_required: false,

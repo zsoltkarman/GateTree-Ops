@@ -14,7 +14,7 @@ test('a poll already in flight cannot replace the table during column dragging',
  const queue=readFileSync(new URL('../../web/modules/deployments/queue-view.js',import.meta.url),'utf8');
  const pollSource=queue.slice(queue.indexOf('function scheduleQueuePoll('),queue.indexOf('function controlAction('));
  let timer,resolve,rendered=0,notified=0;
- const poll=new Function('window','getDeploymentQueue','render','notifyQueue',pollSource+'\nreturn scheduleQueuePoll;')({setTimeout:callback=>{timer=callback}},()=>new Promise(r=>{resolve=r}),()=>rendered++,()=>notified++);
+ const poll=new Function('window','getDeploymentQueue','patchQueue','notifyQueue','queuePollDelay','queuePollVisible','refreshActiveQueueLog',pollSource+'\nreturn scheduleQueuePoll;')({setTimeout:callback=>{timer=callback}},()=>new Promise(r=>{resolve=r}),()=>rendered++,()=>notified++,()=>1500,()=>true,async()=>{});
  const root={isConnected:true,dataset:{queueMountId:'m'},querySelector:()=>({})};
  const state={mountId:'m',adding:false,busyKey:null,resizingColumns:false,plans:[]};
  poll(root,state);const running=timer();state.resizingColumns=true;resolve({plans:[{id:'updated'}]});await running;

@@ -180,9 +180,9 @@ test("Approve all remains available for running Plans and can be revoked", () =>
 
 
 test("an unconfirmed Jira report requires an explicit recovery decision before retry", async () => {
-  for (const confirmed of [false, true]) {
+  for (const confirmed of [false, true]) for (const summary of [false, true]) {
     const calls = [];
-    const reportJob = { ...job, driver: "jira", action: "update", status: "failed", target: "APP-1", log: "Jira update has an unconfirmed result." };
+    const reportJob = { ...job, driver: "jira", action: "update", status: "failed", target: "APP-1", reportUnconfirmed: summary, log: summary ? "" : "Jira update has an unconfirmed result." };
     const state = { plans: [{ ...plan, jobs: [reportJob] }], busyKey: null };
     const control = new Function("window", "ensureAgentCredentials", "showQueueProgress", "controlDeploymentQueueItem", "notifyQueue", "render", `return ${controlSource}`)(
       { confirm: text => { assert.match(text, /Check the issue/); return confirmed; } },

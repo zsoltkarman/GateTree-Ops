@@ -45,3 +45,44 @@ test('an AF lookup failure still displays the last known version with an explici
  const html=new Function('state','imageHubUrl','e','attr',source+'\nreturn artifactCell({id:"r1",name:"sample"});')(state,()=> 'https://artifacts.example.test',escape,escape);
  assert.match(html,/1.2.3/);assert.match(html,/Last known version/);assert.match(html,/Network unavailable/);assert.doesNotMatch(html,/Checked /);
 });
+
+test('inventory sync shows batch progress across current projects and ignores unrelated older runs',async()=>{
+ const {inventorySyncButtonLabel}=await import(`data:text/javascript;base64,${Buffer.from(helpers).toString('base64')}`);
+ const projects=[{id:'a'},{id:'b'},{id:'c'}];
+ assert.equal(inventorySyncButtonLabel([],projects),'Sync all projects');
+ assert.equal(inventorySyncButtonLabel([{projectId:'a',runId:'batch',running:false,percent:30,error:'Failed'},{projectId:'b',runId:'batch',running:true,percent:20},{projectId:'c',runId:'batch',running:true,percent:0},{projectId:'old',runId:'old',running:true,percent:99}],projects),'Sync all projects 40%');
+ assert.equal(inventorySyncButtonLabel([{projectId:'a',runId:'batch',running:false,percent:100}],projects),'Sync all projects');
+});
+
+test('the complete inventory has an enabled Sync all projects button and disables it while syncing',async()=>{
+ const {inventorySyncButtonLabel}=await import(`data:text/javascript;base64,${Buffer.from(helpers).toString('base64')}`);
+ const source=view.slice(view.indexOf('  function render()'),view.indexOf('  function discard()'));
+ const state={folders:[],projects:[{id:'p1',name:'Project'}],projectId:null,folderId:null,syncStatuses:[],mode:'list',error:false,message:'',repositories:[]};
+ const root={innerHTML:'',querySelector:()=>null};
+ const render=new Function('state','root','options','closeContextMenu','folderPath','e','tree','list','syncResults','bind','inventorySyncButtonLabel','icon',source+'\nreturn render;')(state,root,{},()=>{},()=>'',escape,()=>'',()=>'',()=>'',()=>{},inventorySyncButtonLabel,()=>'');
+ render();assert.match(root.innerHTML,/data-hub-action="sync-inventory">Sync all projects/);
+ state.syncStatuses=[{projectId:'p1',runId:'batch',running:true,percent:42}];render();
+ assert.match(root.innerHTML,/data-hub-action="sync-inventory" disabled>Sync all projects 42%/);
+ state.projects=[];state.syncStatuses=[];render();assert.match(root.innerHTML,/data-hub-action="sync-inventory" disabled/);
+});
+
+test('inventory footer shows source results per project and keeps partial failures expanded',()=>{
+ const source=view.slice(view.indexOf('  function selectedSync()'),view.indexOf('  function updateSyncWidgets()'));
+ const state={projectId:null,mode:'list',projects:[{id:'b',name:'Bravo'},{id:'a',name:'Alpha <x>'}],syncStatuses:[{projectId:'a',running:false,scm:{state:'synced',completed:2,total:2},slaps:{state:'error',completed:1,total:2,errors:1,detail:'Refresh authentication'},af:{state:'synced',completed:2,total:2}},{projectId:'b',running:true,percent:25}]};
+ const html=new Function('state','options','e','sourceProgressLabel',source+'\nreturn syncResults();')(state,{},escape,sourceProgressLabel);
+ assert(html.indexOf('Alpha &lt;x&gt;')<html.indexOf('Bravo'));
+ assert.match(html,/Alpha &lt;x&gt; · Partial/);assert.match(html,/Refresh authentication/);
+ assert.equal((html.match(/<details class="image-hub-inventory-sync" open>/g)||[]).length,2);
+ assert.equal((html.match(/class="image-hub-sync-source/g)||[]).length,6);
+});
+
+test('full inventory sync starts one native background batch and retains the full-list selection',async()=>{
+ const source=view.slice(view.indexOf('  function bind()'),view.indexOf('  function openContextMenu('));
+ const button={dataset:{hubAction:'sync-inventory'}};let requests=0;
+ const state={projectId:null,folderId:null,mode:'list',query:'cache',expandedImages:new Set(),syncStatuses:[{projectId:'a',runId:'old',running:false}]};
+ const root={querySelectorAll:selector=>selector==='[data-hub-action]'?[button]:[],querySelector:()=>null};
+ const statuses=[{projectId:'a',runId:'batch',running:true},{projectId:'b',runId:'batch',running:true}];
+ const bind=new Function('root','state','options','bindReportLinks','bindSecurityLinks','discard','mutate','syncImageHubInventory',source+'\nreturn bind;')(root,state,{},()=>{},()=>{},()=>true,async(action,after)=>after(await action()),async()=>{requests++;return statuses});
+ bind();await button.onclick();
+ assert.equal(requests,1);assert.equal(state.projectId,null);assert.equal(state.folderId,null);assert.equal(state.query,'cache');assert.deepEqual(state.syncStatuses,statuses);
+});
