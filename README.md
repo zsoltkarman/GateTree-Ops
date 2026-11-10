@@ -455,6 +455,9 @@ Stop stops monitoring all active lanes; remote OLAM jobs retain their IDs. Retry
 monitors reconnect to their existing jobs. Completed regional jobs require a
 copied Plan for a fresh run, except that a deployment paired with a failed Thanos
 check can be retried individually. Use matching GUI and Agent builds for this feature.
+If OLAM status polling fails, GT separately attempts to retrieve the Ansible
+output and includes the OLAM job link. A monitoring failure leaves the remote
+result unknown; an available Ansible log is shown alongside the API error.
 
 The host matcher is required for per-host queries to prevent a region-wide check
 from passing because a different host already has the expected version. Standalone

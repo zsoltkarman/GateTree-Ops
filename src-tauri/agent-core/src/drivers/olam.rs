@@ -306,21 +306,30 @@ fn poll_job(
     let mut last_read = Instant::now();
     let url = format!("{}/api/v2/jobs/{job_id}/", base_url.trim_end_matches('/'));
     for _ in 0..attempts {
-        let value: Value = checked(
-            client
-                .get(&url)
-                .basic_auth(&credential.username, Some(&credential.password))
-                .send()
-                .map_err(|error| {
-                    format!("Could not poll OLAM job {job_id}: {error}\n{last_output}")
-                })?,
-            &format!("poll OLAM job {job_id}"),
-        )
-        .map_err(|error| format!("{error}\n{last_output}"))?
-        .json()
-        .map_err(|error| {
-            format!("OLAM job {job_id} response is invalid: {error}\n{last_output}")
-        })?;
+        let status_result = client
+            .get(&url)
+            .basic_auth(&credential.username, Some(&credential.password))
+            .send()
+            .map_err(|error| format!("Could not poll OLAM job {job_id}: {error}"))
+            .and_then(|response| checked(response, &format!("poll OLAM job {job_id}")))
+            .and_then(|response| response.json::<Value>().map_err(|error| {
+                format!("OLAM job {job_id} response is invalid: {error}")
+            }));
+        let value = match status_result {
+            Ok(value) => value,
+            Err(error) => {
+                // Status and stdout are separate endpoints. Recover the actual
+                // Ansible output even if the status request was rejected.
+                let output = match job_output(client, base_url, job_id, credential) {
+                    Ok(output) => format!("Ansible output:\n{output}"),
+                    Err(output_error) => format!("Output retrieval also failed: {output_error}\nLast retrieved Ansible output:\n{last_output}"),
+                };
+                return Err(format!(
+                    "OLAM job {job_id} was started, but GT could not retrieve its status. The remote job result is unknown.\nMonitoring error: {error}\nOpen OLAM output: {}/#/jobs/playbook/{job_id}/output\n{output}",
+                    base_url.trim_end_matches('/')
+                ));
+            }
+        };
         match value.get("status").and_then(Value::as_str).unwrap_or("") {
             "successful" => {
                 return job_output(client, base_url, job_id, credential)
@@ -494,14 +503,14 @@ mod tests {
                 let listener = TcpListener::bind("127.0.0.1:0").unwrap();
                 let address = listener.local_addr().unwrap();
                 let server = std::thread::spawn(move || {
-                    let requests = if status == "not_found" { 1 } else { 3 };
+                    let requests = if status == "not_found" { 2 } else { 3 };
                     for index in 0..requests {
                         let (mut stream, _) = listener.accept().unwrap();
                         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                         let mut reader = BufReader::new(stream.try_clone().unwrap());
                         let mut request = String::new();
                         reader.read_line(&mut request).unwrap();
-                        let path = if index == 2 { "/api/v2/jobs/68952/stdout/?format=txt" } else { "/api/v2/jobs/68952/" };
+                        let path = if index == 2 || (status == "not_found" && index == 1) { "/api/v2/jobs/68952/stdout/?format=txt" } else { "/api/v2/jobs/68952/" };
                         assert!(request.starts_with(&format!("GET {path} ")), "unexpected request: {request}");
                         loop {
                             let mut header = String::new();
@@ -539,6 +548,56 @@ mod tests {
                 }
                 server.join().unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn status_authentication_failure_recovers_stdout_and_distinguishes_unknown_result() {
+        for output_available in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                for path in ["/api/v2/jobs/381260/", "/api/v2/jobs/381260/stdout/?format=txt"] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut request = String::new();
+                    reader.read_line(&mut request).unwrap();
+                    assert!(request.starts_with(&format!("GET {path} HTTP/")));
+                    let mut authorization = false;
+                    loop {
+                        let mut header = String::new();
+                        reader.read_line(&mut header).unwrap();
+                        if header == "\r\n" { break; }
+                        if header.to_ascii_lowercase().starts_with("authorization: basic ") { authorization = true; }
+                    }
+                    assert!(authorization, "Both status and stdout requests must authenticate");
+                    let (status, body) = if path.contains("stdout") && output_available {
+                        ("200 OK", "TASK [Ping Linux Servers]\nfatal: [host-1]: FAILED! => {\"msg\": \"Incorrect sudo password\"}\nPLAY RECAP\nhost-1 : failed=1")
+                    } else {
+                        ("401 Unauthorized", r#"{"detail":"Authentication credentials were not provided."}"#)
+                    };
+                    write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+            });
+            let error = poll_job(
+                &Client::new(), &format!("http://{address}"), 381260,
+                &AgentCredential {reference:"api".into(),username:"user".into(),password:"test-only".into()},
+                false, &|_| {}, Duration::ZERO, Duration::ZERO,
+            ).unwrap_err();
+            assert!(error.contains("Monitoring error:"));
+            assert!(error.contains("HTTP 401"));
+            assert!(error.contains("remote job result is unknown"));
+            assert!(error.contains("/#/jobs/playbook/381260/output"));
+            assert!(!error.contains("test-only"));
+            if output_available {
+                assert!(error.contains("Incorrect sudo password"));
+                assert!(error.contains("PLAY RECAP"));
+            } else {
+                assert!(error.contains("Output retrieval also failed"));
+                assert!(!error.contains("OLAM job 381260 failed."));
+            }
+            server.join().unwrap();
         }
     }
 
