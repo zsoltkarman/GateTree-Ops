@@ -106,7 +106,11 @@ impl Server {
                     let mut bytes = vec![0;length]; reader.read_exact(&mut bytes).unwrap();
                     let path = request.split_whitespace().nth(1).unwrap();
                     let mut status = "200 OK";
-                    let body = if path == "/api/v2/me/" {
+                    let body = if path == "/api/login/" {
+                        "login".into()
+                    } else if path == "/api/v2/tokens/" {
+                        json!({"token":"regional-test-token"}).to_string()
+                    } else if path == "/api/v2/me/" {
                         observed.lock().unwrap().push("barrier".into()); "{}".into()
                     } else if path.ends_with("/launch/") {
                         let body: Value = serde_json::from_slice(&bytes).unwrap();
@@ -133,7 +137,8 @@ impl Server {
                         if fail_query && host == "a1" { status = "401 Unauthorized"; "{}".into() }
                         else { json!({"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"1"]}]}}).to_string() }
                     } else { panic!("unexpected request: {request}"); };
-                    let _ = write!(stream,"HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+                    let cookies = if path == "/api/login/" { "Set-Cookie: csrftoken=regional-test-csrf; Path=/\r\nSet-Cookie: sessionid=regional-test-session; Path=/\r\n" } else { "" };
+                    let _ = write!(stream,"HTTP/1.1 {status}\r\n{cookies}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
                 }));
             }
             for handler in handlers {

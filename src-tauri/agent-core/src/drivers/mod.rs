@@ -4,6 +4,8 @@ pub(crate) mod cx_update;
 mod jira;
 pub(crate) mod jira_update;
 mod olam;
+#[cfg(test)]
+pub(crate) use olam::tests::serve_authentication as serve_olam_authentication;
 mod report;
 pub(crate) mod thanos;
 pub(crate) mod thanos_version;

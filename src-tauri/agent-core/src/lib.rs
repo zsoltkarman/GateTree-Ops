@@ -3216,6 +3216,9 @@ mod tests {
         let observed = requests.clone();
         let server = thread::spawn(move || {
             for index in 0..8 {
+                if index % 4 == 0 {
+                    crate::drivers::serve_olam_authentication(&listener);
+                }
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
@@ -3356,6 +3359,9 @@ mod tests {
         let observed = requests.clone();
         let server = thread::spawn(move || {
             for index in 0..16 {
+                if index % 4 == 0 {
+                    crate::drivers::serve_olam_authentication(&listener);
+                }
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))

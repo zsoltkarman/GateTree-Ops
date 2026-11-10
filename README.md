@@ -101,8 +101,16 @@ requirements, flags older Agents, and offers **Stop**, **Kill Agent**, and **Sta
 Process Config `steps` defines the exact Queue order. Only listed actions create
 Queue entries: ticket inputs and `details` entries never add actions implicitly.
 Jira/CX `validate` checks the specified ticket. OLAM `validate` is one endpoint
-check: it verifies API authentication and configured template IDs/names using
-GET requests, without launching Ansible jobs or expanding hosts/roles.
+check: it signs in and verifies configured template IDs/names without launching
+Ansible jobs or expanding hosts/roles.
+
+All OLAM environments use the same authentication flow as the Ansible MCP:
+the Agent reads the configured KeePass username/password, signs in through
+`/api/login/` with session cookies and CSRF protection, and requests an API token
+from `/api/v2/tokens/`. Endpoint checks, template checks, job launches, status and
+stdout requests then use Bearer authentication. The token stays in the API
+client's memory for that operation; it is not saved in KeePass or the workspace.
+Existing Process Config and Plan account references continue to work.
 
 OLAM `deploy` requires an explicit inner workflow in Process Config:
 
@@ -455,8 +463,10 @@ Stop stops monitoring all active lanes; remote OLAM jobs retain their IDs. Retry
 monitors reconnect to their existing jobs. Completed regional jobs require a
 copied Plan for a fresh run, except that a deployment paired with a failed Thanos
 check can be retried individually. Use matching GUI and Agent builds for this feature.
-If OLAM status polling fails, GT separately attempts to retrieve the Ansible
-output and includes the OLAM job link. A monitoring failure leaves the remote
+OLAM status polling retries HTTP 401 up to three consecutive requests; a
+successful status response resets the counter. These retries only read the
+existing job and never repeat the launch POST. If polling still fails, GT
+separately attempts to retrieve the Ansible output and includes the OLAM job link. A monitoring failure leaves the remote
 result unknown; an available Ansible log is shown alongside the API error.
 
 The host matcher is required for per-host queries to prevent a region-wide check
