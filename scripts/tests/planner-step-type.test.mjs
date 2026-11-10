@@ -50,7 +50,7 @@ test('saved query selection copies PromQL and follows library edits without over
  assert.ok(root.html.includes('>Exporter version</option>'));assert.ok(!root.html.includes('Exporter version · exporter'));
  root.articles[0].querySelector('[data-step-saved-query]').fire('change','q');
  assert.equal(draft.steps[0].query,queries[0].query);
- assert.equal(draft.steps[0].name,'Exporter version');
+ assert.equal(draft.steps[0].name,'Thanos');
  assert.equal(draft.steps[0].expectedVersion,'1.97.0');
  queries[0].query='vector(0)';dispose.refresh();
  assert.equal(draft.steps[0].query,'vector(0)');
@@ -82,4 +82,21 @@ test('copied query matches its saved template and a missing library provides no 
  const empty=new Root();mountPlannerSteps(empty,{draft:{steps:[{id:'two',name:'Thanos Query',type:'thanos_query'}]}});
  assert.ok(empty.html.includes('Add queries in Config → Thanos Queries'));
  assert.ok(!empty.html.includes('Custom query'));
+});
+
+test('step names default to their type and follow type changes while custom names are preserved',()=>{
+ const draft={steps:[]};const root=new Root();mountPlannerSteps(root,{draft});
+ assert.equal(draft.steps[0].name,'Deploy');
+ root.articles[0].querySelector('[data-step-type]').fire('change','thanos_query');
+ assert.equal(draft.steps[0].name,'Thanos');assert.match(root.html,/value="Thanos"/);
+ root.articles[0].querySelector('[data-step-type]').fire('change','deploy');
+ assert.equal(draft.steps[0].name,'Deploy');
+ root.articles[0].querySelector('[data-step-name]').fire('input','Custom rollout');
+ root.articles[0].querySelector('[data-step-type]').fire('change','thanos_query');
+ assert.equal(draft.steps[0].name,'Custom rollout');
+ root.articles[0].querySelector('[data-step-name]').fire('input','');
+ root.articles[0].querySelector('[data-step-type]').fire('change','deploy');
+ assert.equal(draft.steps[0].name,'Deploy');
+ root.querySelector('[data-add-step]').fire('click');
+ assert.equal(draft.steps[1].name,'Deploy');
 });

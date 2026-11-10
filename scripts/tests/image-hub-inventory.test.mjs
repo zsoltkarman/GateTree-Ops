@@ -69,3 +69,19 @@ test('Config edit selects the correct project and Inventory cannot open the proj
   if(manageProjects){assert.equal(state.mode,'project');assert.equal(state.projectId,'p');assert.deepEqual(state.draft,snapshot.projects[0]);assert.notEqual(state.draft,snapshot.projects[0]);}
  }
 });
+
+test('moving a project saves its selected folder without starting repository sync',async()=>{
+ const body=view.slice(view.indexOf('  function bind()'),view.indexOf('  function openContextMenu('));
+ const state={...snapshot,projectId:null,mode:'list',expanded:new Set(),draft:null};
+ const button={dataset:{hubAction:'move-project',projectId:'p'}};
+ const handlers={};const form={addEventListener:(name,handler)=>{handlers[name]=handler;}};
+ const root={querySelectorAll:selector=>selector==='[data-hub-action]'?[button]:[],querySelector:selector=>selector==='[data-hub-form]'?form:null};
+ let saved,expanded,rendered=0;
+ const bind=new Function('root','state','options','bindReportLinks','bindSecurityLinks','discard','render','captureDraft','mutate','saveImageHubProject','expandAncestors',body+'\nreturn bind;')(root,state,{manageProjects:true},()=>{},()=>{},()=>true,()=>rendered++,()=>{state.draft.folderId='other';},async(action,after)=>after(await action()),async input=>{saved={...input};return input.id;},id=>{expanded=id;});
+ bind();await button.onclick();
+ assert.equal(rendered,1);assert.equal(state.mode,'project-folder');assert.equal(state.projectId,'p');
+ assert.notEqual(state.draft,snapshot.projects[0]);
+ await handlers.submit({preventDefault(){}});
+ assert.deepEqual(saved,{...snapshot.projects[0],folderId:'other'});
+ assert.equal(state.mode,'list');assert.equal(state.folderId,'other');assert.equal(expanded,'other');assert(state.expanded.has('p'));
+});

@@ -8,6 +8,8 @@ import { escapeHtml } from "../../shared/ui.js";
 import { getDeploymentConfig } from "./deployments-api.js";
 import { getVaults } from "../vaults/vaults-api.js";
 
+const MULTI_ROLE_PLAN_ENABLED = false;
+
 export const emptyPlannerDraft = () => ({ planName: "", processId: "", cxNo: "", jiraNo: "", accountId: "", strategy: "linear", parallelRegions: 1, steps: [emptyPlannerStep()] });
 
 export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose = () => {}, loadProcesses = getDeploymentConfig, loadAccounts = getVaults, mountTargets = mountPlannerTargets, mountSteps = mountPlannerSteps, savePlan = createDeploymentPlan, onSaved = () => {} } = {}) {
@@ -18,11 +20,11 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
       <div><p class="planner-builder-eyebrow">New deployment</p><h1 id="planner-builder-title">Planner Builder</h1></div>
       <button type="button" class="planner-builder-close" data-planner-close title="Close Planner Builder" aria-label="Close Planner Builder"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
     </header>
-    <div class="planner-mode-tabs" role="tablist" aria-label="Plan type">
+    ${MULTI_ROLE_PLAN_ENABLED ? `<div class="planner-mode-tabs" role="tablist" aria-label="Plan type">
       <button type="button" role="tab" id="planner-single-role-tab" data-planner-tab="single" aria-controls="planner-single-role-panel" aria-selected="true">Single Role Plan</button>
       <button type="button" role="tab" id="planner-multi-role-tab" data-planner-tab="multi" aria-controls="planner-multi-role-panel" aria-selected="false" tabindex="-1">Multi Role Plan</button>
-    </div>
-    <div id="planner-single-role-panel" data-planner-panel="single" role="tabpanel" aria-labelledby="planner-single-role-tab">
+    </div>` : ""}
+    <div id="planner-single-role-panel" data-planner-panel="single"${MULTI_ROLE_PLAN_ENABLED ? ' role="tabpanel" aria-labelledby="planner-single-role-tab"' : ""}>
     <div class="planner-builder-body">
       <section class="planner-details-card" aria-label="Plan details">
         <form class="planner-details-form" autocomplete="off">
@@ -43,7 +45,7 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
   const modeTabs = [...root.querySelectorAll("[data-planner-tab]")];
   const selectTab = mode => {
     if (saving || multiSaving) return;
-    draft.plannerTab = mode === "multi" ? "multi" : "single";
+    draft.plannerTab = MULTI_ROLE_PLAN_ENABLED && mode === "multi" ? "multi" : "single";
     if (draft.plannerTab === "multi" && !disposeMulti) {
       draft.multiRole ??= emptyMultiRoleDraft();
       disposeMulti = mountMultiRoleBuilder(root.querySelector('[data-planner-panel="multi"]'), { draft: draft.multiRole, onSaved, loadProcesses, loadAccounts, mountTargets,

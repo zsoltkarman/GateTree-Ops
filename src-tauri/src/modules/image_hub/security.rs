@@ -13,6 +13,7 @@ pub struct SecurityReport {
     pub scanner: String,
     pub source_url: String,
     pub decision: String,
+    pub finding_count: Option<i64>,
     pub scan_time: Option<String>,
     pub fetched_at: i64,
     pub error: Option<String>,
@@ -156,6 +157,7 @@ mod tests {
             scanner: "anchore".into(),
             source_url: "https://security.example.test/report".into(),
             decision: "denied".into(),
+            finding_count: None,
             scan_time: None,
             fetched_at: 1,
             error: None,
@@ -304,9 +306,22 @@ fn response_data(envelope: Value, config: &super::config::ImageHubConfig) -> Res
         ));
     }
     if !status.starts_with("200") {
+        let code = envelope
+            .pointer("/data/code")
+            .and_then(Value::as_str)
+            .filter(|code| {
+                code.len() <= 80 && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            });
+        let detail = if code == Some("RelatedResourceNotAuthorizedOrNotFound") {
+            " The artifact/version is unavailable or inaccessible to the selected OCI identity. Check the version configured in Ansible and artifact access."
+        } else {
+            ""
+        };
         return Err(format!(
-            "Security API returned HTTP {}.",
-            status.split_whitespace().next().unwrap_or("unknown")
+            "Security API returned HTTP {}{}.{}",
+            status.split_whitespace().next().unwrap_or("unknown"),
+            code.map(|code| format!(" ({code})")).unwrap_or_default(),
+            detail,
         ));
     }
     Ok(envelope.get("data").cloned().unwrap_or(envelope))
@@ -349,6 +364,7 @@ pub fn fetch(
         scanner: "anchore".into(),
         source_url: url.to_string(),
         decision: "unknown".into(),
+        finding_count: None,
         scan_time: None,
         fetched_at: super::artifacts::now(),
         error: None,
@@ -380,7 +396,7 @@ pub fn load_summaries(
     let Ok((_, realm)) = api_settings(config) else {
         return Ok(Vec::new());
     };
-    let mut statement = db.prepare("SELECT id,project_id,image_name,version,realm,scanner,source_url,decision,scan_time,fetched_at,error FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY project_id,image_name,version,realm,scanner,source_url ORDER BY fetched_at DESC,rowid DESC) AS rank FROM image_hub_security_reports WHERE realm=?1) WHERE rank=1")?;
+    let mut statement = db.prepare("SELECT id,project_id,image_name,version,realm,scanner,source_url,decision,scan_time,fetched_at,error,CASE WHEN raw_json IS NOT NULL THEN (SELECT COUNT(*) FROM image_hub_security_findings WHERE report_id=reports.id) END FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY project_id,image_name,version,realm,scanner,source_url ORDER BY fetched_at DESC,rowid DESC) AS rank FROM image_hub_security_reports WHERE realm=?1) AS reports WHERE rank=1")?;
     let reports = statement
         .query_map([realm], |r| {
             Ok(SecurityReport {
@@ -392,6 +408,7 @@ pub fn load_summaries(
                 scanner: r.get(5)?,
                 source_url: r.get(6)?,
                 decision: r.get(7)?,
+                finding_count: r.get(11)?,
                 scan_time: r.get(8)?,
                 fetched_at: r.get(9)?,
                 error: r.get(10)?,
@@ -500,6 +517,25 @@ mod report_tests {
         ));
     }
     #[test]
+    fn unavailable_artifact_errors_show_service_code_without_exposing_response_details() {
+        let config = settings().resolved().unwrap();
+        let error = response_data(
+            json!({"status":"400 Bad Request", "data":{
+                "code":"RelatedResourceNotAuthorizedOrNotFound",
+                "message":"Error while authorizing the user: private-user-id"
+            }}),
+            &config,
+        )
+        .unwrap_err();
+        assert!(error.contains("HTTP 400 (RelatedResourceNotAuthorizedOrNotFound)"));
+        assert!(error.contains("Ansible"));
+        assert!(!error.contains("private-user-id"));
+        assert!(!authentication_required(&error));
+        let plain = response_data(json!({"status":"404 Not Found"}), &config).unwrap_err();
+        assert_eq!(plain, "Security API returned HTTP 404.");
+    }
+
+    #[test]
     #[ignore = "Requires an external configuration file and existing security-token session"]
     fn configured_security_request_live() {
         let raw: super::super::config::ImageHubConfig = serde_json::from_slice(
@@ -553,12 +589,46 @@ mod report_tests {
             scanner: "anchore".into(),
             source_url: scan_url(&config, "sample", "1.2.3").unwrap().to_string(),
             decision: "unknown".into(),
+            finding_count: None,
             scan_time: None,
             fetched_at: 1,
             error: None,
             raw: Some(decoded),
         };
         store(&db, &report).unwrap();
+        let summary = &load_summaries(&db, &config).unwrap()[0];
+        assert_eq!(summary.finding_count, Some(2));
+        assert_eq!(serde_json::to_value(summary).unwrap()["findingCount"], 2);
+        let mut empty = report.clone();
+        empty.id = "empty".into();
+        empty.version = "2.0.0".into();
+        empty.source_url = scan_url(&config, "sample", "2.0.0").unwrap().to_string();
+        empty.raw = Some(json!({"findings": []}));
+        store(&db, &empty).unwrap();
+        let mut failed = empty.clone();
+        failed.id = "failed".into();
+        failed.version = "3.0.0".into();
+        failed.source_url = scan_url(&config, "sample", "3.0.0").unwrap().to_string();
+        failed.decision = "error".into();
+        failed.raw = None;
+        store(&db, &failed).unwrap();
+        let summaries = load_summaries(&db, &config).unwrap();
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|r| r.id == "empty")
+                .unwrap()
+                .finding_count,
+            Some(0)
+        );
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|r| r.id == "failed")
+                .unwrap()
+                .finding_count,
+            None
+        );
         let first = page(&db, &config, "project", "sample", "1.2.3", 0, 1).unwrap();
         assert_eq!(first.total, 2);
         assert_eq!(first.findings.len(), 1);
@@ -618,6 +688,7 @@ mod report_tests {
             scanner: "anchore".into(),
             source_url: scan_url(&config, "sample", "1.2.3").unwrap().to_string(),
             decision: "unknown".into(),
+            finding_count: None,
             scan_time: None,
             fetched_at: 1,
             error: None,

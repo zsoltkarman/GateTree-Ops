@@ -223,7 +223,9 @@ in that precedence order. Missing environment overrides inherit the global
 value. Literal variable aliases are supported; other Jinja expressions display
 an unavailable version. No playbooks run. These are deployment configuration
 values, not observations of running containers. Each environment has its own AF
-version link and report icons. Base report URLs open repository overviews;
+version link and report icons. Ansible AF versions are green when they match the
+latest collected image and red when they differ; unavailable latest versions
+remain neutral. Base report URLs open repository overviews;
 version-specific report templates can use `{version}`. No build or scan ID is
 inferred from a version. Reopen Image Hub or Sync Project to reread Ansible files.
 
@@ -255,11 +257,14 @@ Click the SLAPS shield to view the local findings table: Severity, Issue,
 Package, Installed, Fixed and Gating. Rows are paged to fit the available height;
 long values are truncated with full text in tooltips. The report view retains
 an Open SLAPS browser link. Downloading an Anchore report does not establish a
-realm-specific release approval: until a verified gating decision is collected,
-the shield stays neutral and the status is unknown.
+realm-specific release approval. The shield is green when the downloaded report
+has no findings and red when it has findings. Missing, pending or failed reports
+keep a neutral shield; the approval status remains separate.
 
 Projects have a name, an absolute local directory and a type (SCM, GitLab or
-CloudLab). The optional **Project URL / ID** identifies the remote source: an
+CloudLab). Use **Move to folder…** from a project’s context menu or its Config
+action to change its Image Hub folder together with its repositories, without
+starting a sync or moving local files. The optional **Project URL / ID** identifies the remote source: an
 OCI DevOps project OCID or Console project URL for SCM, or a GitLab-compatible
 group URL for GitLab/CloudLab. Supplying a full SCM project page URL also
 resolves each repository's browser link automatically from that URL's origin
@@ -271,7 +276,8 @@ repositories only. **Save and sync project** discovers repositories immediately;
 **Sync Project** starts a background job and immediately returns control to the
 interface. Its button displays progress as a percentage. Under the list, SCM,
 SLAPS and AF each show their own completed/total counters and details
-for failures or missing configuration. Switching views does not stop the job.
+for failures or missing configuration. SCM Details lists every failed repository
+by name with its error, including while sync is running. Switching views does not stop the job.
 Locking or changing workspace stops writes from the old session; restarting GT
 marks interrupted jobs so the next sync can continue saved work.
 
@@ -283,9 +289,10 @@ reused for one hour; latest-image reports are refreshed on sync.
 Project sync calls the installed `oci`, `glab` and `git` executables without
 Codex or npm dependencies. Choose the SCM profile and authentication mode in
 **Image Hub → Config**, configure the appropriate host in `glab`, and set up
-Git/SSH authentication in your terminal first. It never launches a login flow,
-refreshes credentials, disables host-key verification, or stores credentials in
-project URLs. GitLab-compatible groups include subgroups and all result pages.
+Git/SSH authentication in your terminal first. Git SSH connections respect the
+host-key policy and identity settings in your existing SSH configuration and
+run without interactive prompts. Sync never launches a login flow, refreshes
+credentials, or stores credentials in project URLs. GitLab-compatible groups include subgroups and all result pages.
 OCI Console URLs can supply an explicit `region` query parameter; a bare OCID
 uses the configured region or the selected CLI profile's region. Git uses the clone URL returned by the
 provider. Missing clones are created below the project directory, preserving
@@ -345,8 +352,10 @@ results and approvals are not inherited. Start the new Plan separately.
 
 ### Multi Role Plan
 
-The Planner offers **Single Role Plan** and **Multi Role Plan** tabs. Multi Role
-shares a group name, Process, Vault account, Jira/CX references, execution strategy
+The **Multi Role Plan** tab is temporarily hidden. The Planner opens the single
+role builder, including when a saved draft previously selected Multi Role.
+
+Multi Role support shares a group name, Process, Vault account, Jira/CX references, execution strategy
 and parallel-region limit. Use **Add Role** for each service. Every role has its
 own inventory sites/hosts, optional extra variables and optional saved Thanos
 query; queries are previewed read-only and maintained under Config.

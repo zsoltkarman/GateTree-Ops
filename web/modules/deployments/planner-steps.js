@@ -1,12 +1,14 @@
 import { escapeHtml } from "../../shared/ui.js";
 
-export const emptyPlannerStep = () => ({ id: crypto.randomUUID(), name: "", type: "deploy", query: "", expectedVersion: "", extraVarsText: "" });
+const defaultStepName = type => type === "thanos_query" ? "Thanos" : "Deploy";
+export const emptyPlannerStep = () => ({ id: crypto.randomUUID(), name: "Deploy", type: "deploy", query: "", expectedVersion: "", extraVarsText: "" });
 export function mountPlannerSteps(root, { draft, onChange = () => {}, validationQueries = () => [] } = {}) {
   draft.strategy ||= "linear";
   draft.parallelRegions ??= 1;
   if (!draft.steps?.length) draft.steps = [emptyPlannerStep()];
   for (const step of draft.steps) {
     step.type ||= "deploy"; step.query ??= ""; step.expectedVersion ??= step.expected_version ?? "";
+    if (!step.name?.trim()) step.name = defaultStepName(step.type);
     step.extraVarsText ??= (step.variables ?? []).map(variable => `${variable.key}: ${JSON.stringify(String(variable.value ?? ""))}`).join("\n");
   }
   function render(focus) {
@@ -46,6 +48,7 @@ export function mountPlannerSteps(root, { draft, onChange = () => {}, validation
       el.querySelector("[data-step-down]").addEventListener("click", () => move(1));
       el.querySelector("[data-step-remove]").addEventListener("click", () => { if (draft.steps.length <= 1) return; draft.steps.splice(index, 1); render(); onChange(); });
       el.querySelector("[data-step-type]").addEventListener("change", event => {
+        if (!step.name.trim() || step.name === defaultStepName(step.type)) step.name = defaultStepName(event.target.value);
         step.type = event.target.value; render(`[data-planner-step="${CSS.escape(step.id)}"] [data-step-name]`); onChange();
       });
       const saved = el.querySelector("[data-step-saved-query]");

@@ -89,9 +89,9 @@
 .image-hub-findings-table th, .image-hub-findings-table td { padding:7px 5px; min-width:0 !important; max-width:none; }
 .image-hub-findings-table td span { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .image-hub-findings-table th { overflow:hidden; text-overflow:ellipsis; }
-.image-hub-security-icon.is-approved { color:#59bb85; }
-.image-hub-security-icon.is-denied { color:#ef8585; }
-.image-hub-security-icon.is-unknown, .image-hub-security-icon.is-pending, .image-hub-security-icon.is-error, .image-hub-security-icon.is-not_downloaded { color:var(--text-muted); }
+.image-hub-table .image-hub-security-icon.is-no-findings { color:#59bb85; }
+.image-hub-table .image-hub-security-icon.is-has-findings { color:#ef8585; }
+.image-hub-table .image-hub-security-icon.is-not_downloaded { color:var(--text-muted); }
 .image-hub-security-view .image-hub-message { margin:8px 0; }
 
 .image-hub-sync-status { margin:16px 26px; display:grid; gap:6px; font-size:12px; }
@@ -132,3 +132,8 @@
 .image-hub-project-table .image-hub-toolbar { flex-wrap:nowrap; }
 .image-hub-project-table .image-hub-toolbar button { padding:5px 7px; white-space:nowrap; }
 @media (max-width:700px) { .image-hub-inventory-filters label { flex:1 1 130px; } .image-hub-project-settings { margin:16px; } }
+
+.image-hub-ansible-version.is-latest { color:#59bb85; }
+.image-hub-ansible-version.is-outdated { color:#ef8585; }
+.image-hub-ansible-version.is-latest .image-hub-version-link,
+.image-hub-ansible-version.is-outdated .image-hub-version-link { color:inherit; }

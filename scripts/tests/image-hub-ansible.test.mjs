@@ -110,3 +110,34 @@ test('latest and expanded environment rows stay aligned with the combined invent
  for(const [,row] of rows)assert.equal((row.match(/<td(?:\s|>)/g)||[]).length,6);
  assert.ok(rows[0][1].includes('Applications / Exporters'));assert.ok(rows[0][1].includes('Monitoring'));
 });
+
+test('Ansible AF versions are green for latest and red for different versions, with and without links',()=>{
+ const {state,imageRows}=setup();state.expandedImages.add(repo.id);
+ state.latestImages=[{repositoryId:repo.id,imageName:repo.name,status:'found',version:'1.0.2'}];
+ for (const template of ['https://images.example.test/{repo}/{version}','']) {
+  state.runtimeConfig.artifactPageUrlTemplate=template;
+  const html=imageRows(repo);
+  assert.equal((html.match(/image-hub-ansible-version is-latest/g)||[]).length,1);
+  assert.equal((html.match(/image-hub-ansible-version is-outdated/g)||[]).length,3);
+  assert.match(html,/Matches latest image: 1\.0\.2/);
+  assert.match(html,/Differs from latest image: 1\.0\.2/);
+ }
+});
+test('unknown, failed and unrelated latest image lookups do not mark Ansible versions',()=>{
+ const {state,imageRows}=setup();state.expandedImages.add(repo.id);
+ for (const latestImages of [[],[{repositoryId:repo.id,imageName:repo.name,status:'error',version:'1.0.2'}],[{repositoryId:repo.id,imageName:'another-image',status:'found',version:'1.0.2'}],[{repositoryId:'another-repo',imageName:repo.name,status:'found',version:'1.0.2'}]]) {
+  state.latestImages=latestImages;
+  assert.doesNotMatch(imageRows(repo),/image-hub-ansible-version is-(latest|outdated)/);
+ }
+ state.latestImages=[{repositoryId:repo.id,imageName:repo.name,status:'found',version:'1.0.2'}];
+ state.ansibleImages=[{imageName:repo.name,environment:'test',version:null}];
+ assert.doesNotMatch(imageRows(repo),/image-hub-ansible-version/);
+});
+test('background AF refresh also refreshes Ansible version colors',()=>{
+ const body=view.slice(view.indexOf('  function updateArtifactCells()'),view.indexOf('  function render()'));
+ const cell={dataset:{hubAnsibleAf:repo.id,hubAnsibleIndex:'0'},innerHTML:''};
+ const state={repositories:[repo],ansibleImages:[{imageName:repo.name,version:'1.0.0'}]};
+ let rendered;
+ new Function('root','state','contentRoot','ansibleVersionCell','bindReportLinks','bindSecurityLinks',body+'\nupdateArtifactCells();')({querySelectorAll:selector=>selector==='[data-hub-ansible-af]'?[cell]:[]},state,{isConnected:true},(repository,image)=>{rendered={repository,image};return 'updated version';},()=>{},()=>{});
+ assert.equal(cell.innerHTML,'updated version');assert.equal(rendered.repository,repo);assert.equal(rendered.image,state.ansibleImages[0]);
+});

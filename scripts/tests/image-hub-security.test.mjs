@@ -45,3 +45,17 @@ test('a late response for another image cannot replace the selected report',asyn
  pending[0].resolve({report:{id:'one'}});await old;
  assert.equal(current.securityPage.report.id,'two');assert.equal(current.securityBusy,false);
 });
+
+test('SLAPS shields follow finding counts independently of release approval',()=>{
+ const source=view.slice(view.indexOf('  function reportLink('),view.indexOf('  function reportLink(')+view.slice(view.indexOf('  function reportLink(')).indexOf('\n  function ',1));
+ const repo={id:'repo',projectId:'project',name:'sample'};
+ const renderLink=(scan,url=null)=>new Function('state','attr','e','imageHubUrl','icon',source+'\nreturn reportLink(arguments[5], "slaps", "1.2.3");')({runtimeConfig:{},securityReports:scan?[{projectId:'project',imageName:'sample',version:'1.2.3',...scan}]:[],latestImages:[]},escape,escape,()=>url,()=>'<svg></svg>',repo);
+ for (const url of [null,'https://security.example.test']) {
+  assert.match(renderLink({decision:'unknown',findingCount:0},url),/is-no-findings/);
+  assert.match(renderLink({decision:'approved',findingCount:3},url),/is-has-findings/);
+  assert.match(renderLink({decision:'unknown',findingCount:3},url),/3 findings/);
+  for (const scan of [null,{decision:'unknown'},{decision:'pending',findingCount:0},{decision:'error',findingCount:0},{decision:'unknown',findingCount:0,error:'Download failed'}]) {
+   assert.match(renderLink(scan,url),/is-not_downloaded/);
+  }
+ }
+});

@@ -45,6 +45,19 @@ pub struct SyncReport {
     pub security_summary: Option<String>,
 }
 
+impl SyncReport {
+    pub fn scm_detail(&self) -> String {
+        let mut details = Vec::new();
+        if let Some(error) = &self.remote_error {
+            details.push(format!("Repository discovery: {error}"));
+        }
+        for item in self.items.iter().filter(|item| item.status == "failed") {
+            details.push(format!("{}: {}", item.name, item.message));
+        }
+        details.join("\n")
+    }
+}
+
 fn executable(name: &str) -> PathBuf {
     let filename = if cfg!(windows) {
         format!("{name}.exe")
@@ -178,7 +191,7 @@ pub(super) fn run_bytes(
         .env("GCM_INTERACTIVE", "Never")
         .env(
             "GIT_SSH_COMMAND",
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2",
+            "ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2",
         );
     if let Some(path) = cwd {
         command.current_dir(path);
@@ -655,6 +668,39 @@ pub fn repository_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scm_details_include_every_failed_repository_and_discovery_error() {
+        let mut report = SyncReport {
+            items: Vec::new(),
+            remote_collected: false,
+            remote_error: None,
+            repository_link_summary: None,
+            security_summary: None,
+        };
+        assert_eq!(report.scm_detail(), "");
+        for (name, status, message) in [
+            ("existing", "existing", ""),
+            ("first", "failed", "git failed (exit 128)"),
+            ("second", "failed", "Destination is occupied"),
+            ("third", "failed", "Cannot create directory"),
+            ("new", "cloned", ""),
+        ] {
+            report.items.push(SyncItem {
+                name: name.into(),
+                path: String::new(),
+                status: status.into(),
+                message: message.into(),
+            });
+        }
+        let failures = "first: git failed (exit 128)\nsecond: Destination is occupied\nthird: Cannot create directory";
+        assert_eq!(report.scm_detail(), failures);
+        report.remote_error = Some("Discovery failed".into());
+        assert_eq!(
+            report.scm_detail(),
+            format!("Repository discovery: Discovery failed\n{failures}")
+        );
+    }
+
     #[test]
     fn successful_security_reports_are_never_classified_as_expired_cli_sessions() {
         let args = ["raw-request", "--profile", "TEST_SESSION"];

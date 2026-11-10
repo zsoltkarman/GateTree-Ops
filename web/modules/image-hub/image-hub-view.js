@@ -107,6 +107,14 @@ export async function mountImageHubView(contentRoot, options = {}) {
       <div class="image-hub-form-actions"><button type="submit" class="connection-primary-action">Save folder</button><button type="button" data-hub-action="cancel">Cancel</button></div>
     </form>`;
   }
+  function projectFolderForm() {
+    const p = state.draft;
+    return `<form class="image-hub-form" data-hub-form="project-folder">
+      <h2>Move project: ${e(p.name)}</h2>
+      <div class="image-hub-fields"><label class="image-hub-wide">Folder<select name="folderId">${folderOptions(p.folderId)}</select></label></div>
+      <div class="image-hub-form-actions"><button type="submit" class="connection-primary-action">Move project</button><button type="button" data-hub-action="cancel">Cancel</button></div>
+    </form>`;
+  }
   function projectForm() {
     const p = state.draft;
     return `<form class="image-hub-form" data-hub-form="project">
@@ -177,7 +185,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
   function list() {
     if (options.manageProjects) {
       const projects = [...state.projects].sort((a,b) => a.name.localeCompare(b.name,undefined,{numeric:true,sensitivity:"base"}));
-      return `<div class="image-hub-list"><div class="image-hub-table-scroll"><table class="image-hub-table image-hub-project-table"><thead><tr><th>Project</th><th>Type</th><th>Local path</th><th>Actions</th></tr></thead><tbody>${projects.map(project => `<tr><td><strong>${e(project.name)}</strong><small>${e(folderPath(project.folderId))}</small></td><td>${e(projectTypes[project.projectType] ?? project.projectType)}</td><td><code>${e(project.localPath)}</code></td><td><div class="image-hub-toolbar"><button type="button" data-hub-action="edit-project" data-project-id="${e(project.id)}">Edit</button><button type="button" data-hub-action="sync-project" data-project-id="${e(project.id)}"${state.syncStatuses.some(status => status.running) ? " disabled" : ""}>Sync Project</button><button type="button" data-hub-action="delete-project" data-project-id="${e(project.id)}">Delete</button></div></td></tr>`).join("") || '<tr><td colspan="4">No projects yet. Add a project to collect its repositories.</td></tr>'}</tbody></table></div></div>`;
+      return `<div class="image-hub-list"><div class="image-hub-table-scroll"><table class="image-hub-table image-hub-project-table"><thead><tr><th>Project</th><th>Type</th><th>Local path</th><th>Actions</th></tr></thead><tbody>${projects.map(project => `<tr><td><strong>${e(project.name)}</strong><small>${e(folderPath(project.folderId))}</small></td><td>${e(projectTypes[project.projectType] ?? project.projectType)}</td><td><code>${e(project.localPath)}</code></td><td><div class="image-hub-toolbar"><button type="button" data-hub-action="edit-project" data-project-id="${e(project.id)}">Edit</button><button type="button" data-hub-action="move-project" data-project-id="${e(project.id)}">Move to folder…</button><button type="button" data-hub-action="sync-project" data-project-id="${e(project.id)}"${state.syncStatuses.some(status => status.running) ? " disabled" : ""}>Sync Project</button><button type="button" data-hub-action="delete-project" data-project-id="${e(project.id)}">Delete</button></div></td></tr>`).join("") || '<tr><td colspan="4">No projects yet. Add a project to collect its repositories.</td></tr>'}</tbody></table></div></div>`;
     }
     const repos = inventoryRepositories(state, { query: state.query, folderId: state.folderId, projectId: state.projectId, repoType: state.repoTypeFilter, sort: state.inventorySort });
     return `<div class="image-hub-list">
@@ -209,10 +217,18 @@ export async function mountImageHubView(contentRoot, options = {}) {
     if (!images.length) return notice("No matching image in ansible_dir.");
     return images.map(image => {
       const imageRepo = { ...repo, name: image.imageName };
-      const url = image.version && imageHubUrl(state.runtimeConfig.artifactPageUrlTemplate, state.runtimeConfig, imageRepo, image.version);
-      const version = image.version ? (url ? `<a class="image-hub-version-link" data-hub-report href="${e(url)}" target="_blank" rel="noopener noreferrer">${e(image.version)}</a>` : e(image.version)) : "—";
-      return `<tr class="image-hub-ansible-row"><td></td><td></td><td title="${e(image.imageName)} · ${e(image.role)} · ${e(image.source)}">Ansible · ${e(image.environment)}</td><td title="${e(image.error || "Version configured in Ansible")}">${version}</td><td>${reportLink(imageRepo, "slaps", image.version || "")}</td><td>${reportLink(repo, "build", image.version || "")}</td></tr>`;
+      const version = ansibleVersionCell(repo, image);
+      return `<tr class="image-hub-ansible-row"><td></td><td></td><td title="${e(image.imageName)} · ${e(image.role)} · ${e(image.source)}">Ansible · ${e(image.environment)}</td><td data-hub-ansible-af="${e(repo.id)}" data-hub-ansible-index="${state.ansibleImages.indexOf(image)}" title="${e(image.error || "Version configured in Ansible")}">${version}</td><td>${reportLink(imageRepo, "slaps", image.version || "")}</td><td>${reportLink(repo, "build", image.version || "")}</td></tr>`;
     }).join("");
+  }
+  function ansibleVersionCell(repo, image) {
+    if (!image.version) return "—";
+    const latest = state.latestImages.find(item => item.repositoryId === repo.id && item.imageName === image.imageName && item.status === "found" && item.version);
+    const status = latest ? (latest.version === image.version ? "is-latest" : "is-outdated") : "";
+    const title = latest ? (status === "is-latest" ? `Matches latest image: ${latest.version}` : `Differs from latest image: ${latest.version}`) : "Latest image version unavailable for comparison";
+    const url = imageHubUrl(state.runtimeConfig.artifactPageUrlTemplate, state.runtimeConfig, { ...repo, name: image.imageName }, image.version);
+    const version = url ? `<a class="image-hub-version-link" data-hub-report href="${e(url)}" target="_blank" rel="noopener noreferrer">${e(image.version)}</a>` : e(image.version);
+    return `<span class="image-hub-ansible-version ${status}" title="${e(title)}">${version}</span>`;
   }
   async function loadAnsibleImages() {
     if (state.ansibleStatus === "loading" || state.ansibleStatus === "loaded") return;
@@ -232,10 +248,14 @@ export async function mountImageHubView(contentRoot, options = {}) {
       version ||= state.latestImages.find(image => image.repositoryId === repo.id && image.version && ["found","error"].includes(image.status))?.version || "";
       const scan = state.securityReports.find(scan => scan.projectId === repo.projectId && scan.imageName === repo.name && scan.version === version);
       const decision = scan?.decision || "not_downloaded";
-      const title = `${scan?.realm || state.runtimeConfig.slaps_realm || "SLAPS"} · ${decision} · ${scan?.error || (scan?.fetchedAt ? `Downloaded ${new Date(scan.fetchedAt * 1000).toLocaleString()}` : "Run Sync Project to download the report")}`;
+      const findingCount = scan?.findingCount;
+      const status = !scan?.error && !["pending", "error"].includes(decision) && Number.isInteger(findingCount) && findingCount >= 0
+        ? (findingCount > 0 ? "has-findings" : "no-findings") : "not_downloaded";
+      const findingsLabel = status === "not_downloaded" ? "" : ` · ${findingCount} findings`;
+      const title = `${scan?.realm || state.runtimeConfig.slaps_realm || "SLAPS"} · ${decision}${findingsLabel} · ${scan?.error || (scan?.fetchedAt ? `Downloaded ${new Date(scan.fetchedAt * 1000).toLocaleString()}` : "Run Sync Project to download the report")}`;
       const data = `data-hub-security="${attr(repo.id)}" data-hub-security-image="${attr(repo.name)}" data-hub-security-version="${attr(version)}"`;
       const content = icon("shield");
-      return url ? `<a class="image-hub-report-link image-hub-security-icon is-${attr(decision)}" ${data} href="${attr(url)}" title="${attr(title)}" aria-label="View SLAPS findings for ${attr(repo.name)}">${content}</a>` : `<button type="button" class="image-hub-report-link image-hub-security-icon is-${attr(decision)}" ${data} title="${attr(title)}" aria-label="View SLAPS findings for ${attr(repo.name)}">${content}</button>`;
+      return url ? `<a class="image-hub-report-link image-hub-security-icon is-${attr(status)}" ${data} href="${attr(url)}" title="${attr(title)}" aria-label="View SLAPS findings for ${attr(repo.name)}">${content}</a>` : `<button type="button" class="image-hub-report-link image-hub-security-icon is-${attr(status)}" ${data} title="${attr(title)}" aria-label="View SLAPS findings for ${attr(repo.name)}">${content}</button>`;
     }
     if (!url) return `<span title="Configure ${label} URL in Image Hub → Config">—</span>`;
     return `<a class="image-hub-report-link" data-hub-report href="${e(url)}" target="_blank" rel="noopener noreferrer" title="${label}: ${e(repo.name)}${version ? ` · ${e(version)}` : ""}${!(kind === "slaps" ? state.runtimeConfig.slapsUrlTemplate : state.runtimeConfig.buildLogsUrlTemplate)?.includes("{version}") ? " · Repository overview" : ""}" aria-label="Open ${label} for ${e(repo.name)}">${icon(kind === "slaps" ? "shield" : "logs")}</a>`;
@@ -263,6 +283,11 @@ export async function mountImageHubView(contentRoot, options = {}) {
       const repo = state.repositories.find(repo => repo.id === cell.dataset.hubSlaps);
       if (repo) cell.innerHTML = reportLink(repo, "slaps");
     });
+    root.querySelectorAll("[data-hub-ansible-af]").forEach(cell => {
+      const repo = state.repositories.find(repo => repo.id === cell.dataset.hubAnsibleAf);
+      const image = state.ansibleImages[Number(cell.dataset.hubAnsibleIndex)];
+      if (repo && image) cell.innerHTML = ansibleVersionCell(repo, image);
+    });
     bindReportLinks(); bindSecurityLinks();
   }
   function render() {
@@ -282,7 +307,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
           ${options.manageProjects ? '<div class="image-hub-toolbar"><button type="button" data-hub-action="add-project">+ Add project</button></div>' : selectedProject ? `<div class="image-hub-toolbar"><button data-hub-action="sync-project"${state.syncStatuses.some(status => status.running) ? " disabled" : ""}>${e(syncButtonLabel(selectedSync()))}</button></div>` : selectedFolder ? '<div class="image-hub-toolbar"><button data-hub-action="edit-folder">Edit folder</button><button data-hub-action="delete-folder">Delete folder</button></div>' : state.mode === "list" ? `<div class="image-hub-toolbar"><button type="button" data-hub-action="sync-inventory"${!state.projects.length || state.syncStatuses.some(status=>status.running) ? " disabled" : ""}>${e(inventorySyncButtonLabel(state.syncStatuses,state.projects))}</button></div>` : ""}
         </header>
         <div class="image-hub-message${state.error ? " is-error" : ""}" role="${state.error ? "alert" : "status"}"${state.message ? "" : " hidden"}>${e(state.message)}</div>
-        ${state.mode === "security" ? securityView() : state.mode === "repository" ? repositoryForm() : state.mode === "folder" ? folderForm() : state.mode === "project" ? projectForm() : list()}
+        ${state.mode === "security" ? securityView() : state.mode === "repository" ? repositoryForm() : state.mode === "folder" ? folderForm() : state.mode === "project" ? projectForm() : state.mode === "project-folder" ? projectFolderForm() : list()}
         ${syncResults()}
       </section>
     </div>`;
@@ -483,6 +508,10 @@ export async function mountImageHubView(contentRoot, options = {}) {
         case "security-prev": void loadSecurityPage((state.securityPage?.page || 0) - 1); break;
         case "security-next": void loadSecurityPage((state.securityPage?.page || 0) + 1); break;
         case "cancel": navigate(state.folderId, null, state.projectId); break;
+        case "move-project":
+          if (!discard()) return;
+          state.mode = "project-folder"; state.repositoryId = null; state.dirty = false;
+          state.draft = { ...state.projects.find(p => p.id === state.projectId) }; render(); break;
         case "edit-project":
           if (!options.manageProjects || !discard()) return;
           state.mode = "project"; state.repositoryId = null; state.dirty = false;
@@ -536,6 +565,11 @@ export async function mountImageHubView(contentRoot, options = {}) {
       const input = { ...state.draft };
       if (state.mode === "folder") {
         await mutate(() => saveImageHubFolder(input), id => { state.folderId = id; state.repositoryId = null; state.mode = "list"; expandAncestors(id); }, "Folder saved.");
+      } else if (state.mode === "project-folder") {
+        await mutate(() => saveImageHubProject(input), id => {
+          state.projectId = id; state.folderId = input.folderId; state.repositoryId = null; state.mode = "list";
+          expandAncestors(input.folderId); state.expanded.add(id);
+        }, "Project moved.");
       } else if (state.mode === "project") {
         const message = root.querySelector(".image-hub-message");
         message.textContent = "Saving project…"; message.hidden = false;
@@ -569,6 +603,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
     menu.innerHTML = options.manageProjects ? `<button type="button" role="menuitem" data-hub-create="project">${icon("project")}<span>Add project</span></button>` : `${projectId ? "" : `<button type="button" role="menuitem" data-hub-create="folder">${icon("folder-plus")}<span>New folder</span></button>`}
       <button type="button" role="menuitem" data-hub-create="repository">${icon("repo")}<span>Add repository</span></button>
       ${repositoryId ? `<button type="button" role="menuitem" data-hub-edit-repository>${icon("repo")}<span>Edit repository</span></button>` : ""}`;
+    if (projectId) menu.innerHTML += `<button type="button" role="menuitem" data-hub-move-project>${icon("folder")}<span>Move to folder…</span></button>`;
     root.querySelector(".image-hub-module").append(menu);
     const bounds = event.target.getBoundingClientRect();
     const x = event.clientX || bounds.left, y = event.clientY || bounds.bottom;
@@ -600,7 +635,11 @@ export async function mountImageHubView(contentRoot, options = {}) {
     });
     items.forEach(button => button.addEventListener("click", () => {
       closeContextMenu();
-      if (button.hasAttribute("data-hub-edit-repository")) navigate(folderId, repositoryId, projectId);
+      if (button.hasAttribute("data-hub-move-project")) {
+        if (!discard()) return;
+        state.projectId = projectId; state.mode = "project-folder"; state.repositoryId = null; state.dirty = false;
+        state.draft = { ...state.projects.find(p => p.id === projectId) }; render();
+      } else if (button.hasAttribute("data-hub-edit-repository")) navigate(folderId, repositoryId, projectId);
       else newItem(button.dataset.hubCreate, folderId, projectId);
     }));
     items[0].focus({ preventScroll: true });

@@ -286,7 +286,7 @@ pub(super) fn run_image_hub_sync(
                 .filter(|item| item.status == "failed")
                 .count(),
             "running",
-            report.remote_error.as_deref().unwrap_or(""),
+            &report.scm_detail(),
         )?;
     }
     if project.project_type == "scm" {
@@ -334,17 +334,7 @@ pub(super) fn run_image_hub_sync(
         } else {
             "synced"
         },
-        report
-            .remote_error
-            .as_deref()
-            .or_else(|| {
-                report
-                    .items
-                    .iter()
-                    .find(|item| item.status == "failed")
-                    .map(|item| item.message.as_str())
-            })
-            .unwrap_or(""),
+        &report.scm_detail(),
     )?;
     let runtime = settings.resolved()?;
     let snapshot = state

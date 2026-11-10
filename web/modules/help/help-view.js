@@ -50,17 +50,17 @@ const cxDeploymentReport = {
   },
 };
 const containerProcess = {
-  "name": "Devcorp - Test",
+  "name": "Container deployment example",
   "details": {
     "container": {
       "engine": "auto",
-      "image": "ies-orasys-release-docker-local.artifactory.oci.oraclecorp.com/orasys-ansible-deployer:2026.9.3",
+      "image": "registry.example.test/ansible-deployer:your-version",
       "repository": "local_ansible_folder",
-      "deployment_playbook": "playbooks/deploy_orasys_role.yml",
+      "deployment_playbook": "playbooks/deploy_role.yml",
       "role_variable": "ROLE_NAME",
-      "vault_password_file": "~/.orasys_vault_pass",
+      "vault_password_file": "~/.ansible_vault_pass",
       "payload_defaults": {
-        "ENVIRONMENT": "devcorp",
+        "ENVIRONMENT": "staging",
         "ansible_ssh_common_args": "-q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=50 -o ServerAliveCountMax=3"
       }
     }
@@ -88,10 +88,10 @@ function markup() {
       <p>Use the same Planner and select a Process with <code>driver: "container"</code>. The image is read from this Process config, never from a hardcoded version. Docker or Podman must be running and able to pull the image (log in to the registry first if required).</p>
       <p>Choose the local project containing the configured deployment playbook under Deployments / Ansible / Config. The Agent mounts it read-only at <code>/workspace</code>. Planner Account supplies SSH and become credentials. Ansible Vault uses the password file already inside the image; <code>~/</code> refers to the image user's home.</p>
       <p><code>ansible_config</code> is optional: omit it to retain the image environment and Ansible's normal config discovery. Optional <code>validation_playbook</code> overrides the built-in SSH ping and target preview. The selected workflow runs validation, pauses for approval, then deploys. Stop removes the running container; failed validation never deploys.</p>
-      <p>Plans use <code>inputs.ansible</code>; existing <code>inputs.olam</code> Plans remain supported. Both inventory layouts are supported: <code>inventory/ENVIRONMENT/SITE</code> and <code>inventory/gbucs_orasys_host_inventory/ENVIRONMENT/SITE</code>. Host grouping and extra variables work as in OLAM.</p>
-      <div class="report-help-code-heading"><strong>Devcorp - Test · container Process</strong><button type="button" data-copy-report="container">Copy config JSON</button></div>
+      <p>Plans use <code>inputs.ansible</code>; existing <code>inputs.olam</code> Plans remain supported. Use the inventory layout <code>inventory/ENVIRONMENT/SITE</code>; existing legacy layouts remain supported. Host grouping and extra variables work as in OLAM.</p>
+      <div class="report-help-code-heading"><strong>Container deployment example · container Process</strong><button type="button" data-copy-report="container">Copy config JSON</button></div>
       <pre>${escapeHtml(JSON.stringify(containerProcess, null, 2))}</pre>
-      <p>This example targets the orasys-mcp project (<code>ROLE_NAME</code>). For the older orasys project, set <code>deployment_playbook</code> to <code>playbooks/run_single_role.yml</code> and <code>role_variable</code> to <code>playbook_name</code>. The selected Local Ansible folder must match.</p>
+      <p>Replace the example image, version, deployment playbook, role variable and Vault password file with values from your environment. The playbook must exist in the selected Local Ansible folder.</p>
     </section>
     <section><h2>Copy a completed Plan</h2>
       <p>Use <strong>Copy to new Plan</strong> in a completed Plan’s header to open a prefilled Planner. Jira, CX, account, role, steps, variables and Thanos query/version are copied. Choose the destination Process and new deployment targets, review the account and variables, then Save Plan. The destination Process supplies ENVIRONMENT. The copy gets a new Plan number and starts queued, with no inherited approvals or job results. Start it separately; the original Plan keeps its history.</p>
