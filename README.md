@@ -369,15 +369,21 @@ revision instead of silently overwriting a newer change.
 Thanos steps are optional; a Plan may contain only Deploy steps.
 In a Planner **Thanos Query** step, select a saved query by its name.
 The selected PromQL appears in a read-only preview.
-The query text is copied into the step; supply the expected exporter version in
-that Plan. Host and region placeholders still come from deployment targets.
-The Planner only offers saved queries; create and edit PromQL under
-**Config → Thanos Queries**. Selecting a template does not overwrite an existing
-step name or expected version. Copied Plans match their query text to a saved
-entry; unmatched queries require a new selection before saving. Saved Plan YAML
-contains the query itself, never a live reference to the library, so later library
-edits or deletion cannot change a queued or running Plan. Polling and connection
-settings stay in Process Config under `details.thanos`.
+The Plan stores the saved query ID and a preview of its original text. Every
+Thanos HTTP attempt uses the latest saved query from **Config → Thanos Queries**,
+including retries and polls of a running check. Saving a query refreshes queued,
+failed and running checks in the Agent; starting or retrying also refreshes them.
+Host, region and expected-version values remain bound to the Plan's deployment.
+`${DEPLOY_IMAGE_VERSION}` still comes from the completed deployment's log.
+Completed jobs keep their results and logs; changing a query does not rerun Deploy.
+Deleting a referenced query or removing a required placeholder fails validation
+rather than using the old text. Legacy Plans are linked by a unique exact query
+match or saved-query name; if neither identifies the source, edit the Plan and
+select its saved query again. Copied Plans retain the saved query ID.
+The Planner only offers saved queries; selecting one does not overwrite an
+existing step name or expected version. Polling and connection settings stay in
+Process Config under `details.thanos`. After updating the application, restart
+the Agent to use the updated IPC protocol.
 
 ### Thanos Query in Planner Builder
 

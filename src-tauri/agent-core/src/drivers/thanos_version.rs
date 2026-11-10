@@ -69,6 +69,21 @@ fn version_from_log(log: &str, host: &str, role: &str) -> Result<String, String>
             for c in chars.by_ref() { if ('@'..='~').contains(&c) { break; } }
         } else { text.push(c); }
     }
+    // Retry logs retain earlier deployments for audit. Bind only evidence
+    // produced after the latest retry, and fail if that attempt has none.
+    let mut offset = 0;
+    let mut attempt_start = 0;
+    for line in text.split_inclusive('\n') {
+        offset += line.len();
+        let line = line.trim();
+        if line.starts_with("Deployment pair retry requested.")
+            || line == "Retry requested; completed regional work is preserved."
+            || line == "Retry requested by the operator."
+        {
+            attempt_start = offset;
+        }
+    }
+    let text = &text[attempt_start..];
     let mut roles = BTreeSet::new();
     let mut versions = BTreeSet::new();
     for (offset, _) in text.match_indices("\"msg\"") {
@@ -154,5 +169,35 @@ mod tests {
         assert!(version_from_log(log,"missing","collector").is_err());
         assert!(version_from_log(&format!("{log}\nok: [host] => {{\"msg\": \"IMAGE_VERSION: 1\"}}"),"host","collector").is_err());
         assert!(version_from_log("ok: [host] => {\"msg\":[\"Role name: collector\",\"IMAGE_VERSION: {{ IMAGE_VERSION }}\"]}","host","collector").is_err());
+    }
+
+    #[test]
+    fn retry_uses_current_validation_without_reusing_historical_versions() {
+        let preview = |version: &str| format!(
+            "ok: [host] => {{\"msg\":[\"Role name: collector\",\"Ansible hostname: host\",\"IMAGE_VERSION: {version}\"]}}"
+        );
+        let old = preview("2026.11.1");
+        for marker in [
+            "Deployment pair retry requested. Previous deployment job: Some(380585); validation job: Some(380575).",
+            "Retry requested; completed regional work is preserved.",
+            "Retry requested by the operator.",
+        ] {
+            let log = format!("{old}\n{marker}\n{}", preview("2026.11.2"));
+            assert_eq!(version_from_log(&log, "host", "collector").unwrap(), "2026.11.2");
+            assert!(version_from_log(&format!("{old}\n{marker}"), "host", "collector").is_err(),
+                "Missing retry evidence must not fall back to the old deployment");
+        }
+    }
+
+    #[test]
+    fn repeated_retries_keep_ambiguity_checks_inside_the_current_attempt() {
+        let preview = |version: &str| format!(
+            "ok: [host] => {{\"msg\":[\"Role name: collector\",\"IMAGE_VERSION: {version}\"]}}"
+        );
+        let retry = "Deployment pair retry requested. Previous deployment job: None; validation job: None.";
+        let log = format!("{}\n{retry}\n{}\n{retry}\n{}",
+            preview("2026.11.1"), preview("2026.11.2"), preview("2026.11.3"));
+        assert_eq!(version_from_log(&log, "host", "collector").unwrap(), "2026.11.3");
+        assert!(version_from_log(&format!("{log}\n{}", preview("2026.11.4")), "host", "collector").is_err());
     }
 }

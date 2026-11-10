@@ -55,8 +55,8 @@ test('Thanos steps preserve literal PromQL and order without deploy variables or
  d.steps.splice(1,0,{name:'Verify running service',validationQueryId:'saved',type:'thanos_query',query,extraVarsText:'not a variable assignment'});
  const config=[{...processes[0],definition:JSON.stringify({steps:[{driver:'olam',action:'deploy'}],details:{thanos:{url:'https://metrics.example.test',timeout_seconds:300,interval_seconds:30}}})}];
  const plan=buildPlannerPlan(d,config,accounts,[{id:'saved'},{id:'library-q'}]); const step=plan.inputs.olam.steps[1];
- assert.deepEqual(step,{name:'Verify running service',type:'thanos_query',query});
- const yaml=plannerPlanYaml(plan);assert.ok(yaml.includes(`query: ${JSON.stringify(query)}`));
+ assert.deepEqual(step,{name:'Verify running service',type:'thanos_query',validation_query_id:'saved',query});
+ const yaml=plannerPlanYaml(plan);assert.ok(yaml.includes('validation_query_id: "saved"'));assert.ok(yaml.includes(`query: ${JSON.stringify(query)}`));
  assert.ok(yaml.indexOf('Phase one')<yaml.indexOf('Verify running service'));assert.ok(yaml.indexOf('Verify running service')<yaml.indexOf('Phase two'));
  assert.ok(!yaml.includes('timeout_seconds'));assert.ok(!yaml.includes('interval_seconds'));
 });
@@ -98,14 +98,14 @@ test('per-host checks require the deployed host matcher and preserve host/site m
 });
 
 
-test('Plan keeps the selected query text and never stores a live query-library reference',()=>{
+test('Plan stores the selected query identity alongside its original preview',()=>{
  const d=draft();
  const config=[{...processes[0],definition:JSON.stringify({steps:[{driver:'olam',action:'deploy'}],details:{thanos:{url:'https://metrics.example.test'}}})}];
  d.steps.push({name:'Saved check',validationQueryId:'saved',type:'thanos_query',query:'vector(1)',validationQueryId:'library-q'});
  const plan=buildPlannerPlan(d,config,accounts,[{id:'saved'},{id:'library-q'}]);const yaml=plannerPlanYaml(plan);
  d.steps.at(-1).query='vector(0)';
  assert.equal(plan.inputs.olam.steps.at(-1).query,'vector(1)');
- assert.ok(!yaml.includes('library-q'));assert.ok(yaml.includes('query: "vector(1)"'));
+ assert.ok(yaml.includes('validation_query_id: "library-q"'));assert.ok(yaml.includes('query: "vector(1)"'));
 });
 
 test('parallel region limit survives YAML serialization and rejects invalid grouping and unmapped hosts',()=>{

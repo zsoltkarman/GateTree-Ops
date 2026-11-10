@@ -110,11 +110,30 @@ fn query_result(body: &Value) -> Result<(bool, String), String> {
     ))
 }
 
+pub(crate) fn payload_query(job: &AgentJobStatus) -> Result<String, String> {
+    let payload: Value = serde_json::from_str(job.payload.as_deref().unwrap_or("{}"))
+        .map_err(|_| "Invalid Thanos query payload.")?;
+    if let Some(error) = payload["query_error"].as_str() { return Err(error.into()); }
+    payload["query"].as_str().map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 32768 && !s.contains("${"))
+        .map(str::to_owned).ok_or_else(|| "A complete PromQL query is required.".into())
+}
+
 pub fn execute(
     process: &str,
     job: &AgentJobStatus,
     credentials: &[AgentCredential],
     on_output: &dyn Fn(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    execute_with_query(process, credentials, on_output, &|| payload_query(job), cancelled)
+}
+
+pub(crate) fn execute_with_query(
+    process: &str,
+    credentials: &[AgentCredential],
+    on_output: &dyn Fn(&str),
+    current_query: &dyn Fn() -> Result<String, String>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     let process: Value = serde_json::from_str(process).map_err(|_| "Invalid Process Config.")?;
@@ -123,13 +142,6 @@ pub fn execute(
             .pointer("/details/thanos")
             .ok_or("Configure details.thanos in Deployments → Config.")?,
     )?;
-    let payload: Value = serde_json::from_str(job.payload.as_deref().unwrap_or("{}"))
-        .map_err(|_| "Invalid Thanos query payload.")?;
-    let query = payload["query"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && s.len() <= 32768 && !s.contains("${"))
-        .ok_or("A complete PromQL query is required.")?;
     let credential = if c.auth == "none" {
         None
     } else {
@@ -148,10 +160,11 @@ pub fn execute(
     let start = Instant::now();
     let timeout = Duration::from_secs(c.timeout_seconds);
     let mut log = format!(
-        "Thanos validation\nQuery: {query}\nTimeout: {}s; interval: {}s\nSuccess requires non-empty results, all equal to 1.\n",
+        "Thanos validation\nTimeout: {}s; interval: {}s\nSuccess requires non-empty results, all equal to 1.\n",
         c.timeout_seconds, c.interval_seconds
     );
     let mut attempt = 0;
+    let mut previous_query = String::new();
     loop {
         if cancelled() {
             return Err("Thanos validation stopped.".into());
@@ -163,10 +176,15 @@ pub fn execute(
                 c.timeout_seconds
             ));
         }
+        let query = current_query().map_err(|error| format!("{log}\n{error}"))?;
+        if query != previous_query {
+            log.push_str(&format!("Query: {query}\n"));
+            previous_query.clone_from(&query);
+        }
         attempt += 1;
         let mut request = client
             .get(&url)
-            .query(&[("query", query), ("partial_response", "false")])
+            .query(&[("query", query.as_str()), ("partial_response", "false")])
             .header("Accept", "application/json")
             .timeout(remaining.min(Duration::from_secs(15)));
         if let Some(credential) = credential {
@@ -176,7 +194,7 @@ pub fn execute(
                 request.bearer_auth(&credential.password)
             };
         }
-        let result = (|| -> Result<(bool, String), String> { Ok(match request.send() {
+        let mut result = (|| -> Result<(bool, String), String> { Ok(match request.send() {
             Ok(mut response) => {
                 let status = response.status();
                 if matches!(status.as_u16(), 400 | 401 | 403 | 404 | 422) { return Err(format!("Thanos query failed (HTTP {}). Check the query, URL and configured Vault account.", status.as_u16())); }
@@ -194,6 +212,11 @@ pub fn execute(
             },
             Err(error) => (false, format!("Thanos connection/timeout error; retrying ({}).", if error.is_timeout() { "timeout" } else { "connection" })),
         }) })().map_err(|error| format!("{log}\n{error}"))?;
+        // A Config edit during the request invalidates its response. The next
+        // poll must verify the current expression before it can pass the job.
+        if current_query().map_err(|error| format!("{log}\n{error}"))? != query {
+            result = (false, "Saved query changed during the request; verifying the latest Config next.".into());
+        }
         if log.len() > 48000 {
             log = format!("Thanos validation\nQuery: {query}\nEarlier attempts omitted.\n");
         }
@@ -364,6 +387,35 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn every_http_attempt_uses_latest_config_and_logs_the_actual_query() {
+        let (url, handle) = server(vec![("0", 200), ("1", 200)]);
+        let process = json!({"details":{"thanos":{"url":url,"timeout_seconds":5,"interval_seconds":1}}}).to_string();
+        let query = std::cell::RefCell::new("vector(0)".to_string());
+        let log = execute_with_query(&process, &[], &|_| {
+            *query.borrow_mut() = "vector(1)".into();
+        }, &|| Ok(query.borrow().clone()), &|| false).unwrap();
+        let requests = handle.join().unwrap();
+        assert!(requests[0].contains("query=vector%280%29"));
+        assert!(requests[1].contains("query=vector%281%29"));
+        assert!(log.contains("Query: vector(0)"));
+        assert!(log.contains("Query: vector(1)"));
+    }
+
+    #[test]
+    fn config_change_during_successful_request_requires_another_poll() {
+        let (url, handle) = server(vec![("1", 200), ("1", 200)]);
+        let process = json!({"details":{"thanos":{"url":url,"timeout_seconds":5,"interval_seconds":1}}}).to_string();
+        let reads = std::cell::Cell::new(0);
+        let log = execute_with_query(&process, &[], &|_| {}, &|| {
+            let count = reads.get(); reads.set(count + 1);
+            Ok(if count == 0 { "vector(1)" } else { "sum(vector(1))" }.into())
+        }, &|| false).unwrap();
+        assert_eq!(handle.join().unwrap().len(), 2);
+        assert!(log.contains("changed during the request"));
+        assert!(log.contains("Query: sum(vector(1))"));
+    }
+
     #[test]
     fn config_requires_explicit_valid_connection_and_polling() {
         let valid = json!({"url":"https://thanos.example.test","timeout_seconds":300,"interval_seconds":30});

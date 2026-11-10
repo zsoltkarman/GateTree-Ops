@@ -69,7 +69,7 @@ export function buildPlannerPlan(draft, processes, accounts, validationQueries =
       if (tokens.includes("DEPLOY_IMAGE_VERSION") && (!precedingDeploy || together)) throw new Error(`Step ${index + 1}: deployment image version requires a preceding Deploy step and Separate job per host.`);
       if (!config.details?.thanos?.url) throw new Error("Configure details.thanos in Deployments → Config before adding a Thanos Query step.");
       if (!validationQueries.some(query => query.id === step.validationQueryId)) throw new Error(`Step ${index + 1}: select a saved Thanos query. Add it in Deployments → Config → Thanos Queries first.`);
-      return { name: step.name.trim(), type, query: step.query.trim(), ...(expectedVersion ? { expected_version: expectedVersion } : {}) };
+      return { name: step.name.trim(), type, validation_query_id: step.validationQueryId, query: step.query.trim(), ...(expectedVersion ? { expected_version: expectedVersion } : {}) };
     }
     const extra = stepExtraVars(step, index);
     return { name: step.name.trim(), ...(Object.keys(extra).length ? { extra_vars: extra } : {}) };
@@ -95,6 +95,7 @@ export function plannerPlanYaml(plan) {
   for (const step of olam.steps) {
     lines.push(`      - name: ${q(step.name)}`);
     if (step.type === "thanos_query") lines.push(`        type: ${q(step.type)}`, `        query: ${q(step.query)}`);
+    if (step.validation_query_id) lines.push(`        validation_query_id: ${q(step.validation_query_id)}`);
     if (step.expected_version) lines.push(`        expected_version: ${q(step.expected_version)}`);
     if (step.extra_vars) lines.push(`        extra_vars: ${q(step.extra_vars)}`);
   }

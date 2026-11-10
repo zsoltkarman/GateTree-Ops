@@ -192,8 +192,10 @@ pub fn control_deployment_queue_item(
                 keepass_password.as_deref().map(String::as_str),
             )
             .map_err(|error| error.to_string())?;
-            agent_ipc::retry_job_with_report_recovery(
-                id.clone(), submission.credentials, action == "retry_unconfirmed_report",
+            let query_updates = submission.jobs.into_iter().filter(|job| job.driver == "thanos")
+                .filter_map(|job| job.payload.map(|payload| agent_ipc::ThanosQueryUpdate { job_id:job.id, payload })).collect();
+            agent_ipc::retry_job_with_thanos_queries(
+                id.clone(), submission.credentials, action == "retry_unconfirmed_report", query_updates,
             )
                 .map_err(|error| error.to_string())?;
         }

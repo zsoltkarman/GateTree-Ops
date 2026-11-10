@@ -36,3 +36,9 @@ test('copy preserves the Plan region concurrency setting',()=>{
  assert.equal(copiedPlannerDraft(source).parallelRegions,3);
  delete source.plan.inputs.olam.parallel_regions; assert.equal(copiedPlannerDraft(source).parallelRegions,1);
 });
+
+test('copy keeps the saved query identity even after Config text changes',()=>{
+ const source=sourcePlan();source.plan.inputs.olam.steps[1].validation_query_id='stable-query-id';
+ const d=copiedPlannerDraft(source);
+ assert.equal(d.steps[1].validationQueryId,'stable-query-id');
+});

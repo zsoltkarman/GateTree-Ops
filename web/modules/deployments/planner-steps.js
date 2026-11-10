@@ -12,6 +12,10 @@ export function mountPlannerSteps(root, { draft, onChange = () => {}, validation
   function render(focus) {
     const queries = validationQueries();
     for (const step of draft.steps) {
+      if (step.type === "thanos_query" && step.validationQueryId) {
+        const current = queries.find(query => query.id === step.validationQueryId);
+        step.query = current?.query ?? "";
+      }
       if (step.type === "thanos_query" && !step.validationQueryId && step.query) {
         step.validationQueryId = queries.find(query => query.query === step.query)?.id ?? "";
       }

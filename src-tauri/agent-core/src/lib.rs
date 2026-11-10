@@ -25,7 +25,7 @@ pub use ssh::{
     SshAuthentication, SshConnectRequest, SshHostKey, SshSessionStatus, SshTerminalChunk,
 };
 
-pub const PROTOCOL_VERSION: u16 = 22;
+pub const PROTOCOL_VERSION: u16 = 23;
 const ENDPOINT_FILE: &str = "agent-endpoint.json";
 const LOCK_FILE: &str = "agent.lock";
 const JOB_SETS_FILE: &str = "agent-job-sets.json";
@@ -61,6 +61,13 @@ pub struct AgentJobSetSubmission {
     pub jobs: Vec<AgentJobSubmission>,
     #[serde(default)]
     pub credentials: Vec<AgentCredential>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThanosQueryUpdate {
+    pub job_id: String,
+    pub payload: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,11 +179,14 @@ enum AgentAction {
         submission: AgentJobSetSubmission,
         restart: bool,
     },
+    RefreshThanosQueries { updates: Vec<ThanosQueryUpdate> },
     RetryJob {
         job_id: String,
         credentials: Vec<AgentCredential>,
         #[serde(default)]
         recover_unconfirmed_jira_report: bool,
+        #[serde(default)]
+        query_updates: Vec<ThanosQueryUpdate>,
     },
     SetJobEnabled {
         job_id: String,
@@ -551,6 +561,10 @@ pub fn submit_job_set(
     response_value(response, |response| response.job_set, "Agent job set")
 }
 
+pub fn refresh_thanos_queries(updates: Vec<ThanosQueryUpdate>) -> Result<(), AgentIpcError> {
+    simple_request(AgentAction::RefreshThanosQueries { updates })
+}
+
 pub fn retry_job(job_id: String, credentials: Vec<AgentCredential>) -> Result<(), AgentIpcError> {
     retry_job_with_report_recovery(job_id, credentials, false)
 }
@@ -560,10 +574,20 @@ pub fn retry_job_with_report_recovery(
     credentials: Vec<AgentCredential>,
     recover_unconfirmed_jira_report: bool,
 ) -> Result<(), AgentIpcError> {
+    retry_job_with_thanos_queries(job_id, credentials, recover_unconfirmed_jira_report, vec![])
+}
+
+pub fn retry_job_with_thanos_queries(
+    job_id: String,
+    credentials: Vec<AgentCredential>,
+    recover_unconfirmed_jira_report: bool,
+    query_updates: Vec<ThanosQueryUpdate>,
+) -> Result<(), AgentIpcError> {
     simple_request(AgentAction::RetryJob {
         job_id,
         credentials,
         recover_unconfirmed_jira_report,
+        query_updates,
     })
 }
 
@@ -634,6 +658,26 @@ struct JobSetManager {
 }
 
 impl JobSetManager {
+    fn retry_with_thanos_queries(&mut self, job_id: &str, credentials: Vec<AgentCredential>, recover_report: bool, updates: Vec<ThanosQueryUpdate>) -> Result<AgentJobSetStatus, AgentIpcError> {
+        let set = if recover_report { self.retry_unconfirmed_jira_report(job_id, credentials)? }
+            else { self.retry(job_id, credentials)? };
+        // The scheduler lock remains held until the refreshed payload is saved.
+        self.refresh_thanos_queries(updates)?;
+        Ok(self.job_sets.iter().find(|current| current.id == set.id).expect("retried job set").clone())
+    }
+
+    fn refresh_thanos_queries(&mut self, updates: Vec<ThanosQueryUpdate>) -> Result<(), AgentIpcError> {
+        for update in updates {
+            for set in &mut self.job_sets {
+                if let Some(job) = set.jobs.iter_mut().find(|job| job.id == update.job_id
+                    && job.driver == "thanos" && job.status != "completed") {
+                    job.payload = Some(update.payload.clone());
+                }
+            }
+        }
+        self.persist()
+    }
+
     fn load(path: PathBuf) -> Result<Self, AgentIpcError> {
         let mut job_sets: Vec<AgentJobSetStatus> = match fs::read(&path) {
             Ok(contents) => serde_json::from_slice(&contents)?,
@@ -1578,18 +1622,23 @@ fn serve_requests(
                                 Err(error) => (error_response(&error.to_string()), false),
                             }
                         }
+                        AgentAction::RefreshThanosQueries { updates } => {
+                            let result = job_sets.lock().expect("job set lock").refresh_thanos_queries(updates);
+                            match result {
+                                Ok(()) => (success_response(), false),
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
                         AgentAction::RetryJob {
                             job_id,
                             credentials,
                             recover_unconfirmed_jira_report,
+                            query_updates,
                         } => {
                             let retried = {
                                 let mut manager = job_sets.lock().expect("job set lock");
-                                let result = if recover_unconfirmed_jira_report {
-                                    manager.retry_unconfirmed_jira_report(&job_id, credentials)
-                                } else {
-                                    manager.retry(&job_id, credentials)
-                                };
+                                let result = manager.retry_with_thanos_queries(
+                                    &job_id, credentials, recover_unconfirmed_jira_report, query_updates);
                                 result.map(|set| {
                                     let credentials = manager
                                         .credentials
@@ -2122,14 +2171,35 @@ fn run_jobs(
             };
             update(&report_context, &job, &credentials, &checkpoint, &on_output)
                 .map(drivers::DriverOutcome::Completed)
+        } else if job.driver == "thanos" && job.action == "query" {
+            drivers::thanos::execute_with_query(
+                &process_definition, &credentials, &on_output,
+                &|| {
+                    let manager = job_sets.lock().map_err(|_| "Agent job set lock failed.")?;
+                    let set = manager.job_sets.iter().find(|set| set.id == job_set_id)
+                        .ok_or("Thanos Plan is no longer available.")?;
+                    let current = set.jobs.iter().find(|active| active.id == job.id)
+                        .ok_or("Thanos job is no longer available.")?;
+                    let payload: serde_json::Value = serde_json::from_str(current.payload.as_deref().unwrap_or("{}"))
+                        .map_err(|_| "Invalid Thanos query payload.")?;
+                    if let Some(error) = payload["query_error"].as_str() { return Err(error.into()); }
+                    if payload["query_revision"].as_i64().is_none() {
+                        return Err("Refresh this Plan's saved Thanos query from Config before execution. Start or retry it from the application.".into());
+                    }
+                    let resolved = drivers::thanos_version::resolve(set, current)?;
+                    drivers::thanos::payload_query(&resolved)
+                },
+                &|| {
+                    let manager = job_sets.lock().expect("job set lock");
+                    manager.execution_generations.get(&job_set_id) != Some(&generation)
+                        || !manager.job_sets.iter().any(|set| set.id == job_set_id && set.status == "running")
+                },
+            ).map(drivers::DriverOutcome::Completed)
         } else {
-            let execution_job = if job.driver == "thanos" {
-                drivers::thanos_version::resolve(&report_context, &job)
-            } else { Ok(job.clone()) };
-            execution_job.and_then(|execution_job| drivers::execute(
+            drivers::execute(
                 &process_definition,
                 &plan_definition,
-                &execution_job,
+                &job,
                 &credentials,
                 &on_started,
                 &on_output,
@@ -2141,7 +2211,7 @@ fn run_jobs(
                             .iter()
                             .any(|set| set.id == job_set_id && set.status == "running")
                 },
-            ))
+            )
         };
         let mut manager = job_sets.lock().expect("job set lock");
         if manager.execution_generations.get(&job_set_id) != Some(&generation) {
@@ -2802,6 +2872,40 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn query_refresh_and_retry_use_latest_payload_without_redeploying_completed_host() {
+        let path = env::temp_dir().join(format!("gatetree-query-retry-{}.json", uuid::Uuid::new_v4()));
+        let mut manager = JobSetManager::load(path.clone()).unwrap();
+        let mut submission = olam_submission(&["deploy", "query"]);
+        submission.jobs[1].driver = "thanos".into();
+        submission.jobs[1].payload = Some(r#"{"query":"vector(0)"}"#.into());
+        manager.submit(submission, false).unwrap();
+        let set = &mut manager.job_sets[0];
+        set.status = "failed".into();
+        set.jobs[0].status = "completed".into();
+        set.jobs[0].log = "Completed deployment evidence".into();
+        set.jobs[0].deployment_job_id = Some(42);
+        set.jobs[1].status = "failed".into();
+        let deploy = serde_json::to_value(&set.jobs[0]).unwrap();
+        let deploy_id = set.jobs[0].id.clone();
+        let query_id = set.jobs[1].id.clone();
+        manager.credentials.insert("plan".into(), vec![]);
+        let fresh = r#"{"query":"vector(1)","query_revision":2}"#;
+        let retried = manager.retry_with_thanos_queries(&query_id, vec![], false, vec![
+            ThanosQueryUpdate {job_id:query_id.clone(),payload:fresh.into()},
+            ThanosQueryUpdate {job_id:deploy_id,payload:"{}".into()},
+        ]).unwrap();
+        assert_eq!(serde_json::to_value(&retried.jobs[0]).unwrap(), deploy);
+        assert_eq!(retried.jobs[1].status,"running");
+        assert_eq!(retried.jobs[1].payload.as_deref(),Some(fresh));
+        manager.job_sets[0].jobs[1].status = "completed".into();
+        manager.refresh_thanos_queries(vec![ThanosQueryUpdate {job_id:query_id,payload:"{}".into()}]).unwrap();
+        assert_eq!(manager.job_sets[0].jobs[1].payload.as_deref(),Some(fresh));
+        let persisted: Vec<AgentJobSetStatus> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted[0].jobs[1].payload.as_deref(),Some(fresh));
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -3944,6 +4048,7 @@ mod tests {
                 AgentAction::RetryJob {
                     recover_unconfirmed_jira_report: false,
                     job_id: "job-1".into(),
+                    query_updates: vec![],
                     credentials: vec![]
                 }
             )

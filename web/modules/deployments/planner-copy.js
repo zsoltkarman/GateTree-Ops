@@ -9,6 +9,7 @@ export function copiedPlannerDraft({ plan, planNumber, accountId = "" }) {
     const type = step.type || "deploy";
     if (!["deploy", "thanos_query"].includes(type)) throw new Error("This Plan contains an unsupported Planner step type.");
     const copy = { id: crypto.randomUUID(), name: step.name, type, query: step.query ?? "", expectedVersion: step.expected_version ?? "", extraVarsText: "" };
+    if (type === "thanos_query" && step.validation_query_id) copy.validationQueryId = step.validation_query_id;
     if (type === "deploy") {
       const extra = JSON.parse(JSON.stringify(step.extra_vars ?? {}));
       if (!extra || typeof extra !== "object" || Array.isArray(extra)) throw new Error("Deployment extra_vars must be a key-value object.");

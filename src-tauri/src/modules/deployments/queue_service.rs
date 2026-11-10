@@ -82,6 +82,8 @@ struct PlanStep {
     #[serde(default)]
     query: Option<String>,
     #[serde(default)]
+    validation_query_id: Option<String>,
+    #[serde(default)]
     expected_version: Option<String>,
     #[serde(default, rename = "extra_vars")]
     extra_vars: YamlValue,
@@ -98,6 +100,10 @@ struct JobDefinition {
 }
 
 impl QueueService {
+    pub(super) fn refresh_thanos_queries(state: &WorkspaceState, notify_agent: bool) -> Result<(), QueueError> {
+        super::live_queries::refresh(state, notify_agent)
+    }
+
     pub fn completed_plan_copy(state: &WorkspaceState, id: &str) -> Result<JsonValue, QueueError> {
         let (definition, status, plan_number): (String, String, i64) = state.with_connection(|connection| {
             connection.query_row("SELECT definition_yaml,status,plan_number FROM deployment_plans WHERE id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
@@ -385,6 +391,7 @@ impl QueueService {
         keepass_password: Option<&str>,
     ) -> Result<AgentJobSetSubmission, QueueError> {
         Self::require_unarchived(state, id, false)?;
+        Self::refresh_thanos_queries(state, true)?;
         state
             .with_connection(|connection| {
                 let plan = connection
@@ -414,7 +421,7 @@ impl QueueService {
                     "SELECT id, sequence, name, driver, action, target, details, payload_json, status = 'disabled'
                      FROM deployment_jobs WHERE plan_id = ?1 ORDER BY sequence",
                 )?;
-                let jobs = statement
+                let mut jobs = statement
                     .query_map([id], |row| {
                         Ok(AgentJobSubmission {
                             disabled: row.get(8)?,
@@ -429,6 +436,7 @@ impl QueueService {
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
+                super::live_queries::submission_queries(connection, &mut jobs, &plan_definition, &process_definition)?;
                 let credentials = resolve_agent_credentials(
                     connection,
                     &process_definition,
@@ -1373,7 +1381,7 @@ pub(super) fn validate_thanos_query_template(template: &str) -> Result<(), Strin
 // Placeholders are string contents, never raw PromQL. Escape using JSON string
 // rules, which are accepted by PromQL double-quoted strings. Reject use outside
 // such strings rather than allowing a version/site to change the expression.
-fn resolve_thanos_query(template: &str, region: Option<&str>, version: Option<&str>, host: Option<&str>) -> Result<String, QueueError> {
+pub(super) fn resolve_thanos_query(template: &str, region: Option<&str>, version: Option<&str>, host: Option<&str>) -> Result<String, QueueError> {
     let host_regex = host.map(|host| {
         let escaped: String = host.chars().flat_map(|c| {
             if ".+*?()|[]{}^$\\".contains(c) { vec!['\\', c] } else { vec![c] }
@@ -1450,7 +1458,9 @@ fn build_thanos_jobs(step: &PlanStep, targets: &OlamTargets, process: &JsonValue
             name: match host.or(region) { Some(target) => format!("{} · {target}", step.name.trim()), None => step.name.trim().into() },
             target: host.or(region).map(str::to_owned),
             details: "Thanos query validation pending".into(),
-            payload: Some(json!({"query":query}).to_string()),
+            payload: Some(json!({"query":query, "validation_query_id":step.validation_query_id,
+                "query_template":template, "query_name":step.name.trim(),
+                "query_context":{"region":region,"expected_version":version,"host":host,"preceding_deploy":preceding_deploy}}).to_string()),
             driver: "thanos".into(), action: "query".into(),
         })
     }).collect()
@@ -1851,7 +1861,7 @@ query: '(count(exporter_info{region="${DEPLOY_REGION}",version="${EXPECTED_VERSI
             let payload: JsonValue = serde_json::from_str(jobs[index].payload.as_ref().unwrap()).unwrap();
             assert!(payload["query"].as_str().unwrap().contains(&format!("region=\"{region}\"")));
             assert!(payload["query"].as_str().unwrap().contains("version=\"1.97.0\""));
-            assert!(!payload.to_string().contains("${"));
+            assert!(!payload["query"].as_str().unwrap().contains("${"));
         }
         assert!(jobs[..2].iter().all(|j| j.driver == "olam"));
         assert!(jobs[4..].iter().all(|j| j.driver == "olam"));
@@ -2979,4 +2989,14 @@ inputs:
         state.lock().expect("lock workspace");
         fs::remove_dir_all(directory).expect("remove test directory");
     }
+}
+
+// Reconstruct only query bindings from the frozen Plan and Process. Execution
+// statuses, credentials, deployment payloads and job identifiers are untouched.
+pub(super) fn thanos_bindings(definition: &str, process: &str) -> Result<Vec<(i64, String)>, QueueError> {
+    let input: PlanInput = serde_yaml::from_str(definition)?;
+    let process: JsonValue = serde_json::from_str(process)?;
+    Ok(generate_jobs(&input, &process)?.into_iter().enumerate()
+        .filter(|(_, job)| job.driver == "thanos")
+        .filter_map(|(i, job)| job.payload.map(|payload| (i as i64 + 1, payload))).collect())
 }

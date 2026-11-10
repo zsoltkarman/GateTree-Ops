@@ -11,7 +11,7 @@ fn fixture(url: &str, automatic: bool) -> AgentJobSetSubmission {
     ];
     for host in HOSTS {
         jobs.push(json!({"id":format!("deploy-{host}"),"sequence":jobs.len(),"name":"Deploy","driver":"olam","action":"deploy","target":host,"details":"","payload":json!({"ansible_limit":[host],"playbook_name":"exporter"}).to_string()}));
-        jobs.push(json!({"id":format!("query-{host}"),"sequence":jobs.len(),"name":"Thanos Query","driver":"thanos","action":"query","target":host,"details":"","payload":json!({"query":host}).to_string()}));
+        jobs.push(json!({"id":format!("query-{host}"),"sequence":jobs.len(),"name":"Thanos Query","driver":"thanos","action":"query","target":host,"details":"","payload":json!({"query":host,"query_revision":1}).to_string()}));
     }
     jobs.push(json!({"id":"after","sequence":jobs.len(),"name":"After","driver":"olam","action":"validate","target":url,"details":""}));
     serde_json::from_value(json!({

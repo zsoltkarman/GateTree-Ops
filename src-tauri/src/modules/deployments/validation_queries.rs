@@ -70,7 +70,12 @@ pub fn save_deployment_validation_query(
     state: State<'_, WorkspaceState>,
     query: ValidationQuery,
 ) -> Result<ValidationQuery, String> {
-    save(&state, query)
+    // Bind legacy Plans while their original template is still in the library.
+    super::live_queries::refresh(&state, false).map_err(|e| e.to_string())?;
+    let saved = save(&state, query)?;
+    super::live_queries::refresh(&state, true)
+        .map_err(|e| format!("Query saved, but Agent refresh failed: {e}"))?;
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -78,7 +83,10 @@ pub fn delete_deployment_validation_query(
     state: State<'_, WorkspaceState>,
     id: String,
 ) -> Result<(), String> {
-    delete(&state, &id)
+    super::live_queries::refresh(&state, false).map_err(|e| e.to_string())?;
+    delete(&state, &id)?;
+    super::live_queries::refresh(&state, true)
+        .map_err(|e| format!("Query deleted, but Agent refresh failed: {e}"))
 }
 
 #[cfg(test)]

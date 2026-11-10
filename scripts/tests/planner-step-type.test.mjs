@@ -43,7 +43,7 @@ test('switching step types shows only the applicable editor and preserves both d
 });
 
 
-test('saved query selection copies PromQL without overwriting expected version or following library edits',()=>{
+test('saved query selection copies PromQL and follows library edits without overwriting expected version',()=>{
  const queries=[{id:'q',name:'Exporter version',role:'exporter',query:'metric{version="${EXPECTED_VERSION}"}'}];
  const draft={steps:[{id:'one',name:'',type:'thanos_query',query:'',expectedVersion:'1.97.0'}]};const root=new Root();
  const dispose=mountPlannerSteps(root,{draft,validationQueries:()=>queries});
@@ -52,8 +52,9 @@ test('saved query selection copies PromQL without overwriting expected version o
  assert.equal(draft.steps[0].query,queries[0].query);
  assert.equal(draft.steps[0].name,'Exporter version');
  assert.equal(draft.steps[0].expectedVersion,'1.97.0');
- const frozen=draft.steps[0].query;queries[0].query='vector(0)';dispose.refresh();
- assert.equal(draft.steps[0].query,frozen);
+ queries[0].query='vector(0)';dispose.refresh();
+ assert.equal(draft.steps[0].query,'vector(0)');
+ assert.equal(draft.steps[0].expectedVersion,'1.97.0');
  assert.equal(root.articles[0].querySelector('[data-step-query]'),null);
  assert.ok(root.html.includes('data-step-query-preview'));assert.ok(root.html.includes('readonly'));
  assert.ok(!root.html.includes('Custom query'));

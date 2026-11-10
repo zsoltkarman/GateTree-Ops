@@ -6,6 +6,7 @@ mod queue_model;
 mod queue_service;
 mod service;
 mod validation_queries;
+mod live_queries;
 pub use validation_queries::{save_deployment_validation_query, delete_deployment_validation_query};
 
 pub use commands::*;
