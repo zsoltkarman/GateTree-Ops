@@ -13,7 +13,7 @@ test('source counters distinguish completed work, failures and missing configura
  assert.equal(sourceProgressLabel({state:'not_configured'}),'Not configured');
  assert.equal(sourceProgressLabel({state:'running',completed:3,total:11}),'Syncing 3/11');
 });
-test('the footer lists only active sync sources and keeps failures visible',()=>{
+test('the compact status bar lists active sync sources and retains failure details',()=>{
  const source=view.slice(view.indexOf('  function selectedSync()'),view.indexOf('  function updateSyncWidgets()'));
  const state={projectId:'p1',mode:'list',syncStatuses:[{projectId:'p1',scm:{state:'synced',completed:9,total:9},af:{state:'synced',completed:9,total:9},slaps:{state:'error',completed:1,total:4,errors:1,detail:'Scan failed <details>'},buildLogs:{state:'error',completed:1,total:4,errors:1,detail:'Access denied <details>'}}]};
  const html=new Function('state','e','sourceProgressLabel',source+'\nreturn syncResults();')(state,escape,sourceProgressLabel);
@@ -66,12 +66,14 @@ test('the complete inventory has an enabled Sync all projects button and disable
  state.projects=[];state.syncStatuses=[];render();assert.match(root.innerHTML,/data-hub-action="sync-inventory" disabled/);
 });
 
-test('inventory footer shows source results per project and keeps partial failures expanded',()=>{
+test('inventory status bar summarizes projects while keeping source details in a collapsed disclosure',()=>{
  const source=view.slice(view.indexOf('  function selectedSync()'),view.indexOf('  function updateSyncWidgets()'));
  const state={projectId:null,mode:'list',projects:[{id:'b',name:'Bravo'},{id:'a',name:'Alpha <x>'}],syncStatuses:[{projectId:'a',running:false,scm:{state:'synced',completed:2,total:2},slaps:{state:'error',completed:1,total:2,errors:1,detail:'Refresh authentication'},af:{state:'synced',completed:2,total:2}},{projectId:'b',running:true,percent:25}]};
  const html=new Function('state','options','e','sourceProgressLabel',source+'\nreturn syncResults();')(state,{},escape,sourceProgressLabel);
  assert(html.indexOf('Alpha &lt;x&gt;')<html.indexOf('Bravo'));
  assert.match(html,/Alpha &lt;x&gt; · Partial/);assert.match(html,/Refresh authentication/);
+ assert.match(html,/1\/2 finished/);assert.match(html,/1 with issues/);
+ assert.match(html,/data-hub-sync-details><summary>Details<\/summary>/);
  assert.equal((html.match(/<details class="image-hub-inventory-sync" open>/g)||[]).length,2);
  assert.equal((html.match(/class="image-hub-sync-source/g)||[]).length,6);
 });

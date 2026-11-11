@@ -139,9 +139,24 @@ export async function mountImageHubView(contentRoot, options = {}) {
   }
   function syncResults() {
     if (state.mode !== "list") return "";
-    if (state.projectId) return `<section class="image-hub-sync-status" data-hub-sync-status aria-label="Project sync status" aria-live="polite">${syncRows(selectedSync())}</section>`;
+    if (state.projectId) return `<section class="image-hub-sync-status" data-hub-sync-status aria-label="Project sync status" aria-live="polite">${syncContents()}</section>`;
     if (options.manageProjects || !state.syncStatuses.length) return "";
-    return `<section class="image-hub-sync-status" data-hub-sync-status aria-label="Inventory sync status" aria-live="polite">${inventorySyncRows()}</section>`;
+    return `<section class="image-hub-sync-status" data-hub-sync-status aria-label="Inventory sync status" aria-live="polite">${syncContents()}</section>`;
+  }
+  function syncSummary() {
+    if (state.projectId) return [["SCM","scm"],["SLAPS","slaps"],["AF","af"]].map(([label,key]) => {
+      const source = selectedSync()?.[key];
+      return `<span class="image-hub-sync-chip${source?.state === "error" ? " is-error" : ""}">${label}: ${e(sourceProgressLabel(source))}</span>`;
+    }).join("");
+    const projects = state.projects.map(project => ({project, status:state.syncStatuses.find(status=>status.projectId===project.id)}));
+    const finished = projects.filter(({status})=>status && !status.running).length;
+    const issues = projects.filter(({status})=>status?.error || ["scm","slaps","af"].some(key=>status?.[key]?.state === "error")).length;
+    const active = projects.find(({status})=>status?.running && ["scm","slaps","af"].some(key=>status[key]?.state === "running"));
+    const source = active && ["scm","slaps","af"].find(key=>active.status[key]?.state === "running");
+    return `<span>${finished}/${projects.length} finished</span>${issues ? `<span class="image-hub-sync-chip is-error">${issues} with issues</span>` : ""}${active ? `<span class="image-hub-sync-current" title="${e(active.project.name)}">${e(active.project.name)} · ${source.toUpperCase()}: ${e(sourceProgressLabel(active.status[source]))}</span>` : projects.some(({status})=>status?.running) ? '<span>Queued…</span>' : ""}`;
+  }
+  function syncContents() {
+    return `<strong class="image-hub-sync-title">Image sync</strong><div class="image-hub-sync-summary">${syncSummary()}</div><details class="image-hub-sync-details" data-hub-sync-details${state.syncDetailsOpen ? " open" : ""}><summary>Details</summary><div class="image-hub-sync-panel">${state.projectId ? syncRows(selectedSync()) : inventorySyncRows()}</div></details>`;
   }
   function inventorySyncRows() {
     return [...state.projects].sort((a,b)=>a.name.localeCompare(b.name)).map(project => {
@@ -152,8 +167,17 @@ export async function mountImageHubView(contentRoot, options = {}) {
   }
   function updateSyncWidgets() {
     const status = selectedSync();
-    const footer = root.querySelector("[data-hub-sync-status]");
-    if (footer) footer.innerHTML = state.projectId ? syncRows(status) : inventorySyncRows();
+    const bar = root.querySelector("[data-hub-sync-status]");
+    if (bar) {
+      const summary = bar.querySelector(".image-hub-sync-summary");
+      if (summary) summary.innerHTML = syncSummary();
+      const panel = bar.querySelector(".image-hub-sync-panel");
+      if (panel) {
+        const expanded = [...panel.querySelectorAll("details")].map(detail=>detail.open);
+        panel.innerHTML = state.projectId ? syncRows(status) : inventorySyncRows();
+        panel.querySelectorAll("details").forEach((detail,index)=>{ if (index < expanded.length) detail.open = expanded[index]; });
+      }
+    }
     const button = root.querySelector('[data-hub-action="sync-project"]');
     if (button) { button.textContent = syncButtonLabel(status); button.disabled = state.syncStatuses.some(status => status.running); }
     const allButton = root.querySelector('[data-hub-action="sync-inventory"]');
@@ -306,9 +330,9 @@ export async function mountImageHubView(contentRoot, options = {}) {
         <header class="image-hub-header"><div><h1>${options.manageProjects ? "Projects" : "Inventory"}</h1><p>${options.manageProjects ? "Project sources and local repository discovery" : selectedProject ? e(selectedProject.name) : selectedFolder ? e(folderPath(state.folderId)) : "All repositories across every folder and project"}</p></div>
           ${options.manageProjects ? '<div class="image-hub-toolbar"><button type="button" data-hub-action="add-project">+ Add project</button></div>' : selectedProject ? `<div class="image-hub-toolbar"><button data-hub-action="sync-project"${state.syncStatuses.some(status => status.running) ? " disabled" : ""}>${e(syncButtonLabel(selectedSync()))}</button></div>` : selectedFolder ? '<div class="image-hub-toolbar"><button data-hub-action="edit-folder">Edit folder</button><button data-hub-action="delete-folder">Delete folder</button></div>' : state.mode === "list" ? `<div class="image-hub-toolbar"><button type="button" data-hub-action="sync-inventory"${!state.projects.length || state.syncStatuses.some(status=>status.running) ? " disabled" : ""}>${e(inventorySyncButtonLabel(state.syncStatuses,state.projects))}</button></div>` : ""}
         </header>
+        ${syncResults()}
         <div class="image-hub-message${state.error ? " is-error" : ""}" role="${state.error ? "alert" : "status"}"${state.message ? "" : " hidden"}>${e(state.message)}</div>
         ${state.mode === "security" ? securityView() : state.mode === "repository" ? repositoryForm() : state.mode === "folder" ? folderForm() : state.mode === "project" ? projectForm() : state.mode === "project-folder" ? projectFolderForm() : list()}
-        ${syncResults()}
       </section>
     </div>`;
     bind();
@@ -418,6 +442,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
     });
   }
   function bind() {
+    root.querySelector("[data-hub-sync-details]")?.addEventListener("toggle", event => { state.syncDetailsOpen = event.currentTarget.open; });
     bindReportLinks(); bindSecurityLinks();
     root.querySelectorAll("[data-hub-filter]").forEach(control => {
       const update = () => {

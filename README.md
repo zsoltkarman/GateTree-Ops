@@ -230,8 +230,9 @@ subfolders), project and type filters. Sort by folder/repository or repository
 name. Project source settings and add/edit actions live in Config; selecting a
 project in Inventory filters the list and retains its Sync Project action. The full
 inventory also offers **Sync all projects**: one native background batch processes
-all configured projects in order, with an overall percentage and per-project
-SCM/SLAPS/AF results below the list. A project failure does not skip the remaining
+all configured projects in order, with an overall percentage. A compact status
+bar above the list shows finished projects, issues and the active project/source;
+**Details** opens the per-project SCM/SLAPS/AF results. A project failure does not skip the remaining
 projects. Navigation can change while the batch continues; concurrent syncs are
 blocked until it finishes.
 Each image initially shows only its Latest row. The arrow expands Ansible rows

@@ -94,7 +94,15 @@
 .image-hub-table .image-hub-security-icon.is-not_downloaded { color:var(--text-muted); }
 .image-hub-security-view .image-hub-message { margin:8px 0; }
 
-.image-hub-sync-status { margin:16px 26px; display:grid; gap:6px; font-size:12px; }
+.image-hub-sync-status { position:sticky; top:0; z-index:4; display:flex; align-items:center; gap:12px; min-height:36px; padding:0 26px; border-bottom:1px solid var(--border); background:var(--app-bg); font-size:11px; white-space:nowrap; }
+.image-hub-sync-title { flex:none; font-weight:600; }
+.image-hub-sync-summary { display:flex; align-items:center; gap:14px; flex:1; min-width:0; overflow-x:auto; scrollbar-width:none; color:var(--text-secondary); }
+.image-hub-sync-summary > span { flex:none; }
+.image-hub-sync-summary > .image-hub-sync-current { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.image-hub-sync-chip.is-error { color:#ef8585; }
+.image-hub-sync-details { flex:none; }
+.image-hub-sync-details > summary { cursor:pointer; color:var(--text-secondary); }
+.image-hub-sync-panel { position:absolute; top:100%; right:26px; box-sizing:border-box; width:min(680px,calc(100% - 52px)); max-height:min(60vh,480px); overflow:auto; padding:14px 16px; border:1px solid var(--border); border-radius:0 0 8px 8px; background:var(--surface); box-shadow:0 8px 24px #0002; white-space:normal; font-size:12px; }
 .image-hub-sync-source { display:grid; grid-template-columns:85px 150px minmax(0,1fr); gap:8px; align-items:start; color:var(--text-secondary); }
 .image-hub-sync-source strong { color:var(--text-primary); font-weight:500; }
 .image-hub-sync-source.is-error > span { color:#ef8585; }
