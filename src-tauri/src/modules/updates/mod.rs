@@ -8,7 +8,7 @@ use std::{
     },
     time::Duration,
 };
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[derive(Default)]
@@ -180,9 +180,14 @@ pub async fn install_app_update(
             .await
             .map_err(|e| format!("Could not download or verify the signed update: {e}"))?;
         progress("backing-up", downloaded, None);
+        // A workspace may live in a cloud-synced folder. Update backups must not
+        // depend on its provider accepting new directories or file writes.
+        let backup_root = app.path().app_local_data_dir()
+            .map_err(|e| format!("Could not locate the local update backup folder: {e}"))?
+            .join("workspace-backups");
         let backup = workspace
-            .backup_before_update()
-            .map_err(|e| e.to_string())?;
+            .backup_before_update(&backup_root)
+            .map_err(|e| format!("Backup to {} failed: {e}", backup_root.display()))?;
         if let Some(path) = backup.as_ref() {
             agent_ipc::backup_update_state(path).map_err(|e| e.to_string())?;
         }

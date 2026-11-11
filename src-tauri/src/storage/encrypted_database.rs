@@ -70,9 +70,20 @@ impl EncryptedDatabase {
         reason: &str,
     ) -> Result<PathBuf, StorageError> {
         let parent = path.parent().ok_or(StorageError::InvalidBackupPath)?;
-        let destination = parent
-            .join(".gatetree-ops-backups")
-            .join(format!("{reason}-{}", uuid::Uuid::new_v4()));
+        let name = path.file_name().ok_or(StorageError::InvalidBackupPath)?;
+        let salt = fs::read(path.with_file_name(format!("{}.salt", name.to_string_lossy())))?;
+        self.backup_to_root(path, raw_key, &salt, reason, &parent.join(".gatetree-ops-backups"))
+    }
+
+    pub(crate) fn backup_to_root(
+        &self,
+        path: &Path,
+        raw_key: &[u8],
+        salt: &[u8],
+        reason: &str,
+        backup_root: &Path,
+    ) -> Result<PathBuf, StorageError> {
+        let destination = backup_root.join(format!("{reason}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&destination)?;
         #[cfg(unix)]
         {
@@ -101,11 +112,7 @@ impl EncryptedDatabase {
                 }
             }
             drop(target);
-            let salt = path.with_file_name(format!("{}.salt", name.to_string_lossy()));
-            fs::copy(
-                &salt,
-                destination.join(salt.file_name().ok_or(StorageError::InvalidBackupPath)?),
-            )?;
+            fs::write(destination.join(format!("{}.salt", name.to_string_lossy())), salt)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -226,6 +233,38 @@ mod tests {
         drop(database);
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn local_update_backup_succeeds_when_workspace_backup_directory_is_unusable() {
+        let (root, path, key) = workspace();
+        let database = EncryptedDatabase::create_with_key(&path, &key).unwrap();
+        database.connection.execute("INSERT INTO workspace_metadata(key,value) VALUES ('backup-test','committed WAL data')",[]).unwrap();
+        // Simulate a workspace location that cannot create a backup directory.
+        let blocked = root.join(".gatetree-ops-backups");
+        fs::write(&blocked, b"unavailable workspace backup destination").unwrap();
+        let local_root = root.join("local-application-data/workspace-backups");
+        let salt = fs::read(root.join("gatetree-ops.sqlite.salt")).unwrap();
+        fs::remove_file(root.join("gatetree-ops.sqlite.salt")).unwrap();
+        let backup = database.backup_to_root(&path, &key, &salt, "before-update", &local_root).unwrap();
+        assert_eq!(backup.parent(), Some(local_root.as_path()));
+        assert!(blocked.is_file());
+        assert_eq!(fs::read(backup.join("gatetree-ops.sqlite.salt")).unwrap(), vec![42u8; 16]);
+        let bytes = fs::read(backup.join("gatetree-ops.sqlite")).unwrap();
+        assert!(!bytes.starts_with(b"SQLite format 3"));
+        let restored = EncryptedDatabase::open_with_key(&backup.join("gatetree-ops.sqlite"), &key).unwrap();
+        let value: String = restored.connection.query_row(
+            "SELECT value FROM workspace_metadata WHERE key='backup-test'", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(value, "committed WAL data");
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(fs::metadata(backup.join("gatetree-ops.sqlite.salt")).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        drop(restored);
+        drop(database);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn migration_backs_up_old_schema_once_and_refuses_downgrading_newer_schema() {
         let (root, path, key) = workspace();

@@ -189,6 +189,12 @@ administrator privileges. Active deployments and SSH sessions block installation
 encrypted backups protect workspace updates and schema migrations. Debug builds
 never replace themselves.
 
+Pre-update backups are saved under the application's local data folder in
+`workspace-backups`, including the encrypted database, matching salt and Agent
+state. Update backups use the salt retained when the workspace was unlocked,
+so a cloud provider evicting the salt file cannot block the salt-copy step.
+Migration backups remain beside the workspace.
+
 The **Build release** GitHub Actions workflow accepts a version and release notes,
 builds macOS universal DMG/updater and Windows x64 Setup EXE/MSI on native runners,
 and creates a **draft** in the separate public `GateTree-Ops-updates` repository.

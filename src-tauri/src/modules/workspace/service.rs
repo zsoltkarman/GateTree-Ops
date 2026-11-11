@@ -31,6 +31,7 @@ struct ActiveWorkspace {
     session_id: String,
     database: EncryptedDatabase,
     key: Zeroizing<Vec<u8>>,
+    salt: Vec<u8>,
     path: PathBuf,
     keepass: Option<KeePassSession>,
 }
@@ -56,6 +57,7 @@ impl WorkspaceState {
         database: EncryptedDatabase,
         key: Zeroizing<Vec<u8>>,
         path: PathBuf,
+        salt: Vec<u8>,
     ) -> Result<(), WorkspaceError> {
         let mut active = self
             .active
@@ -65,6 +67,7 @@ impl WorkspaceState {
             session_id: uuid::Uuid::new_v4().to_string(),
             database,
             key,
+            salt,
             path,
             keepass: None,
         });
@@ -121,7 +124,7 @@ impl WorkspaceState {
         Ok((active.path.clone(), Zeroizing::new(active.key.to_vec())))
     }
 
-    pub(crate) fn backup_before_update(&self) -> Result<Option<PathBuf>, WorkspaceError> {
+    pub(crate) fn backup_before_update(&self, backup_root: &Path) -> Result<Option<PathBuf>, WorkspaceError> {
         let active = self
             .active
             .lock()
@@ -131,7 +134,7 @@ impl WorkspaceState {
         };
         active
             .database
-            .backup(&database_path(&active.path), &active.key, "before-update")
+            .backup_to_root(&database_path(&active.path), &active.key, &active.salt, "before-update", backup_root)
             .map(Some)
             .map_err(WorkspaceError::from)
     }
@@ -144,11 +147,7 @@ impl WorkspaceState {
             .lock()
             .map_err(|_| WorkspaceError::StatePoisoned)?;
         let active = active.as_ref().ok_or(WorkspaceError::NotUnlocked)?;
-        let salt = fs::read(salt_path(&active.path))?;
-        if salt.len() != SALT_SIZE {
-            return Err(WorkspaceError::InvalidSalt);
-        }
-        Ok((Zeroizing::new(active.key.to_vec()), salt))
+        Ok((Zeroizing::new(active.key.to_vec()), active.salt.clone()))
     }
 
     pub(crate) fn session_id(&self) -> Result<String, WorkspaceError> {
@@ -245,7 +244,7 @@ impl WorkspaceService {
             restrict_file_permissions(&salt_file)?;
             restrict_file_permissions(&database_file)?;
             let cipher_version = database.cipher_version().to_owned();
-            state.replace(database, key, directory.clone())?;
+            state.replace(database, key, directory.clone(), salt.to_vec())?;
             Ok(WorkspaceSessionView {
                 path: inspection.path,
                 name: inspection.name,
@@ -271,10 +270,13 @@ impl WorkspaceService {
         }
         let directory = PathBuf::from(&inspection.path);
         let salt = fs::read(salt_path(&directory))?;
+        if salt.len() != SALT_SIZE {
+            return Err(WorkspaceError::InvalidSalt);
+        }
         let key = derive_key(password, &salt);
         let database = EncryptedDatabase::open_with_key(&database_path(&directory), &key)?;
         let cipher_version = database.cipher_version().to_owned();
-        state.replace(database, key, directory)?;
+        state.replace(database, key, directory, salt)?;
         Ok(WorkspaceSessionView {
             path: inspection.path,
             name: inspection.name,
@@ -295,10 +297,14 @@ impl WorkspaceService {
             return Err(WorkspaceError::DoesNotExist);
         }
         let directory = PathBuf::from(&inspection.path);
+        let salt = fs::read(salt_path(&directory))?;
+        if salt.len() != SALT_SIZE {
+            return Err(WorkspaceError::InvalidSalt);
+        }
         let key = Zeroizing::new(key);
         let database = EncryptedDatabase::open_with_key(&database_path(&directory), &key)?;
         let cipher_version = database.cipher_version().to_owned();
-        state.replace(database, key, directory)?;
+        state.replace(database, key, directory, salt)?;
         Ok(WorkspaceSessionView {
             path: inspection.path,
             name: inspection.name,
@@ -544,6 +550,36 @@ mod tests {
             Err(WorkspaceError::IncompleteWorkspace)
         ));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn update_backup_uses_cached_salt_after_the_workspace_salt_becomes_unavailable() {
+        let directory = test_directory();
+        let local_backups = test_directory();
+        let state = WorkspaceState::default();
+        let password = "correct horse battery staple";
+        let path = directory.to_string_lossy().into_owned();
+        WorkspaceService::create(&state, path.clone(), password).unwrap();
+        state.lock().unwrap();
+        WorkspaceService::unlock(&state, path, password).unwrap();
+        state.with_connection(|c| c.execute(
+            "INSERT INTO workspace_metadata(key,value) VALUES ('local-backup','preserved')", []
+        )).unwrap();
+        let original_salt = fs::read(salt_path(&directory)).unwrap();
+        fs::remove_file(salt_path(&directory)).unwrap();
+        let backup = state.backup_before_update(&local_backups).unwrap().unwrap();
+        assert_eq!(state.backup_encryption_material().unwrap().1, original_salt);
+        assert_eq!(fs::read(salt_path(&backup)).unwrap(), original_salt);
+        let restored = WorkspaceState::default();
+        WorkspaceService::unlock(&restored, backup.to_string_lossy().into_owned(), password).unwrap();
+        let value: String = restored.with_connection(|c| c.query_row(
+            "SELECT value FROM workspace_metadata WHERE key='local-backup'", [], |r| r.get(0)
+        )).unwrap();
+        assert_eq!(value, "preserved");
+        restored.lock().unwrap();
+        state.lock().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(local_backups).unwrap();
     }
 
     #[test]
