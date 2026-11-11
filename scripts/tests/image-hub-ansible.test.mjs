@@ -111,7 +111,7 @@ test('latest and expanded environment rows stay aligned with the combined invent
  assert.ok(rows[0][1].includes('Applications / Exporters'));assert.ok(rows[0][1].includes('Monitoring'));
 });
 
-test('Ansible AF versions are green for latest and red for different versions, with and without links',()=>{
+test('Ansible AF versions mark latest and different versions in every environment, with and without links',()=>{
  const {state,imageRows}=setup();state.expandedImages.add(repo.id);
  state.latestImages=[{repositoryId:repo.id,imageName:repo.name,status:'found',version:'1.0.2'}];
  for (const template of ['https://images.example.test/{repo}/{version}','']) {
