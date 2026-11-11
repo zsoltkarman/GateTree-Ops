@@ -13,7 +13,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-hdiutil attach "$1" -nobrowse -readonly -mountpoint "$mount_dir" -quiet
+if ! mount_output="$(hdiutil attach "$1" -nobrowse -readonly -mountpoint "$mount_dir" 2>&1)"; then
+  printf 'Could not mount the DMG for installer verification:\n%s\n' "$mount_output" >&2
+  exit 1
+fi
 agent_path="$(find "$mount_dir" -type f -path '*/GateTree-Ops.app/Contents/MacOS/gatetree-ops-agent' -print -quit)"
 if [[ -z "$agent_path" || ! -x "$agent_path" ]]; then
   echo "The DMG does not contain an executable GateTree-Ops Agent sidecar."

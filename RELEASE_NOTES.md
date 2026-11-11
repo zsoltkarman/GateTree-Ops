@@ -1,28 +1,7 @@
 GateTree-Ops
 
-- New SSH connections default to interactive terminal login. Existing connections offer Log in in terminal in their details and right-click menu; password and MFA prompts are visible from the start.
-
-- Slow SSH handshakes and authentication no longer block session and Plan status polling. Native SSH setup has a 15-second deadline covering authentication and shell setup; Agent timeouts now show a descriptive error instead of raw OS error 35.
-
-- Inactive Plans now have a Delete Plan button beside Focus in Agent activity. Deletion removes Queue and Agent history permanently; active Plans must be stopped first.
-
-- macOS update relaunch now waits for the previous GUI to terminate, refreshes the installed bundle registration, and opens that bundle normally instead of forcing a new instance. Dock preferences are preserved.
-
-- Installed releases allow one GUI instance; another launch focuses the existing window. Clicking the macOS Dock icon restores and focuses the main window. Debug builds can still run separately.
-
-- Jira report Retry can recover unconfirmed operations after the operator checks the issue and explicitly confirms resending missing operations. Confirmed uploads/comments and completed deployments are preserved. Connection failures before sending are retryable directly.
-
-- Agent health checks remain responsive during SSH connection setup. A timed-out or disconnected GUI request no longer stops the Agent.
-
-- Per-Plan Approve all can be enabled or revoked while queued or running. Validation still runs; revoking restores manual approval for upcoming deployments without interrupting an approved deployment.
-
-- Configurable deployment workflows with validation, operator approval, deployment and Jira/CX reports with compressed log attachments.
-- Live deployment status and job logs, individual job disabling, and restarting stopped Plans from the beginning.
-- Global search with a compact result table, full folder paths and a side preview.
-- Connection quick launcher, independent SSH session tabs, local terminal themes and inherited KeePass account settings.
-- Queue navigation shows each Plan's status. Completed deployments leave the Agent activity list while remaining available in the Queue.
-- Signed automatic updates for installed releases, encrypted workspace backups and per-user Windows setup.
-- Fixed startup with an empty Quick Launcher after workspace authentication. Missing update feeds and workspace import I/O errors now show clearer recovery guidance.
-- Updates now accept writable system installation folders, including /Applications, and immediately show progress or an explicit failure.
+- Release packaging now reports DMG mount failures instead of stopping silently after creating the installer.
+- New releases require updated release notes describing the fixes and changes in that release.
+- Resuming an upload uses the notes saved with that package, so later source changes cannot replace its release notes.
 
 The GUI and Agent update together. Finish or stop active deployments and close SSH sessions before installing an update.

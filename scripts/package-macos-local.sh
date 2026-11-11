@@ -43,6 +43,7 @@ codesign --force --sign "$identity" --timestamp "$dmg"
 codesign --verify --strict "$dmg"
 "$repo_dir/scripts/verify-macos-installer.sh" "$dmg"
 cp "$build_dir/build-info.json" "$output/"
+cp "$build_dir/RELEASE_NOTES.md" "$output/RELEASE_NOTES.md"
 python3 - "$output/build-info.json" "$host_target" <<'PY'
 import json,sys
 from pathlib import Path

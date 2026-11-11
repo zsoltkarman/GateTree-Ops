@@ -38,7 +38,7 @@ def package(app, output, root):
         archive.unlink(missing_ok=True)
         raise ValueError('Updater signing failed. Check the local key and TAURI_SIGNING_PRIVATE_KEY_PASSWORD.')
     subprocess.run(['python3', str(root / 'scripts/create-update-manifest.py'), str(output), '--version', info['version'],
-                    '--platform', 'macos-' + ('aarch64' if expected == 'arm64' else 'x86_64'), '--notes-file', str(root / 'RELEASE_NOTES.md')], check=True)
+                    '--platform', 'macos-' + ('aarch64' if expected == 'arm64' else 'x86_64'), '--notes-file', str(output / 'RELEASE_NOTES.md')], check=True)
     print('Created signed native Mac updater archive and latest.json.')
 
 

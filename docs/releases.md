@@ -19,7 +19,11 @@ the first release is uploaded or published; GitHub needs a commit for release ta
 ```
 
 `--upload-only` resumes an existing local package without rebuilding or committing/pushing
-the current source checkout.
+the current source checkout. It uses `RELEASE_NOTES.md` frozen inside that package,
+not the current checkout's notes. Update the source `RELEASE_NOTES.md` whenever a
+fix or user-visible change is made; describe only changes since the previous
+release. The launcher refuses a new release if the notes are unchanged from the
+previous release source commit.
 Publishing is the default; `--draft` uploads for review instead. Published versions cannot be
 overwritten. Only the DMG, SHA-256 checksum, signed updater archive, build metadata,
 release notes and `latest.json` are uploaded to the binary updates repository. Source is

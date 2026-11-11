@@ -25,6 +25,7 @@ class ReleaseLauncherTests(unittest.TestCase):
         (repo / 'src-tauri/tauri.conf.json').write_text('{"version":"0.1.15"}')
         assets = repo / 'dist/local/0.1.16'
         assets.mkdir(parents=True)
+        (assets / 'RELEASE_NOTES.md').write_text('Fixes frozen with this package')
         name = 'GateTree-Ops-0.1.16-aarch64-apple-darwin.dmg'
         dmg = assets / name
         dmg.write_bytes(b'local dmg fixture')
@@ -86,6 +87,21 @@ if args[:2]==['release','view']:print('https://github.com/zsoltkarman/GateTree-O
             self.assertIn('--draft=false', publish)
             self.assertIn('--latest', publish)
             self.assertEqual(set(json.loads((assets / 'latest.json').read_text())['platforms']), {'darwin-aarch64'})
+            self.assertEqual(json.loads((assets / 'latest.json').read_text())['notes'], 'Fixes frozen with this package')
+
+    def test_reusing_previous_release_notes_stops_before_build_or_source_push(self):
+        with tempfile.TemporaryDirectory() as folder:
+            repo, _, log, env = self.fixture(Path(folder))
+            self.configure_build(folder, repo)
+            subprocess.run(['git','add','.'],cwd=repo,check=True)
+            subprocess.run(['git','commit','-qm','Release v0.1.16: synchronize source'],cwd=repo,check=True)
+            (repo/'fix.txt').write_text('new fix without updated notes')
+            result = self.run_script(repo,env,'--version','0.1.17')
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('unchanged since the previous release',result.stderr)
+            self.assertFalse((repo/'dist/local/0.1.17').exists())
+            calls=[json.loads(line) for line in log.read_text().splitlines()]
+            self.assertFalse(any(c[:1]==['release'] for c in calls))
 
     def test_corrupt_package_and_published_version_never_write_github(self):
         for state in ['', 'false']:

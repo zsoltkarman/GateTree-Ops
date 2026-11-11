@@ -70,6 +70,18 @@ existing="$(gh api "repos/$repo/releases?per_page=100" --paginate --jq '.[] | [.
 [[ "$existing" != false ]] || { echo 'This version is already published. Use a higher version.' >&2; exit 1; }
 if ! $upload_only; then
   [[ ! -e "$assets" && -z "$existing" ]] || { echo 'Package/draft exists. Use --upload-only or choose another version.' >&2; exit 1; }
+  python3 - "$root_dir" <<'PY'
+from pathlib import Path
+import subprocess,sys
+root=Path(sys.argv[1]);notes=(root/'RELEASE_NOTES.md').read_text().strip()
+if not notes:
+    sys.exit('Write release-specific fixes in RELEASE_NOTES.md before releasing.')
+previous=subprocess.check_output(['git','log','-1','--format=%H','--grep=^Release v[0-9].*: synchronize source$'],cwd=root,text=True).strip()
+if previous:
+    old=subprocess.run(['git','show',previous+':RELEASE_NOTES.md'],cwd=root,capture_output=True,text=True)
+    if old.returncode==0 and old.stdout.strip()==notes:
+        sys.exit('RELEASE_NOTES.md is unchanged since the previous release. Describe the fixes in this release before building or publishing.')
+PY
   node --test scripts/tests/*.test.mjs
   python3 -m unittest discover -s scripts/tests -p 'test_*.py'
   cargo test --locked --manifest-path src-tauri/Cargo.toml -p gatetree-ops -p gatetree-ops-agent-core --lib
@@ -108,11 +120,13 @@ case "$target" in
   aarch64-apple-darwin) platform=macos-aarch64 ;;
   x86_64-apple-darwin) platform=macos-x86_64 ;;
 esac
-python3 "$root_dir/scripts/create-update-manifest.py" "$assets" --version "$version" --platform "$platform" --notes-file "$root_dir/RELEASE_NOTES.md"
+release_notes="$assets/RELEASE_NOTES.md"
+[[ -s "$release_notes" ]] || { echo 'Missing packaged release notes. Restore RELEASE_NOTES.md for this package before resuming its upload.' >&2; exit 1; }
+python3 "$root_dir/scripts/create-update-manifest.py" "$assets" --version "$version" --platform "$platform" --notes-file "$release_notes"
 files+=("$assets"/*.app.tar.gz "$assets"/*.app.tar.gz.sig "$assets/latest.json")
 notes="$(mktemp)"
 trap 'if [[ -n ${notes:-} ]]; then rm -f "$notes"; fi' EXIT
-cat "$root_dir/RELEASE_NOTES.md" > "$notes"
+cat "$release_notes" > "$notes"
 cat >> "$notes" <<'NOTES'
 
 Local macOS package, Developer ID signed but not notarized. Install under
