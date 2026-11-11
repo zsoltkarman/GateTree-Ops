@@ -74,6 +74,11 @@ and interactive from the start. For an existing connection, choose **Log in in
 terminal** in its details or right-click menu to save this mode and connect.
 KeePass supplies the username in this mode; password and MFA responses are
 entered in the terminal. Embedded SSH remains available in the connection editor.
+Terminal login allows only keyboard-interactive and password authentication; it
+does not offer SSH keys, certificates or agent identities. It permits one password
+prompt per authentication method and one connection attempt. Embedded
+keyboard-interactive login sends its stored password to at most one prompt;
+additional prompts require interactive Terminal login.
 
 SSH host keys are stored in the encrypted workspace by host and port. GateTree-Ops
 marks first-seen keys as unknown and blocks silent replacement when a trusted

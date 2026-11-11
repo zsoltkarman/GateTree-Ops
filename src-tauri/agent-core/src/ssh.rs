@@ -293,6 +293,20 @@ impl SshSessionManager {
             "-o",
             "BatchMode=no",
             "-o",
+            "PreferredAuthentications=keyboard-interactive,password",
+            "-o",
+            "PubkeyAuthentication=no",
+            "-o",
+            "HostbasedAuthentication=no",
+            "-o",
+            "GSSAPIAuthentication=no",
+            "-o",
+            "IdentityAgent=none",
+            "-o",
+            "NumberOfPasswordPrompts=1",
+            "-o",
+            "ConnectionAttempts=1",
+            "-o",
             "ServerAliveInterval=20",
             "-o",
             "ServerAliveCountMax=3",
@@ -574,12 +588,20 @@ async fn authenticate(
         }
         SshAuthentication::KeyboardInteractive { response } => {
             let response = Zeroizing::new(response);
+            let mut response_sent = false;
             let mut result = handle
                 .authenticate_keyboard_interactive_start(username, None::<String>)
                 .await?;
             for _ in 0..4 {
                 result = match result {
                     KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                        // A stored password must not be replayed at a retry or MFA prompt.
+                        if !prompts.is_empty() {
+                            if response_sent || prompts.len() != 1 {
+                                return Err(SshManagerError::TooManyAuthenticationPrompts);
+                            }
+                            response_sent = true;
+                        }
                         handle
                             .authenticate_keyboard_interactive_respond(
                                 prompts.into_iter().map(|_| response.to_string()).collect(),
@@ -765,7 +787,7 @@ pub(crate) enum SshManagerError {
     AuthenticationFailed,
     #[error("SSH agent authentication is unavailable: {0}")]
     SshAgentUnavailable(String),
-    #[error("SSH keyboard-interactive authentication sent too many prompts")]
+    #[error("SSH requested additional authentication responses. Use Terminal login to answer password or MFA prompts interactively; the saved password was not sent again.")]
     TooManyAuthenticationPrompts,
     #[error("SSH connection setup timed out after 15 seconds (handshake, authentication or shell setup)")]
     Timeout,
@@ -790,7 +812,7 @@ mod tests {
     use std::{
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc,
         },
         thread,
@@ -809,10 +831,29 @@ mod tests {
     const PASSWORD: &str = "test-only-password";
 
     #[derive(Clone)]
-    struct TestHandler { auth_delay: Duration }
+    struct TestHandler {
+        auth_delay: Duration,
+        keyboard_responses: Arc<AtomicUsize>,
+    }
 
     impl server::Handler for TestHandler {
         type Error = russh::Error;
+
+        async fn auth_keyboard_interactive<'a>(
+            &'a mut self,
+            _user: &str,
+            _submethods: &str,
+            response: Option<server::Response<'a>>,
+        ) -> Result<server::Auth, Self::Error> {
+            if response.is_some() {
+                self.keyboard_responses.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(server::Auth::Partial {
+                name: "Login".into(),
+                instructions: "".into(),
+                prompts: vec![("Password: ".into(), false)].into(),
+            })
+        }
 
         async fn auth_password(
             &mut self,
@@ -875,6 +916,7 @@ mod tests {
     struct TestServer {
         address: std::net::SocketAddr,
         public_key: String,
+        keyboard_responses: Arc<AtomicUsize>,
         stop: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
     }
@@ -887,6 +929,8 @@ mod tests {
         fn start_with_auth_delay(auth_delay: Duration) -> Self {
             let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
             let public_key = host_key.public_key().to_openssh().unwrap();
+            let keyboard_responses = Arc::new(AtomicUsize::new(0));
+            let server_keyboard_responses = Arc::clone(&keyboard_responses);
             let stop = Arc::new(AtomicBool::new(false));
             let server_stop = Arc::clone(&stop);
             let (address_tx, address_rx) = mpsc::sync_channel(1);
@@ -906,9 +950,10 @@ mod tests {
                             tokio::time::timeout(Duration::from_millis(50), listener.accept()).await
                         {
                             let config = Arc::clone(&config);
+                            let keyboard_responses = Arc::clone(&server_keyboard_responses);
                             tokio::spawn(async move {
                                 if let Ok(session) =
-                                    server::run_stream(config, socket, TestHandler { auth_delay }).await
+                                    server::run_stream(config, socket, TestHandler { auth_delay, keyboard_responses }).await
                                 {
                                     let _ = session.await;
                                 }
@@ -920,6 +965,7 @@ mod tests {
             Self {
                 address: address_rx.recv().unwrap(),
                 public_key,
+                keyboard_responses,
                 stop,
                 thread: Some(thread),
             }
@@ -933,6 +979,53 @@ mod tests {
                 thread.join().unwrap();
             }
         }
+    }
+
+    #[test]
+    fn repeated_keyboard_challenge_does_not_replay_the_stored_password() {
+        let server = TestServer::start();
+        let manager = SshSessionManager::new().unwrap();
+        let result = manager.connect(SshConnectRequest {
+            connection_id: "repeat-prompt".into(), name: "Repeated prompt".into(),
+            host: server.address.ip().to_string(), port: server.address.port(),
+            username: USERNAME.into(),
+            authentication: SshAuthentication::KeyboardInteractive { response: PASSWORD.into() },
+            trusted_host_key: server.public_key.clone(), columns: 80, rows: 24,
+        });
+        assert!(matches!(result, Err(SshManagerError::TooManyAuthenticationPrompts)));
+        assert_eq!(server.keyboard_responses.load(Ordering::SeqCst), 1);
+        assert!(manager.list().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_login_effective_openssh_config_disables_key_authentication() {
+        let manager = SshSessionManager::new().unwrap();
+        let mut command = CommandBuilder::new(openssh_executable());
+        // -G prints the effective configuration and exits without connecting.
+        command.args(["-G", "-F", "/dev/null"]);
+        let session = manager.connect_openssh_with_command(SshConnectRequest {
+            connection_id: "config-probe".into(), name: "Configuration".into(),
+            host: "unused.test".into(), port: 22, username: "test-user".into(),
+            authentication: SshAuthentication::OpenSsh, trusted_host_key: String::new(),
+            columns: 80, rows: 24,
+        }, command).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let output = loop {
+            let chunk = manager.read_terminal(&session.id, None, 65536).unwrap();
+            if chunk.closed { break String::from_utf8_lossy(&chunk.data).replace('\r', ""); }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        };
+        for expected in [
+            "preferredauthentications keyboard-interactive,password",
+            "pubkeyauthentication false", "hostbasedauthentication no",
+            "gssapiauthentication no", "identityagent none",
+            "numberofpasswordprompts 1", "connectionattempts 1",
+        ] {
+            assert!(output.lines().any(|line| line == expected), "Missing {expected}: {output}");
+        }
+        manager.disconnect(&session.id).unwrap();
     }
 
     #[test]
