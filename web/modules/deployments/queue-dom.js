@@ -3,7 +3,7 @@
 function key(node) {
   if (node.nodeType !== 1) return null;
   const data = node.dataset;
-  for (const name of ["planBatch", "planGroup", "jobGroup", "jobItem", "jobRow", "infoPanel", "queueLog", "togglePlan", "duplicatePlan", "archivePlan", "archivedPlan", "info", "copyPlan", "savePlan", "deletePlan", "planPayload", "resizeQueueColumn", "action"]) {
+  for (const name of ["planBatch", "planGroup", "jobGroup", "jobItem", "jobRow", "sshJob", "infoPanel", "queueLog", "togglePlan", "duplicatePlan", "archivePlan", "archivedPlan", "info", "copyPlan", "savePlan", "deletePlan", "planPayload", "resizeQueueColumn", "action"]) {
     if (data[name] !== undefined) return `${name}:${data[name]}`;
   }
   if (data.controlJob || data.controlPlan) {

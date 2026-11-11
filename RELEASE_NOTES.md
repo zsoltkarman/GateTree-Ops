@@ -1,7 +1,6 @@
 GateTree-Ops
 
-- Release packaging now reports DMG mount failures instead of stopping silently after creating the installer.
-- New releases require updated release notes describing the fixes and changes in that release.
-- Resuming an upload uses the notes saved with that package, so later source changes cannot replace its release notes.
+- Deployment rows now have an SSH terminal icon beside the target host. It asks for a username in an empty field and opens a separate GT terminal tab while the deployment continues.
+- Deployment SSH uses interactive password/MFA login without reusing deployment or KeePass credentials, offering SSH keys, or creating saved Connections.
 
 The GUI and Agent update together. Finish or stop active deployments and close SSH sessions before installing an update.

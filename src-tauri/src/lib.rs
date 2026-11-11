@@ -4,7 +4,7 @@ mod platform;
 mod storage;
 
 use modules::agent::{
-    agent_status, connect_agent_ssh_connection, connect_agent_ssh_with_keepass,
+    agent_status, connect_agent_deployment_ssh, connect_agent_ssh_connection, connect_agent_ssh_with_keepass,
     delete_agent_activity, disconnect_agent_ssh_session, focus_url_activity,
     forget_agent_ssh_host_key, inspect_agent_ssh_host_key, kill_agent, list_agent_activity,
     list_agent_job_sets, list_agent_ssh_sessions, open_url_connection, read_agent_ssh_terminal,
@@ -166,6 +166,7 @@ pub fn run() {
             list_agent_ssh_sessions,
             list_agent_job_sets,
             connect_agent_ssh_connection,
+            connect_agent_deployment_ssh,
             connect_agent_ssh_with_keepass,
             disconnect_agent_ssh_session,
             read_agent_ssh_terminal,

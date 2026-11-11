@@ -67,6 +67,10 @@ New SSH connections prompt for a username in an empty field, including local
 OpenSSH connections. OpenSSH receives that explicit username and never falls
 back to the local operating-system account. **Close** disconnects the SSH session
 and closes the terminal; **Detach** keeps the session open in a separate window.
+Deployment rows also provide an SSH terminal icon beside the target host. It opens
+a separate GT terminal tab after asking for a username in an empty field, without
+using the deployment/KeePass account or creating a saved Connection. The deployment
+continues independently; password and MFA prompts appear in the terminal.
 
 New SSH connections default to **Terminal login**, which opens the terminal
 before authentication so password, MFA and SSH configuration prompts are visible

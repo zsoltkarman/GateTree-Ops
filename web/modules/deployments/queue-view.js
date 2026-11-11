@@ -4,11 +4,12 @@ import { mountQueueColumns } from "./queue-columns.js";
 import { emptyPlannerDraft, mountPlannerBuilder } from "./planner-builder.js";
 import { reviewDeploymentApproval } from "./approval-dialog.js";
 import { ensureAgentCredentials } from "../agent/credential-recovery.js";
+import { connectDeploymentHostInTerminal } from "../connections/connections-view.js";
 import { escapeHtml } from "../../shared/ui.js";
 import { getCompletedPlanCopy, controlDeploymentQueueItem, deleteDeploymentPlan, archiveDeploymentPlan, getDeploymentQueueLog, getDeploymentQueue, updateDeploymentPlan } from "./queue-api.js";
 
-export async function mountDeploymentQueueView(root, detail = {}, { onQueueChange = () => {} } = {}) {
-  const state = { archiveView: Boolean(detail.archived), plans: [], selectedId: detail.planId ?? null, expandedPlans: new Set(detail.planId ? [detail.planId] : []), adding: Boolean(detail.new), plannerDraft: emptyPlannerDraft(), disposeBuilder: null, message: "", error: false, busyKey: null, infoKey: null, onQueueChange, mountId: crypto.randomUUID() };
+export async function mountDeploymentQueueView(root, detail = {}, { onQueueChange = () => {}, onOpenSsh = () => {} } = {}) {
+  const state = { archiveView: Boolean(detail.archived), plans: [], selectedId: detail.planId ?? null, expandedPlans: new Set(detail.planId ? [detail.planId] : []), adding: Boolean(detail.new), plannerDraft: emptyPlannerDraft(), disposeBuilder: null, message: "", error: false, busyKey: null, infoKey: null, onQueueChange, onOpenSsh, mountId: crypto.randomUUID() };
   root.dataset.queueMountId = state.mountId;
   root.innerHTML = '<div class="deployment-config-loading">Loading Queue…</div>';
   try {
@@ -203,8 +204,9 @@ function jobMarkup(plan, job, index, groupKey = null, collapsed = false) {
   const blocked = plan.archived || job.status === "disabled" || !["stop", "approve"].includes(jobAction) && (previousIncomplete || !retryPair && parallel && (["running", "awaiting_approval"].includes(plan.status) || job.status === "completed"));
   const controlLabel = retryPair ? "Restart deploy + Thanos" : `${actionLabel(jobAction)} Job`;
   const blockedTitle = plan.archived ? "Archived Plan is read-only" : job.status === "disabled" ? "Enable this job before starting it" : "Waiting for previous enabled jobs to complete";
+  const sshHost = ["olam", "container"].includes(job.driver) && job.action === "deploy" && /^[a-z0-9:][a-z0-9.:\-]*$/i.test(job.target || "");
   return `<div class="queue-job-item" data-job-item="${escapeHtml(job.id)}"${groupKey ? ` data-job-group-membership="${escapeHtml(groupKey)}"` : ""}${collapsed ? " hidden" : ""}><div data-job-row="${escapeHtml(job.id)}" class="queue-job-row${job.status === "disabled" ? " is-disabled" : ""}">
-      <span>${job.sequence}</span><strong>${escapeHtml(job.driver === "thanos" ? "Thanos Query" : job.name)}</strong><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code><span class="queue-job-details" title="${escapeHtml(job.details)}">${jobDetailsMarkup(retryPair ? `${job.details} · Thanos validation failed` : job.status === "disabled" ? "Skipped during execution" : job.details)}</span><span class="queue-status is-${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>
+      <span>${job.sequence}</span><strong>${escapeHtml(job.driver === "thanos" ? "Thanos Query" : job.name)}</strong><span class="queue-job-target"><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code>${sshHost ? `<button class="queue-host-ssh" data-ssh-job="${escapeHtml(job.id)}" title="SSH to ${escapeHtml(job.target)}" aria-label="SSH to ${escapeHtml(job.target)}">${icon("terminal")}</button>` : ""}</span><span class="queue-job-details" title="${escapeHtml(job.details)}">${jobDetailsMarkup(retryPair ? `${job.details} · Thanos validation failed` : job.status === "disabled" ? "Skipped during execution" : job.details)}</span><span class="queue-status is-${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>
       <div class="queue-row-actions">
         <button data-control-job="${escapeHtml(job.id)}" data-control-action="${job.status === "disabled" ? "enable" : "disable"}" title="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-label="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-pressed="${job.status === "disabled"}" ${!plan.archived && ["queued", "stopped", "disabled"].includes(job.status) ? "" : "disabled"}>${icon(job.status === "disabled" ? "enable" : "disable")}</button>
         <button data-control-job="${escapeHtml(job.id)}" data-control-action="${jobAction}" title="${blocked ? blockedTitle : controlLabel}" aria-label="${controlLabel}" ${blocked ? "disabled" : ""}>${icon(jobAction)}</button>
@@ -248,6 +250,18 @@ function jobLogMarkup(job) {
 function bindQueue(root, state) {
   if (!state.disposeColumns) state.disposeColumns = mountQueueColumns(root, { onResizing: value => { state.resizingColumns = value; } });
   else state.disposeColumns.refresh?.();
+  newQueueControls(root, state, "[data-ssh-job]").forEach(button => button.addEventListener("click", async () => {
+    if (state.openingSsh) return;
+    const job = state.plans.flatMap(plan => plan.jobs).find(job => job.id === button.dataset.sshJob);
+    if (!job) return;
+    state.openingSsh = true; button.disabled = true;
+    try {
+      const session = await connectDeploymentHostInTerminal(job);
+      if (session) state.onOpenSsh(session);
+    } catch (cause) {
+      state.message = String(cause); state.error = true; render(root, state);
+    } finally { state.openingSsh = false; button.disabled = false; }
+  }));
   newQueueControls(root, state, "[data-job-group]").forEach(button => button.addEventListener("click", () => {
     const key = button.dataset.jobGroup;
     const expanded = !jobGroupExpanded(state, key);
@@ -529,6 +543,7 @@ async function copyText(value) {
 
 function icon(name) {
   const paths = {
+    terminal: "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='m7 9 3 3-3 3M13 15h4'/>",
     chevron: "<path d='m9 5 7 7-7 7'/>",
     disable: "<circle cx='12' cy='12' r='9'/><path d='m6 6 12 12'/>",
     enable: "<circle cx='12' cy='12' r='9'/><path d='m7 12 3 3 7-7'/>",

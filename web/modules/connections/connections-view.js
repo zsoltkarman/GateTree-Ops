@@ -7,6 +7,7 @@ import { createModuleRoot } from "../../shared/module-root.js";
 import { focusNavigationItem } from "../../shared/focus-navigation.js";
 import {
   connectAgentSshConnection,
+  connectAgentDeploymentSsh,
   connectAgentSshWithKeePass,
   inspectAgentSshHostKey,
   listAgentSshSessions,
@@ -541,6 +542,11 @@ function bindEvents(root, state) {
   });
 }
 
+export function connectDeploymentHostInTerminal(job) {
+  return connectSshWithDialog({ id:job.id, name:job.target, target:job.target, port:22,
+    sshTransport:"openssh", authentication:"password", deploymentHost:true });
+}
+
 async function connectSshInTerminal(root, state, connection) {
   if (connection.connectionType !== "ssh") return;
   await runAction(root, state, async () => {
@@ -561,7 +567,7 @@ async function connectSshInTerminal(root, state, connection) {
 }
 
 async function connectSshWithDialog(connection) {
-  const account = await resolveConnectionAccount(connection.id);
+  const account = connection.deploymentHost ? { mode:"manual" } : await resolveConnectionAccount(connection.id);
   if (account.mode === "keepass") {
     if (!account.credentialReference || !account.accountName) throw new Error("The assigned KeePass account was deleted. Choose another account.");
     if (!(await ensureAgentCredentials())) return null;
@@ -622,7 +628,9 @@ async function connectSshWithDialog(connection) {
       submit.disabled = true;
       error.hidden = true;
       try {
-        close(await connectAgentSshConnection(connection.id, authentication));
+        close(await (connection.deploymentHost
+          ? connectAgentDeploymentSsh(connection.id, username)
+          : connectAgentSshConnection(connection.id, authentication)));
       } catch (cause) {
         error.textContent = String(cause);
         error.hidden = false;

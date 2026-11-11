@@ -20,6 +20,7 @@ export const connectAgentSshConnection = (connectionId, authentication, columns 
   rows,
 });
 export const disconnectAgentSshSession = (sessionId) => invoke("disconnect_agent_ssh_session", { sessionId });
+export const connectAgentDeploymentSsh = (jobId, username, columns = 120, rows = 32) => invoke("connect_agent_deployment_ssh", { jobId, username, columns, rows });
 export const readAgentSshTerminal = (sessionId, offset = null, maximumBytes = 65536) => invoke("read_agent_ssh_terminal", { sessionId, offset, maximumBytes });
 export const writeAgentSshTerminal = (sessionId, data) => invoke("write_agent_ssh_terminal", { sessionId, data: Array.from(data) });
 export const resizeAgentSshTerminal = (sessionId, columns, rows) => invoke("resize_agent_ssh_terminal", { sessionId, columns, rows });

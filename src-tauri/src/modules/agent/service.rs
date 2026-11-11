@@ -220,6 +220,20 @@ impl AgentService {
         .map_err(AgentError::from)
     }
 
+    pub fn connect_deployment_ssh(
+        state: &WorkspaceState,
+        job_id: String,
+        username: String,
+        columns: u16,
+        rows: u16,
+    ) -> Result<SshSessionStatus, AgentError> {
+        let host = state.with_connection(|db| deployment_ssh_target(db, &job_id))?
+            .ok_or(AgentError::InvalidSshHost)?;
+        let request = deployment_ssh_request(&host, &username, columns, rows)?;
+        ensure_agent_running()?;
+        agent_ipc::connect_ssh(request).map_err(AgentError::from)
+    }
+
     pub fn disconnect_ssh(session_id: String) -> Result<(), AgentError> {
         match agent_ipc::disconnect_ssh(session_id) {
             Err(error) if missing_ssh_session(&error) => Ok(()),
@@ -359,6 +373,32 @@ fn ensure_agent_running() -> Result<(), AgentError> {
         agent_ipc::start()?;
     }
     Ok(())
+}
+
+fn deployment_ssh_target(db: &Connection, job_id: &str) -> rusqlite::Result<Option<String>> {
+    db.query_row(
+        "SELECT target FROM deployment_jobs WHERE id=?1 AND driver IN ('olam','container') AND action='deploy' AND target IS NOT NULL",
+        [job_id], |row| row.get(0),
+    ).optional()
+}
+
+fn deployment_ssh_request(host: &str, username: &str, columns: u16, rows: u16) -> Result<SshConnectRequest, AgentError> {
+    let host = host.trim();
+    let dns = !host.is_empty() && host.len() <= 253 && host.split('.').all(|label|
+        !label.is_empty() && label.len() <= 63 && !label.starts_with('-') && !label.ends_with('-')
+        && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
+    if !dns && host.parse::<std::net::IpAddr>().is_err() {
+        return Err(AgentError::InvalidSshHost);
+    }
+    let username = username.trim();
+    if username.is_empty() {
+        return Err(AgentError::SshUsernameRequired);
+    }
+    Ok(SshConnectRequest {
+        connection_id: format!("deployment-host:{host}"), name: host.to_owned(),
+        host: host.to_owned(), port: 22, username: username.to_owned(),
+        authentication: SshAuthentication::OpenSsh, trusted_host_key: String::new(), columns, rows,
+    })
 }
 
 fn normalize_ssh_host(host: &str) -> Result<String, AgentError> {
@@ -512,6 +552,36 @@ pub enum AgentError {
 #[cfg(test)]
 mod session_tests {
     use super::*;
+    #[test]
+    fn deployment_ssh_only_resolves_hosts_from_deploy_jobs() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE deployment_jobs(id TEXT,driver TEXT,action TEXT,target TEXT);
+            INSERT INTO deployment_jobs VALUES ('deploy','olam','deploy','mgmt1.example.test');
+            INSERT INTO deployment_jobs VALUES ('container','container','deploy','192.0.2.10');
+            INSERT INTO deployment_jobs VALUES ('validate','olam','validate','mgmt1.example.test');
+            INSERT INTO deployment_jobs VALUES ('report','jira','update','ISSUE-123');").unwrap();
+        assert_eq!(deployment_ssh_target(&db, "deploy").unwrap().as_deref(), Some("mgmt1.example.test"));
+        assert_eq!(deployment_ssh_target(&db, "container").unwrap().as_deref(), Some("192.0.2.10"));
+        for id in ["validate", "report", "missing"] {
+            assert!(deployment_ssh_target(&db, id).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn deployment_ssh_requires_an_explicit_username_and_rejects_non_host_targets() {
+        assert!(matches!(deployment_ssh_request("mgmt1.example.test", " ", 120, 32), Err(AgentError::SshUsernameRequired)));
+        for host in ["-oProxyCommand=anything", "user@host", "https://host", "host other", "host;command", "host\nother"] {
+            assert!(matches!(deployment_ssh_request(host, "operator", 120, 32), Err(AgentError::InvalidSshHost)));
+        }
+        for host in ["mgmt1.example.test", "mgmt1", "192.0.2.10", "2001:db8::1"] {
+            let request = deployment_ssh_request(host, " operator ", 120, 32).unwrap();
+            assert_eq!(request.username, "operator");
+            assert_eq!(request.host, host);
+            assert_eq!(request.port, 22);
+            assert!(matches!(request.authentication, SshAuthentication::OpenSsh));
+        }
+    }
+
     #[test]
     fn reading_a_session_cleaned_up_by_agent_reports_closed_without_hiding_other_errors() {
         let result = terminal_read_result(

@@ -9,6 +9,25 @@ const plan={id:'p',status:'running',jobs:[job('completed','completed',1),job('ru
 const heading=(html,group)=>html.match(new RegExp(`<button[^>]*data-job-group="p:${group}"[^>]*>`))?.[0];
 const item=(html,id)=>html.match(new RegExp(`<div[^>]*data-job-item="${id}"[^>]*>`))?.[0];
 
+test('deployment host SSH opens a terminal tab without controlling the deployment or asking for saved credentials',async()=>{
+ const listeners=[];const button={dataset:{sshJob:'deploy'},addEventListener:(_,listener)=>listeners.push(listener)};
+ const target=job('deploy','running',1);target.target='mgmt1.example.test';
+ const calls=[];let release;
+ const pending=new Promise(resolve=>{release=resolve});
+ const state={plans:[{id:'p',jobs:[target]}],onOpenSsh:session=>calls.push(['tab',session.id])};
+ const root={querySelectorAll:selector=>selector==='[data-ssh-job]'?[button]:[]};
+ const {bindQueue}=new Function('mountQueueColumns','connectDeploymentHostInTerminal',source+'\nreturn {bindQueue};')(()=>()=>{},async selected=>{calls.push(['connect',selected.id,selected.target]);return pending});
+ bindQueue(root,state);const opened=listeners[0]();await listeners[0]();
+ assert.equal(calls.length,1);assert.equal(target.status,'running');
+ release({id:'ssh-session'});await opened;
+ assert.deepEqual(calls,[['connect','deploy','mgmt1.example.test'],['tab','ssh-session']]);
+ assert.equal(button.disabled,false);assert.equal(state.openingSsh,false);
+ const html=jobGroupsMarkup({id:'p',jobs:[target]},{});
+ assert.match(html,/data-ssh-job="deploy"/);assert.match(html,/aria-label="SSH to mgmt1.example.test"/);
+ const validate={...target,id:'validate',action:'validate'};
+ assert.doesNotMatch(jobGroupsMarkup({id:'p',jobs:[validate]},{}),/data-ssh-job=/);
+});
+
 test('groups include every job exactly once with running/approval first and accurate counts',()=>{
  const before=JSON.stringify(plan),html=jobGroupsMarkup(plan,{});
  assert(html.indexOf('p:running')<html.indexOf('p:queued'));assert(html.indexOf('p:queued')<html.indexOf('p:completed'));

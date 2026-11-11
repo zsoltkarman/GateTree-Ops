@@ -130,7 +130,7 @@ function renderShell(session) {
     tabs.open({ id: `plan:${planId}`, type: "plan", planId, hiddenTab: true,
       title: plan ? `#${plan.planNumber} · ${plan.name}` : "Deployment Plan", status: plan?.status,
       module: "deployments", detail: { section: "queue", planId },
-      mount: pane => { void mountDeploymentQueueView(pane, { section: "queue", planId }, { onQueueChange: queueChanged }); },
+      mount: pane => { void mountDeploymentQueueView(pane, { section: "queue", planId }, { onQueueChange: queueChanged, onOpenSsh: openSsh }); },
     });
   }
   function renderModule(module, content, detail) {
@@ -161,7 +161,7 @@ function renderShell(session) {
         void mountDeploymentQueueView(content, detail ?? { section: "queue" }, { onQueueChange: (plans, selectedId) => {
           queueChanged(plans);
           if (selectedId && selectedId !== openedPlan) { openedPlan = selectedId; openPlan(selectedId); }
-        } });
+        }, onOpenSsh: openSsh });
         getDeploymentConfig().then(snapshot => { if (!disposed) shell.setDeploymentCatalog(snapshot.processes); }).catch(() => {});
       } else {
         content.replaceChildren();

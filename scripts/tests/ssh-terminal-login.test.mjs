@@ -45,3 +45,27 @@ test('cancelled login opens no session and failed preference save cannot start a
   assert.equal(failed.connection.sshTransport, 'embedded');
   assert(!failed.calls.some(([action]) => action === 'connect'));
 });
+
+test('deployment host login starts with no username and never resolves a saved account', async () => {
+  const dialogSource = source.slice(source.indexOf('async function connectSshWithDialog('), source.indexOf('function bindConnectionDragging('));
+  const listeners = {}, fields = new Map(), calls = [];
+  const field = selector => {
+    if (!fields.has(selector)) fields.set(selector, { value:'', hidden:true, focus(){}, addEventListener(type,fn){listeners[selector+':'+type]=fn;} });
+    return fields.get(selector);
+  };
+  const dialog = { innerHTML:'', querySelector:field, addEventListener(){}, showModal(){}, close(){}, remove(){} };
+  const document = { createElement:()=>dialog, body:{append(){}} };
+  const connect = new Function('document','resolveConnectionAccount','connectAgentDeploymentSsh','escapeHtml',
+    dialogSource+'\nreturn connectSshWithDialog;')(document,()=>{throw new Error('Must not resolve a saved account');},
+    async (...args)=>{calls.push(args);return {id:'terminal'};},String);
+  const pending = connect({id:'deploy-job',name:'mgmt1',target:'mgmt1',sshTransport:'openssh',deploymentHost:true});
+  assert.match(dialog.innerHTML,/data-role="ssh-username"[^>]*value=""/);
+  const submit = listeners['form:submit'];
+  await submit({preventDefault(){}});
+  assert.equal(calls.length,0);
+  assert.equal(field('[data-role="ssh-auth-error"]').hidden,false);
+  field('[data-role="ssh-username"]').value=' operator ';
+  await submit({preventDefault(){}});
+  assert.deepEqual(await pending,{id:'terminal'});
+  assert.deepEqual(calls,[['deploy-job','operator']]);
+});

@@ -112,6 +112,18 @@ pub fn connect_agent_ssh_connection(
 }
 
 #[tauri::command]
+pub fn connect_agent_deployment_ssh(
+    state: State<'_, WorkspaceState>,
+    job_id: String,
+    username: String,
+    columns: u16,
+    rows: u16,
+) -> Result<SshSessionStatus, String> {
+    AgentService::connect_deployment_ssh(&state, job_id, username, columns, rows)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn disconnect_agent_ssh_session(session_id: String) -> Result<(), String> {
     AgentService::disconnect_ssh(session_id).map_err(|error| error.to_string())
 }

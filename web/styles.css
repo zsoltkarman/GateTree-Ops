@@ -779,6 +779,10 @@ input:focus { border-color: #58d0d5; box-shadow: 0 0 0 3px rgba(88,208,213,.1); 
 .queue-job-row { min-height: 40px; border-bottom: 1px solid var(--border); font-size: 10px; }
 .queue-job-row strong { color: var(--text-primary); font-size: 11px; font-weight: 600; }
 .queue-job-row code { overflow: hidden; color: var(--text-secondary); font: 10px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; text-overflow: ellipsis; white-space: nowrap; }
+.queue-job-target { display:flex; align-items:center; gap:5px; min-width:0; }
+.queue-job-target code { min-width:0; }
+.queue-job-target .queue-host-ssh { flex:none; display:inline-flex; align-items:center; justify-content:center; width:23px; height:23px; padding:3px; }
+.queue-host-ssh svg { width:14px; height:14px; }
 .queue-job-row > span { color: var(--text-muted); }
 .queue-job-details { min-width: 0; display: grid; gap: 3px; line-height: 1.4; white-space: normal; overflow-wrap: anywhere; }
 .queue-job-id { color: var(--accent); font-weight: 600; white-space: nowrap; }
