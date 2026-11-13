@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 const source=readFileSync(new URL('../../web/modules/image-hub/inventory.js',import.meta.url),'utf8');
-const {inventoryRepositories,inventoryFolderPath}=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {inventoryRepositories,inventoryFolderPath,inventorySlapsStatus}=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const snapshot={folders:[{id:'apps',name:'Applications',parentId:null},{id:'nested',name:'Exporters',parentId:'apps'},{id:'other',name:'Other',parentId:null}],projects:[{id:'p',name:'Monitoring',folderId:'nested'}],repositories:[
  {id:'r3',name:'cache-10',folderId:'nested',projectId:'p',repoType:'scm',localPath:'/dev/cache-10'},
  {id:'r2',name:'cache-2',folderId:null,projectId:'p',repoType:'scm',localPath:'/dev/cache-2'},
@@ -84,4 +84,68 @@ test('moving a project saves its selected folder without starting repository syn
  await handlers.submit({preventDefault(){}});
  assert.deepEqual(saved,{...snapshot.projects[0],folderId:'other'});
  assert.equal(state.mode,'list');assert.equal(state.folderId,'other');assert.equal(expanded,'other');assert(state.expanded.has('p'));
+});
+
+const scannedSnapshot = () => ({...snapshot,
+ latestImages: [{repositoryId:'r2',imageName:'cache-2',version:'2',status:'found'}, {repositoryId:'r3',imageName:'cache-10',version:'3',status:'found'}],
+ securityReports: [{projectId:'p',imageName:'cache-2',version:'2',decision:'unknown',findingCount:0}, {projectId:'p',imageName:'cache-10',version:'3',decision:'approved',findingCount:3}]
+});
+test('green SLAPS filtering uses zero findings on the latest exact image and combines with existing filters',()=>{
+ const data=scannedSnapshot(), before=JSON.stringify(data);
+ assert.deepEqual(inventoryRepositories(data,{slapsStatus:'no-findings',folderId:'apps',projectId:'p',repoType:'scm',query:'cache'}).map(r=>r.id),['r2']);
+ assert.equal(inventoryRepositories(data,{slapsStatus:'no-findings',query:'cache-10'}).length,0);
+ assert.equal(inventoryRepositories(data).length,4);
+ assert.equal(inventorySlapsStatus(data,data.repositories[0]),'has-findings');
+ assert.equal(JSON.stringify(data),before);
+});
+test('red SLAPS filtering selects latest images with findings and excludes unavailable scans',()=>{
+ const data=scannedSnapshot();
+ assert.deepEqual(inventoryRepositories(data,{slapsStatus:'has-findings',projectId:'p',query:'cache'}).map(r=>r.id),['r3']);
+ data.securityReports[1].decision='pending';
+ assert.equal(inventoryRepositories(data,{slapsStatus:'has-findings'}).length,0);
+ data.securityReports[1].decision='error';
+ assert.equal(inventoryRepositories(data,{slapsStatus:'has-findings'}).length,0);
+ assert.equal(inventoryRepositories(data).length,4);
+});
+test('pending, failed, missing, wrong-version and other-project reports cannot make a latest image green',()=>{
+ for(const report of [null,{decision:'pending',findingCount:0},{decision:'error',findingCount:0},{decision:'unknown',findingCount:0,error:'Unavailable'},{decision:'approved'},{decision:'unknown',findingCount:-1},{decision:'unknown',findingCount:0.5},{decision:'unknown',findingCount:'0'},{decision:'unknown',findingCount:0,version:'old'},{decision:'unknown',findingCount:0,projectId:'other'}]) {
+  const data=scannedSnapshot();data.securityReports=report?[{projectId:'p',imageName:'cache-2',version:'2',...report}]:[];
+  assert.equal(inventoryRepositories(data,{slapsStatus:'no-findings'}).length,0,JSON.stringify(report));
+ }
+ const data=scannedSnapshot();data.latestImages[0].version='new';
+ assert.equal(inventoryRepositories(data,{slapsStatus:'no-findings'}).length,0);
+ data.latestImages=[];data.securityReports[0].version='';
+ assert.equal(inventoryRepositories(data,{slapsStatus:'no-findings'}).length,0);
+});
+test('the green filter retains last-known AF versions and updates membership when a scan arrives',()=>{
+ const data=scannedSnapshot();data.latestImages[0].status='error';
+ assert.deepEqual(inventoryRepositories(data,{slapsStatus:'no-findings'}).map(r=>r.id),['r2']);
+ data.securityReports[1].findingCount=0;
+ assert.deepEqual(inventoryRepositories(data,{slapsStatus:'no-findings'}).map(r=>r.id),['r2','r3']);
+ data.latestImages[0].imageName='different-image';
+ assert.deepEqual(inventoryRepositories(data,{slapsStatus:'no-findings'}).map(r=>r.id),['r3']);
+});
+test('Inventory exposes and applies All, Green and Red latest-image SLAPS filters',()=>{
+ const body=view.slice(view.indexOf('  function list()'),view.indexOf('  function imageRows('));
+ const state={...scannedSnapshot(),query:'',repoTypeFilter:'',slapsFilter:'no-findings',inventorySort:'folder',folderId:null,projectId:null};
+ const list=new Function('state','options','inventoryRepositories','e','folderOptions','imageRows','types','projectTypes','folderPath',body+'\nreturn list;')(state,{},inventoryRepositories,escape,()=>'',repo=>`<tr data-repo="${repo.id}"></tr>`,{}, {},()=> 'Folder');
+ const html=list();assert.match(html,/SLAPS \(latest\)/);assert.match(html,/value="no-findings" selected/);assert.match(html,/1 \/ 4 repositories/);assert.doesNotMatch(html,/data-repo="r3"/);
+ state.slapsFilter='has-findings';
+ const redHtml=list();assert.match(redHtml,/value="has-findings" selected/);assert.match(redHtml,/Red · Findings/);assert.match(redHtml,/data-repo="r3"/);assert.doesNotMatch(redHtml,/data-repo="r2"/);
+ const bindBody=view.slice(view.indexOf('  function bind()'),view.indexOf('  function openContextMenu('));
+ let renders=0;const control={dataset:{hubFilter:'slaps'},value:'',focus(){}};
+ const root={querySelectorAll:selector=>selector==='[data-hub-filter]'?[control]:[],querySelector:selector=>selector==='[data-hub-filter="slaps"]'?control:null};
+ const bind=new Function('root','state','options','bindReportLinks','bindSecurityLinks','render',bindBody+'\nreturn bind;')(root,state,{},()=>{},()=>{},()=>renders++);
+ bind();control.onchange();assert.equal(state.slapsFilter,'');assert.equal(renders,1);assert.equal(inventoryRepositories(state).length,4);
+});
+
+test('active green filtering rerenders when sync downloads new reports without changing repository IDs',async()=>{
+ const body=view.slice(view.indexOf('  function scheduleSyncPoll()'),view.indexOf('  function list()'));
+ const state={...scannedSnapshot(),syncStatuses:[{running:true}],mode:'list',slapsFilter:'no-findings'};
+ let scheduled, renders=0;
+ const snapshot={repositories:state.repositories,securityReports:[...state.securityReports.slice(0,1),{...state.securityReports[1],findingCount:0}],syncStatuses:[{running:true}]};
+ const schedule=new Function('state','window','contentRoot','mountId','root','getImageHub','render','updateArtifactCells','updateSyncWidgets',`let syncPollTimer=null; ${body}\nreturn scheduleSyncPoll;`)(state,{setTimeout:callback=>{scheduled=callback;return 1;}},{isConnected:true,dataset:{imageHubMountId:'test'}},'test',{querySelector:selector=>selector==='.image-hub-module'?{}:null},async()=>snapshot,()=>renders++,()=>assert.fail('Filtered membership needs a full rerender'),()=>{});
+ schedule();await scheduled();
+ assert.equal(renders,1);
+ assert.deepEqual(inventoryRepositories(state,{slapsStatus:state.slapsFilter}).map(r=>r.id),['r2','r3']);
 });

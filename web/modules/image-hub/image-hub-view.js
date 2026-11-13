@@ -1,4 +1,4 @@
-import { inventoryRepositories } from "./inventory.js";
+import { inventoryRepositories, inventorySlapsStatus } from "./inventory.js";
 import { escapeHtml } from "../../shared/ui.js";
 import { createModuleRoot } from "../../shared/module-root.js";
 import { imageHubUrl, imageHubRepositoryUrl } from "./url-template.js";
@@ -13,7 +13,7 @@ const attr = value => e(String(value ?? "")).replaceAll('"', "&quot;").replaceAl
 export async function mountImageHubView(contentRoot, options = {}) {
   const root = createModuleRoot(contentRoot, options.navigationRoot);
   const state = { folders: [], repositories: [], projects: [], latestImages: [], config: {}, runtimeConfig: {}, syncStatuses: [], securityReports: [], securitySelection: null, securityPage: null, securityBusy: false, securityError: "", securityRevision: 0, expandedImages: new Set(), ansibleImages: [], ansibleStatus: "idle", ansibleError: "", artifactRequests: new Set(), projectId: options.projectId ?? null, syncReport: null, folderId: options.folderId ?? null,
-    query: "", repoTypeFilter: "", inventorySort: "folder", repositoryId: options.repositoryId ?? null, expanded: new Set(), mode: "list", dirty: false, busy: false, message: "", error: false };
+    query: "", repoTypeFilter: "", slapsFilter: "", inventorySort: "folder", repositoryId: options.repositoryId ?? null, expanded: new Set(), mode: "list", dirty: false, busy: false, message: "", error: false };
   const mountId = crypto.randomUUID();
   contentRoot.dataset.imageHubMountId = mountId;
   let syncPollTimer = null;
@@ -195,7 +195,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
         const wasRunning = state.syncStatuses.some(status => status.running);
         Object.assign(state, snapshot);
         const changed = before !== state.repositories.map(repo => repo.id).join(",");
-        if (state.mode === "list" && (changed || !state.syncStatuses.some(status => status.running))) render();
+        if (state.mode === "list" && (changed || state.slapsFilter || !state.syncStatuses.some(status => status.running))) render();
         else { updateArtifactCells(); updateSyncWidgets(); if (state.mode === "security" && wasRunning && !state.syncStatuses.some(status => status.running)) void loadSecurityPage(state.securityPage?.page || 0); }
       } catch (error) {
         state.message = `Sync status could not be refreshed: ${String(error)}`; state.error = true;
@@ -211,13 +211,14 @@ export async function mountImageHubView(contentRoot, options = {}) {
       const projects = [...state.projects].sort((a,b) => a.name.localeCompare(b.name,undefined,{numeric:true,sensitivity:"base"}));
       return `<div class="image-hub-list"><div class="image-hub-table-scroll"><table class="image-hub-table image-hub-project-table"><thead><tr><th>Project</th><th>Type</th><th>Local path</th><th>Actions</th></tr></thead><tbody>${projects.map(project => `<tr><td><strong>${e(project.name)}</strong><small>${e(folderPath(project.folderId))}</small></td><td>${e(projectTypes[project.projectType] ?? project.projectType)}</td><td><code>${e(project.localPath)}</code></td><td><div class="image-hub-toolbar"><button type="button" data-hub-action="edit-project" data-project-id="${e(project.id)}">Edit</button><button type="button" data-hub-action="move-project" data-project-id="${e(project.id)}">Move to folder…</button><button type="button" data-hub-action="sync-project" data-project-id="${e(project.id)}"${state.syncStatuses.some(status => status.running) ? " disabled" : ""}>Sync Project</button><button type="button" data-hub-action="delete-project" data-project-id="${e(project.id)}">Delete</button></div></td></tr>`).join("") || '<tr><td colspan="4">No projects yet. Add a project to collect its repositories.</td></tr>'}</tbody></table></div></div>`;
     }
-    const repos = inventoryRepositories(state, { query: state.query, folderId: state.folderId, projectId: state.projectId, repoType: state.repoTypeFilter, sort: state.inventorySort });
+    const repos = inventoryRepositories(state, { query: state.query, folderId: state.folderId, projectId: state.projectId, repoType: state.repoTypeFilter, slapsStatus: state.slapsFilter, sort: state.inventorySort });
     return `<div class="image-hub-list">
       <div class="image-hub-inventory-filters">
         <label class="image-hub-inventory-search">Search<input type="search" data-hub-filter="query" value="${e(state.query)}" placeholder="Repository, folder or project…" aria-label="Search inventory"></label>
         <label>Folder<select data-hub-filter="folder">${folderOptions(state.folderId).replace('Image Hub (root)', 'All folders')}</select></label>
         <label>Project<select data-hub-filter="project"><option value="">All projects</option>${[...state.projects].sort((a,b)=>a.name.localeCompare(b.name)).map(project=>`<option value="${e(project.id)}"${state.projectId===project.id?' selected':''}>${e(project.name)}</option>`).join("")}</select></label>
         <label>Type<select data-hub-filter="type"><option value="">All types</option>${Object.entries(types).map(([key,label])=>`<option value="${key}"${state.repoTypeFilter===key?' selected':''}>${label}</option>`).join("")}</select></label>
+        <label>SLAPS (latest)<select data-hub-filter="slaps" aria-label="Filter latest image SLAPS status"><option value="">All statuses</option><option value="no-findings"${state.slapsFilter==='no-findings'?' selected':''}>Green · No findings</option><option value="has-findings"${state.slapsFilter==='has-findings'?' selected':''}>Red · Findings</option></select></label>
         <label>Sort<select data-hub-filter="sort"><option value="folder"${state.inventorySort==='folder'?' selected':''}>Folder / repository</option><option value="name"${state.inventorySort==='name'?' selected':''}>Repository name</option></select></label>
         <span class="image-hub-inventory-count" role="status">${repos.length} / ${state.repositories.length} repositories</span>
       </div>
@@ -269,12 +270,11 @@ export async function mountImageHubView(contentRoot, options = {}) {
     const label = kind === "slaps" ? "SLAPS" : "Build Logs";
     const url = imageHubUrl(kind === "slaps" ? state.runtimeConfig.slapsUrlTemplate : state.runtimeConfig.buildLogsUrlTemplate, state.runtimeConfig, repo, version);
     if (kind === "slaps") {
-      version ||= state.latestImages.find(image => image.repositoryId === repo.id && image.version && ["found","error"].includes(image.status))?.version || "";
+      version ||= state.latestImages.find(image => image.repositoryId === repo.id && image.imageName === repo.name && image.version && ["found","error"].includes(image.status))?.version || "";
       const scan = state.securityReports.find(scan => scan.projectId === repo.projectId && scan.imageName === repo.name && scan.version === version);
       const decision = scan?.decision || "not_downloaded";
       const findingCount = scan?.findingCount;
-      const status = !scan?.error && !["pending", "error"].includes(decision) && Number.isInteger(findingCount) && findingCount >= 0
-        ? (findingCount > 0 ? "has-findings" : "no-findings") : "not_downloaded";
+      const status = inventorySlapsStatus(state, repo, version);
       const findingsLabel = status === "not_downloaded" ? "" : ` · ${findingCount} findings`;
       const title = `${scan?.realm || state.runtimeConfig.slaps_realm || "SLAPS"} · ${decision}${findingsLabel} · ${scan?.error || (scan?.fetchedAt ? `Downloaded ${new Date(scan.fetchedAt * 1000).toLocaleString()}` : "Run Sync Project to download the report")}`;
       const data = `data-hub-security="${attr(repo.id)}" data-hub-security-image="${attr(repo.name)}" data-hub-security-version="${attr(version)}"`;
@@ -452,6 +452,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
         else if (key === "folder") state.folderId = control.value || null;
         else if (key === "project") state.projectId = control.value || null;
         else if (key === "type") state.repoTypeFilter = control.value;
+        else if (key === "slaps") state.slapsFilter = control.value;
         else state.inventorySort = control.value;
         render();
         const next = root.querySelector(`[data-hub-filter="${key}"]`);

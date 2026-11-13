@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const view=await readFile(new URL('../../web/modules/image-hub/image-hub-view.js',import.meta.url),'utf8');
+const inventory=await readFile(new URL('../../web/modules/image-hub/inventory.js',import.meta.url),'utf8');
+const {inventorySlapsStatus}=await import(`data:text/javascript;base64,${Buffer.from(inventory).toString('base64')}`);
 const escape=value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const functions=view.slice(view.indexOf('  function securityView()'),view.indexOf('  async function loadSecurityPage('));
 function render(state) { return new Function('state','e','attr','imageHubUrl',functions+'\nreturn securityView();')(state,escape,escape,()=>null); }
@@ -49,7 +51,7 @@ test('a late response for another image cannot replace the selected report',asyn
 test('SLAPS shields follow finding counts independently of release approval',()=>{
  const source=view.slice(view.indexOf('  function reportLink('),view.indexOf('  function reportLink(')+view.slice(view.indexOf('  function reportLink(')).indexOf('\n  function ',1));
  const repo={id:'repo',projectId:'project',name:'sample'};
- const renderLink=(scan,url=null)=>new Function('state','attr','e','imageHubUrl','icon',source+'\nreturn reportLink(arguments[5], "slaps", "1.2.3");')({runtimeConfig:{},securityReports:scan?[{projectId:'project',imageName:'sample',version:'1.2.3',...scan}]:[],latestImages:[]},escape,escape,()=>url,()=>'<svg></svg>',repo);
+ const renderLink=(scan,url=null)=>new Function('state','attr','e','imageHubUrl','icon','repo','inventorySlapsStatus',source+'\nreturn reportLink(arguments[5], "slaps", "1.2.3");')({runtimeConfig:{},securityReports:scan?[{projectId:'project',imageName:'sample',version:'1.2.3',...scan}]:[],latestImages:[]},escape,escape,()=>url,()=>'<svg></svg>',repo,inventorySlapsStatus);
  for (const url of [null,'https://security.example.test']) {
   assert.match(renderLink({decision:'unknown',findingCount:0},url),/is-no-findings/);
   assert.match(renderLink({decision:'approved',findingCount:3},url),/is-has-findings/);

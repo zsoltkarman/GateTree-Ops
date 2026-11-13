@@ -1,5 +1,6 @@
 GateTree-Ops
 
+- Image Hub Inventory can filter latest images by SLAPS status: All, Green (zero findings), or Red (findings); the filter combines with search, folder, project and repository type.
 - Image Hub marks Ansible versions that differ from the latest image in yellow across all environments; matching versions stay green.
 - Deployment rows now have an SSH terminal icon beside the target host. It asks for a username in an empty field and opens a separate GT terminal tab while the deployment continues.
 - Deployment SSH uses interactive password/MFA login without reusing deployment or KeePass credentials, offering SSH keys, or creating saved Connections.

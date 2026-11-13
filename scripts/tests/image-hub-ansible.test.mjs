@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 const view = await readFile(new URL('../../web/modules/image-hub/image-hub-view.js', import.meta.url), 'utf8');
 const urlSource = await readFile(new URL('../../web/modules/image-hub/url-template.js', import.meta.url), 'utf8');
 const { imageHubUrl, imageHubRepositoryUrl } = await import(`data:text/javascript;base64,${Buffer.from(urlSource).toString('base64')}`);
+const inventorySource = await readFile(new URL('../../web/modules/image-hub/inventory.js', import.meta.url), 'utf8');
+const { inventorySlapsStatus } = await import(`data:text/javascript;base64,${Buffer.from(inventorySource).toString('base64')}`);
 const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const repo = { id: 'r1', name: 'sample-image' };
 function setup() {
@@ -15,7 +17,7 @@ function setup() {
     environment, imageName: repo.name, role: 'sample', source: 'vars/sample.yml', version: `1.0.${i}`,
   })) };
   const functions = view.slice(view.indexOf('  function imageRows('), view.indexOf('  function artifactCell('));
-  const { imageRows } = new Function('state', 'e', 'imageHubUrl', 'icon', 'artifactCell', 'attr', functions + '\nreturn {imageRows};')(state, escape, imageHubUrl, kind => kind, () => '2.0.0', escape);
+  const { imageRows } = new Function('state', 'e', 'imageHubUrl', 'icon', 'artifactCell', 'attr', 'inventorySlapsStatus', functions + '\nreturn {imageRows};')(state, escape, imageHubUrl, kind => kind, () => '2.0.0', escape, inventorySlapsStatus);
   return { state, imageRows };
 }
 test('images start collapsed; expanding shows all environments and their own AF versions and report links', () => {
