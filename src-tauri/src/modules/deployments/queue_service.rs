@@ -231,9 +231,14 @@ impl QueueService {
     }
 
     pub fn create(state: &WorkspaceState, definition: String) -> Result<String, QueueError> {
+        Self::create_for_task(state, definition, None)
+    }
+
+    pub fn create_for_task(state: &WorkspaceState, definition: String, task_item_id: Option<&str>) -> Result<String, QueueError> {
         state.with_connection(|connection| {
             let tx = connection.unchecked_transaction()?;
             let id = create_in_transaction(&tx, &definition)?;
+            if let Some(item_id) = task_item_id { super::tasks::link(&tx, item_id, &id)?; }
             tx.commit()?;
             Ok(id)
         }).map_err(map_workspace_error)
@@ -302,6 +307,7 @@ impl QueueService {
                 let jobs = generate_jobs(&input, &process).map_err(to_sql_error)?;
                 validate_references(connection, &input, &jobs).map_err(to_sql_error)?;
                 let transaction = connection.unchecked_transaction()?;
+                super::tasks::validate_plan_update(&transaction, id, &definition)?;
                 transaction.execute(
                     "UPDATE deployment_plans
                      SET name = ?2, process_name = ?3, definition_yaml = ?4,

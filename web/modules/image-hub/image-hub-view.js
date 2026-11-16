@@ -214,7 +214,7 @@ export async function mountImageHubView(contentRoot, options = {}) {
     const repos = inventoryRepositories(state, { query: state.query, folderId: state.folderId, projectId: state.projectId, repoType: state.repoTypeFilter, slapsStatus: state.slapsFilter, sort: state.inventorySort });
     return `<div class="image-hub-list">
       <div class="image-hub-inventory-filters">
-        <label class="image-hub-inventory-search">Search<input type="search" data-hub-filter="query" value="${e(state.query)}" placeholder="Repository, folder or project…" aria-label="Search inventory"></label>
+        <label class="image-hub-inventory-search">Search<input type="search" autocorrect="off" autocapitalize="none" spellcheck="false" autocomplete="off" data-hub-filter="query" value="${e(state.query)}" placeholder="Repository, folder or project…" aria-label="Search inventory"></label>
         <label>Folder<select data-hub-filter="folder">${folderOptions(state.folderId).replace('Image Hub (root)', 'All folders')}</select></label>
         <label>Project<select data-hub-filter="project"><option value="">All projects</option>${[...state.projects].sort((a,b)=>a.name.localeCompare(b.name)).map(project=>`<option value="${e(project.id)}"${state.projectId===project.id?' selected':''}>${e(project.name)}</option>`).join("")}</select></label>
         <label>Type<select data-hub-filter="type"><option value="">All types</option>${Object.entries(types).map(([key,label])=>`<option value="${key}"${state.repoTypeFilter===key?' selected':''}>${label}</option>`).join("")}</select></label>

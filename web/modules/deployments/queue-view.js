@@ -10,6 +10,7 @@ import { getCompletedPlanCopy, controlDeploymentQueueItem, deleteDeploymentPlan,
 
 export async function mountDeploymentQueueView(root, detail = {}, { onQueueChange = () => {}, onOpenSsh = () => {} } = {}) {
   const state = { archiveView: Boolean(detail.archived), plans: [], selectedId: detail.planId ?? null, expandedPlans: new Set(detail.planId ? [detail.planId] : []), adding: Boolean(detail.new), plannerDraft: emptyPlannerDraft(), disposeBuilder: null, message: "", error: false, busyKey: null, infoKey: null, onQueueChange, onOpenSsh, mountId: crypto.randomUUID() };
+  if (detail.plannerDraft) state.plannerDraft = detail.plannerDraft;
   root.dataset.queueMountId = state.mountId;
   root.innerHTML = '<div class="deployment-config-loading">Loading Queue…</div>';
   try {

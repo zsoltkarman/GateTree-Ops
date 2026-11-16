@@ -7,6 +7,8 @@ mod queue_service;
 mod service;
 mod validation_queries;
 mod live_queries;
+mod tasks;
+pub use tasks::{get_deployment_tasks, save_deployment_task, link_deployment_task_plan, delete_deployment_task};
 pub use validation_queries::{save_deployment_validation_query, delete_deployment_validation_query};
 
 pub use commands::*;

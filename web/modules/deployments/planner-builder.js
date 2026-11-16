@@ -7,12 +7,14 @@ import { mountPlannerTargets } from "./planner-targets.js";
 import { escapeHtml } from "../../shared/ui.js";
 import { getDeploymentConfig } from "./deployments-api.js";
 import { getVaults } from "../vaults/vaults-api.js";
+import { getDeploymentTasks } from "./tasks-api.js";
+import { applyTaskItem } from "./tasks-model.js";
 
 const MULTI_ROLE_PLAN_ENABLED = false;
 
 export const emptyPlannerDraft = () => ({ planName: "", processId: "", cxNo: "", jiraNo: "", accountId: "", strategy: "linear", parallelRegions: 1, steps: [emptyPlannerStep()] });
 
-export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose = () => {}, loadProcesses = getDeploymentConfig, loadAccounts = getVaults, mountTargets = mountPlannerTargets, mountSteps = mountPlannerSteps, savePlan = createDeploymentPlan, onSaved = () => {} } = {}) {
+export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose = () => {}, loadProcesses = getDeploymentConfig, loadAccounts = getVaults, loadTasks = getDeploymentTasks, mountTargets = mountPlannerTargets, mountSteps = mountPlannerSteps, savePlan = createDeploymentPlan, onSaved = () => {} } = {}) {
   let disposed = false, saving = false, committed = false, multiSaving = false, disposeMulti = null;
   const choices = { processes: [], entries: [], validationQueries: [] };
   root.innerHTML = `<section class="planner-builder queue-plan-editor" aria-labelledby="planner-builder-title">
@@ -33,6 +35,7 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
           <label class="planner-field"><span>Account</span><select name="accountId" data-planner-field="accountId" required disabled aria-busy="true"><option value="">Loading accounts…</option></select><small data-planner-note="accountId" role="status"></small></label>
           <label class="planner-field"><span>CX No. <small class="planner-optional">Optional</small></span><input name="cxNo" data-planner-field="cxNo" value="${escapeHtml(draft.cxNo)}" placeholder="000000-000000" pattern="[0-9]{6}-[0-9]{6}" maxlength="13" title="Six digits, a hyphen, then six digits (000000-000000)" aria-describedby="planner-cx-error" spellcheck="false" /><small id="planner-cx-error" class="is-error" aria-live="polite"></small></label>
           <label class="planner-field"><span>Jira No. <small class="planner-optional">Optional</small></span><input name="jiraNo" data-planner-field="jiraNo" value="${escapeHtml(draft.jiraNo)}" placeholder="Jira issue key" spellcheck="false" /></label>
+          <label class="planner-field planner-field-wide"><span>Task / Service <small class="planner-optional">Optional</small></span><select data-planner-task disabled><option value="">Loading Tasks…</option></select><small data-planner-task-message role="status"></small></label>
         </form>
       </section>
       <div data-planner-targets></div>
@@ -68,8 +71,41 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
   });
   selectTab(draft.plannerTab);
   const disposeSteps = mountSteps(root.querySelector("[data-planner-steps]"), { draft, validationQueries: () => choices.validationQueries });
-  const targets = mountTargets(root.querySelector("[data-planner-targets]"), { draft });
+  const targets = mountTargets(root.querySelector("[data-planner-targets]"), { draft, onRoleChange: () => disposeSteps.refresh?.() });
   const form = root.querySelector("form");
+  const taskSelect = form.querySelector("[data-planner-task]");
+  const taskMessage = form.querySelector("[data-planner-task-message]");
+  let taskOptions = [];
+  void (async () => {
+    try {
+      const tasks = await loadTasks();
+      if (disposed || !root.contains(form)) return;
+      taskOptions = tasks.flatMap(task => task.items.filter(item => !item.planId).map(item => ({ task, item })));
+      taskSelect.innerHTML = `<option value="">No Task</option>${taskOptions.map(({ task, item }) => `<option value="${escapeHtml(item.id)}">${escapeHtml(task.jiraKey)} · ${escapeHtml(item.role)}</option>`).join("")}`;
+      if (draft.taskItemId && !taskOptions.some(({ item }) => item.id === draft.taskItemId)) {
+        taskSelect.add(new Option("Selected Task service is no longer available", draft.taskItemId));
+        taskMessage.textContent = "Select an available Task service or choose No Task.";
+      }
+      taskSelect.value = draft.taskItemId ?? "";
+      taskSelect.disabled = false;
+    } catch (cause) {
+      if (disposed || !root.contains(form)) return;
+      taskSelect.innerHTML = `<option value="">${draft.taskItemId ? "Task unavailable" : "No Task"}</option>`;
+      taskMessage.textContent = `Could not load Tasks: ${cause}`;
+    }
+  })();
+  taskSelect.addEventListener("change", () => {
+    taskMessage.textContent = "";
+    const option = taskOptions.find(({ item }) => item.id === taskSelect.value);
+    if (!option) { delete draft.taskItemId; delete draft.taskRole; return; }
+    try {
+      applyTaskItem(draft, option.task, option.item);
+      form.elements.namedItem("jiraNo").value = draft.jiraNo;
+      form.elements.namedItem("planName").value = draft.planName;
+      disposeSteps.refresh?.(); targets.processChanged();
+      taskMessage.textContent = "Jira and role filled from Task. Image version comes from Ansible. Select the deployment environment and hosts.";
+    } catch (cause) { taskSelect.value = draft.taskItemId ?? ""; taskMessage.textContent = String(cause); }
+  });
   form.addEventListener("submit", event => event.preventDefault());
   root.querySelector("[data-planner-close]").addEventListener("click", onClose);
   form.querySelectorAll("[data-planner-field]").forEach(field => {
@@ -131,7 +167,7 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
     controls.forEach(([control]) => { control.disabled = true; });
     const button = root.querySelector("[data-planner-save]"); button.textContent = "Saving…"; message.textContent = "Saving Plan to Queue…";
     try {
-      const snapshot = await savePlan(definition);
+      const snapshot = await savePlan(definition, draft.taskItemId || null);
       committed = true;
       if (disposed || !root.contains(form)) return;
       button.textContent = "Saved"; message.textContent = "Plan saved to Queue.";

@@ -33,9 +33,12 @@ pub fn get_completed_deployment_plan_copy(state: State<'_, WorkspaceState>, id: 
 pub fn create_deployment_plan(
     state: State<'_, WorkspaceState>,
     definition: String,
+    task_item_id: Option<String>,
 ) -> Result<CreatedQueueSnapshot, String> {
-    let created_plan_id =
-        QueueService::create(&state, definition).map_err(|error| error.to_string())?;
+    let created_plan_id = match task_item_id.as_deref() {
+        Some(item_id) => QueueService::create_for_task(&state, definition, Some(item_id)),
+        None => QueueService::create(&state, definition),
+    }.map_err(|error| error.to_string())?;
     let queue = QueueService::snapshot(&state).map_err(|error| error.to_string())?;
     Ok(CreatedQueueSnapshot {
         queue,

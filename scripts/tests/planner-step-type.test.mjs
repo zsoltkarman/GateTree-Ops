@@ -100,3 +100,36 @@ test('step names default to their type and follow type changes while custom name
  root.querySelector('[data-add-step]').fire('click');
  assert.equal(draft.steps[1].name,'Deploy');
 });
+
+test('Thanos steps select the query with the same role name and preserve manual choices',()=>{
+ const queries=[{id:'matching',name:' Ping_Tool ',query:'ping_metric'},{id:'other',name:'Other check',query:'other_metric'}];
+ const draft={olamTargets:{roles:['ping_tool']},steps:[{id:'one',name:'Deploy',type:'deploy',extraVarsText:''}]};
+ const root=new Root();mountPlannerSteps(root,{draft,validationQueries:()=>queries});
+ assert.equal(draft.steps[0].validationQueryId,undefined);
+ root.articles[0].querySelector('[data-step-type]').fire('change','thanos_query');
+ assert.equal(draft.steps[0].validationQueryId,'matching'); assert.equal(draft.steps[0].query,'ping_metric');
+ root.articles[0].querySelector('[data-step-saved-query]').fire('change','other');
+ root.articles[0].querySelector('[data-step-type]').fire('change','deploy');
+ root.articles[0].querySelector('[data-step-type]').fire('change','thanos_query');
+ assert.equal(draft.steps[0].validationQueryId,'other'); assert.equal(draft.steps[0].query,'other_metric');
+});
+
+test('empty Thanos selection finds its role match after role or query choices load',()=>{
+ const queries=[];
+ const draft={targetSelection:{roles:[]},steps:[{id:'one',name:'Thanos',type:'thanos_query',expectedVersion:'1.2'}]};
+ const root=new Root();const dispose=mountPlannerSteps(root,{draft,validationQueries:()=>queries});
+ draft.targetSelection.roles=['ping_tool']; dispose.refresh();
+ assert.equal(draft.steps[0].validationQueryId,undefined);
+ queries.push({id:'matching',name:'ping_tool',query:'metric{version="${EXPECTED_VERSION}"}'}); dispose.refresh();
+ assert.equal(draft.steps[0].validationQueryId,'matching'); assert.equal(draft.steps[0].expectedVersion,'1.2');
+});
+
+test('query suggestions require an unambiguous full role-name match and keep existing query drafts',()=>{
+ for(const queries of [[],[{id:'partial',name:'ping_tool_extra',query:'metric'}],[{id:'a',name:'ping_tool',query:'one'},{id:'b',name:'PING_TOOL',query:'two'}]]){
+  const draft={olamTargets:{roles:['ping_tool']},steps:[{id:'one',name:'Thanos',type:'thanos_query'}]};
+  mountPlannerSteps(new Root(),{draft,validationQueries:()=>queries}); assert.equal(draft.steps[0].validationQueryId,undefined);
+ }
+ const draft={olamTargets:{roles:['ping_tool']},steps:[{id:'one',name:'Thanos',type:'thanos_query',query:'existing draft'}]};
+ mountPlannerSteps(new Root(),{draft,validationQueries:()=>[{id:'matching',name:'ping_tool',query:'new query'}]});
+ assert.equal(draft.steps[0].query,'existing draft');assert.notEqual(draft.steps[0].validationQueryId,'matching');
+});

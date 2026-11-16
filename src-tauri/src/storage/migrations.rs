@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension};
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 30;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 31;
 
 pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -593,6 +593,28 @@ pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
              INSERT INTO schema_migrations(version) VALUES (30);",
+        )?;
+    }
+
+    if current_version < 31 {
+        transaction.execute_batch(
+            "CREATE TABLE deployment_tasks (
+                id TEXT PRIMARY KEY,
+                jira_key TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                name TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE deployment_task_items (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES deployment_tasks(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                target_version TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                plan_id TEXT UNIQUE REFERENCES deployment_plans(id) ON DELETE SET NULL,
+                UNIQUE(task_id, role)
+             );
+             INSERT INTO schema_migrations(version) VALUES (31);",
         )?;
     }
 

@@ -374,6 +374,30 @@ Save creates a new queued Plan with a new number and current Process Config.
 The original Plan and its logs are preserved. Host selections, job IDs, job
 results and approvals are not inherited. Start the new Plan separately.
 
+### Deployment Tasks
+
+**Deployments → Ansible → Tasks** groups a rollout by Jira key and local Ansible
+roles. Task names are optional and default to the Jira key. Tasks do not require
+image versions; Ansible supplies them for deployment approval. The overview uses
+expandable Task rows with each Task's role table underneath, showing planned,
+deployed, validated and ready counts, including roles that have no Plan yet.
+
+Use **Create Plan** on a service to prefill Jira and role, then
+choose the Process, account, environment, hosts and validation steps. The regular
+Planner also offers an optional **Task / Service** selector. Saving creates a
+queued Plan and links it atomically; it does not start deployment. Existing Plans
+can be linked when their Jira and single role match the Task. Linked Plans keep
+those constraints when edited. Task references do not add or enforce an
+`IMAGE_VERSION` override in the Plan.
+
+Deployment and Thanos validation progress are separate. **Ready** requires the
+Plan and all deployment/Thanos jobs to complete; disabled, skipped or failed jobs
+do not count as complete, and a Plan without Thanos validation stays **Deployed**.
+Counts cover the linked Plan's selected targets. Use **Open Plan** for Queue
+logs, approvals and retry controls. Unlinking or deleting a Task retains its Queue
+Plans and history. Task changes stay in the encrypted workspace and its backups;
+they do not update Jira. Multi Role Plan is not required.
+
 ### Multi Role Plan
 
 The **Multi Role Plan** tab is temporarily hidden. The Planner opens the single

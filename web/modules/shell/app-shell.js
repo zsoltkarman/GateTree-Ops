@@ -102,6 +102,7 @@ function navigationMarkup(id, label, iconPath, index) {
           <div class="deployment-tool-children" data-role="ansible-navigation" hidden>
           <button data-deployment-section="queue">${icon("<path d='M5 6h14M5 12h14M5 18h14M8 4v4M8 10v4M8 16v4'/>")}<span>Queue</span>${icon("<path d='m9 7 5 5-5 5'/>")}</button>
           <div data-role="deployment-queue-links"></div>
+          <button data-deployment-section="tasks">${icon("<path d='M9 5h11M9 12h11M9 19h11M3 5l1 1 2-2M3 12l1 1 2-2M3 19l1 1 2-2'/>")}<span>Tasks</span></button>
           <button data-deployment-section="config">${icon("<path d='M5 5h4v4H5zM15 5h4v4h-4zM10 7h5M17 9v5M15 14h4v4h-4zM9 16h6M5 14h4v4H5zM7 9v5'/>")}<span>Config</span>${icon("<path d='m9 7 5 5-5 5'/>")}</button>
           <div data-role="deployment-config-links" hidden>
             <button data-deployment-config="deploy"><span>Deploy</span></button>
@@ -122,7 +123,7 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
         </button>
         <div class="global-search">
           ${icon("<circle cx='10.5' cy='10.5' r='5.5' /><path d='m15 15 4 4' />")}
-          <input type="search" placeholder="Search" aria-label="Search" autocomplete="off" />
+          <input type="search" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="Search" aria-label="Search" autocomplete="off" />
         </div>
         ${terminalLauncherMarkup()}
         <nav class="quick-launcher" aria-label="Quick Launcher" data-role="quick-launcher"></nav>
@@ -326,7 +327,7 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     document.querySelector(".deployment-context-menu")?.remove();
     const menu = document.createElement("div");
     menu.className = "connection-context-menu deployment-context-menu";
-    const label = section === "queue" ? "New Plan" : "New Config";
+    const label = section === "queue" ? "New Plan" : section === "tasks" ? "New Task" : "New Config";
     menu.innerHTML = `<button>${icon("<path d='M12 5v14M5 12h14'/>")}<span>${label}</span></button>`;
     menu.style.left = `${Math.min(event.clientX, window.innerWidth - 190)}px`;
     menu.style.top = `${Math.min(event.clientY, window.innerHeight - 48)}px`;
@@ -390,7 +391,7 @@ export function mountAppShell(root, { onLock, onBiometricToggle, onNavigate, onC
     } else if (module === "ai-skills") {
       selectAiChild(detail ?? { section: "skills" });
     } else if (module === "deployments") {
-      if (["queue", "config"].includes(detail?.section)) ansibleExpanded = true;
+      if (["queue", "tasks", "config"].includes(detail?.section)) ansibleExpanded = true;
       deploymentCatalog.section = detail?.section || null;
       if (detail?.section === "config") {
         deploymentConfigSection = detail.configSection === "queries" ? "queries" : "deploy";

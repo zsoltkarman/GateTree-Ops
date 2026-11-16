@@ -28,6 +28,7 @@ use modules::connections::{
     resolve_connection_account, set_connection_folder_credentials, update_connection_item,
 };
 use modules::deployments::{
+    get_deployment_tasks, save_deployment_task, link_deployment_task_plan, delete_deployment_task,
     control_deployment_queue_item, get_completed_deployment_plan_copy, create_deployment_plan, create_deployment_plan_batch, delete_deployment_config_resource,
     archive_deployment_plan, delete_deployment_plan, duplicate_deployment_config_resource, get_deployment_config,
     get_deployment_config_bundle, get_deployment_queue, get_deployment_queue_log, get_local_ansible_settings,
@@ -197,6 +198,10 @@ pub fn run() {
             restore_deployment_config_resource,
             get_deployment_config_bundle,
             get_deployment_queue,
+            get_deployment_tasks,
+            save_deployment_task,
+            link_deployment_task_plan,
+            delete_deployment_task,
             get_deployment_queue_log,
             restore_deployment_credentials,
             create_deployment_plan,

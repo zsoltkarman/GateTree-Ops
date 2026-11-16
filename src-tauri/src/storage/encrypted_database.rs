@@ -269,6 +269,7 @@ mod tests {
     fn migration_backs_up_old_schema_once_and_refuses_downgrading_newer_schema() {
         let (root, path, key) = workspace();
         let database = EncryptedDatabase::create_with_key(&path, &key).unwrap();
+        database.connection.execute_batch("DROP TABLE deployment_task_items; DROP TABLE deployment_tasks;").unwrap();
         database
             .connection
             .execute_batch(

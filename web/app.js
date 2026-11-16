@@ -21,6 +21,7 @@ import { mountAgentView } from "./modules/agent/agent-view.js";
 import { mountAiSkillsView } from "./modules/ai-skills/ai-skills-view.js";
 import { mountDeploymentConfigView } from "./modules/deployments/deployments-view.js";
 import { mountDeploymentQueueView } from "./modules/deployments/queue-view.js";
+import { mountDeploymentTasksView } from "./modules/deployments/tasks-view.js";
 import { getDeploymentQueue } from "./modules/deployments/queue-api.js";
 import { getDeploymentConfig } from "./modules/deployments/deployments-api.js";
 import { initializeTheme } from "./modules/appearance/theme-picker.js";
@@ -156,6 +157,9 @@ function renderShell(session) {
     } else if (module === "deployments") {
       if (detail?.section === "config") {
         mountDeploymentConfigView(content, detail, { onCatalogChange: (processes, selectedId) => shell.setDeploymentNavigation(processes, selectedId) });
+      } else if (detail?.section === "tasks") {
+        void mountDeploymentTasksView(content, detail, { onOpenPlan: openPlan, onQueueChange: queueChanged,
+          onCreatePlan: plannerDraft => shell.navigate("deployments", { section: "queue", new: true, plannerDraft }) });
       } else if (detail?.section === "queue") {
         let openedPlan = null;
         void mountDeploymentQueueView(content, detail ?? { section: "queue" }, { onQueueChange: (plans, selectedId) => {

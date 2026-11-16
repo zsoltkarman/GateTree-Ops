@@ -13,7 +13,13 @@ export function mountPlannerSteps(root, { draft, onChange = () => {}, validation
   }
   function render(focus) {
     const queries = validationQueries();
+    const roles = draft.targetSelection?.roles ?? draft.olamTargets?.roles ?? [];
+    const role = roles.length === 1 ? roles[0].trim().toLowerCase() : "";
     for (const step of draft.steps) {
+      if (step.type === "thanos_query" && !step.validationQueryId && !step.query && role) {
+        const matches = queries.filter(query => query.name.trim().toLowerCase() === role);
+        if (matches.length === 1) { step.validationQueryId = matches[0].id; step.query = matches[0].query; }
+      }
       if (step.type === "thanos_query" && step.validationQueryId) {
         const current = queries.find(query => query.id === step.validationQueryId);
         step.query = current?.query ?? "";

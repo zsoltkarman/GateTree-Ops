@@ -404,7 +404,12 @@ mod tests {
                         payload BLOB
                     );
                     INSERT INTO future_module_content(title, payload)
-                    VALUES ('automatic backup', X'001122');",
+                    VALUES ('automatic backup', X'001122');
+                    INSERT INTO deployment_plans(id,plan_number,name,process_name,definition_yaml)
+                    VALUES ('task-plan',1,'Task Plan','Deploy','plan_name: Task Plan');
+                    INSERT INTO deployment_tasks(id,jira_key,name) VALUES ('task','GPDM-42','Rollout');
+                    INSERT INTO deployment_task_items(id,task_id,role,target_version,position,plan_id)
+                    VALUES ('service','task','ping_tool','2026.11.2',0,'task-plan');",
                 )
             })
             .expect("create future module data");
@@ -433,6 +438,14 @@ mod tests {
             .expect("read restored data");
         assert_eq!(restored.0, "automatic backup");
         assert_eq!(restored.1, vec![0x00, 0x11, 0x22]);
+        state.with_connection(|db| {
+            let link: (String, String) = db.query_row(
+                "SELECT i.target_version,p.name FROM deployment_task_items i JOIN deployment_plans p ON p.id=i.plan_id WHERE i.id='service'",
+                [], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(link, ("2026.11.2".into(), "Task Plan".into()));
+            Ok(())
+        }).unwrap();
 
         state.lock().expect("lock workspace");
         fs::remove_dir_all(directory).expect("remove test directory");
