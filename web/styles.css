@@ -1389,3 +1389,14 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in sr
 .queue-batch-group > header > span { color: var(--text-muted); font-size: 11px; }
 .queue-batch-group > div { display: grid; gap: 8px; padding: 8px; }
 @media (max-width: 650px) { .planner-multi-heading, .planner-multi-heading nav { flex-wrap: wrap; } }
+
+.ssh-tunnel-editor { width: min(640px, 100%); text-align: left; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.ssh-tunnel-editor summary { cursor: pointer; color: var(--text-strong); font-size: 12px; }
+.ssh-tunnel-editor p { color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
+.ssh-tunnel-row { display: grid; grid-template-columns: 90px minmax(100px, 1fr) 100px auto; align-items: end; gap: 8px; margin: 10px 0; }
+.ssh-tunnel-row label { display: grid; gap: 5px; font-size: 10px; color: var(--text-secondary); }
+.ssh-tunnel-row input { width: 100%; min-width: 0; height: 32px; padding: 6px; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; }
+.ssh-tunnel-editor button { padding: 7px 10px; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; font-size: 11px; }
+.ssh-tunnel-actions { display: flex; gap: 8px; }
+.ssh-tunnel-editor [role="status"] { color: var(--accent); }
+@media (max-width: 680px) { .ssh-tunnel-row { grid-template-columns: 1fr 1fr; } }

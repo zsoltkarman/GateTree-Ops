@@ -1,5 +1,7 @@
 GateTree-Ops
 
+- SSH connections have a saved local Tunnels editor with custom source ports and destination hosts/ports. Rules use loopback-only OpenSSH forwarding and close with the SSH session; saving rules selects Terminal login. Reconnect to apply changes. Busy source ports stop login with a terminal error.
+
 - Planner selects a saved Thanos query whose name matches the selected role when adding a Thanos Query step. Manual selections are preserved, and unmatched names stay unselected.
 - Tasks require only a Jira key and roles. The optional name defaults to Jira; version fields and overrides are removed, with deployment versions resolved by Ansible for approval.
 - Task links no longer require or compare explicit IMAGE_VERSION variables. Task-created Plans preserve existing extra variables and use Ansible's configured image versions.

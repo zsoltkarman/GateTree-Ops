@@ -25,7 +25,7 @@ use modules::connections::{
     list_connection_folders, list_connection_items, list_quick_launch_items,
     move_connection_folder, move_connection_item, pin_quick_launch_item, remove_quick_launch_item,
     rename_connection_folder, rename_quick_launch_item, reorder_quick_launch_items,
-    resolve_connection_account, set_connection_folder_credentials, update_connection_item,
+    resolve_connection_account, set_connection_folder_credentials, update_connection_item, set_connection_ssh_tunnels,
 };
 use modules::deployments::{
     get_deployment_tasks, save_deployment_task, link_deployment_task_plan, delete_deployment_task,
@@ -156,6 +156,7 @@ pub fn run() {
             create_connection_item,
             move_connection_item,
             update_connection_item,
+            set_connection_ssh_tunnels,
             start_agent,
             stop_agent,
             kill_agent,

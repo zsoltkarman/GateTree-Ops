@@ -22,10 +22,10 @@ mod regional;
 mod ssh;
 
 pub use ssh::{
-    SshAuthentication, SshConnectRequest, SshHostKey, SshSessionStatus, SshTerminalChunk,
+    SshAuthentication, SshConnectRequest, SshLocalTunnel, SshHostKey, SshSessionStatus, SshTerminalChunk,
 };
 
-pub const PROTOCOL_VERSION: u16 = 23;
+pub const PROTOCOL_VERSION: u16 = 24;
 const ENDPOINT_FILE: &str = "agent-endpoint.json";
 const LOCK_FILE: &str = "agent.lock";
 const JOB_SETS_FILE: &str = "agent-job-sets.json";
@@ -3896,6 +3896,7 @@ mod tests {
             let action = if connect {
                 let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).unwrap();
                 AgentAction::ConnectSsh { request: SshConnectRequest {
+                    local_tunnels: Vec::new(),
                     connection_id: "test".into(), name: "Slow SSH".into(),
                     host: address.ip().to_string(), port: address.port(), username: "test".into(),
                     authentication: SshAuthentication::Password { password: "test".into() },

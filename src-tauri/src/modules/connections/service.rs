@@ -501,7 +501,8 @@ fn folder_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionFolder
 fn load_connections(connection: &Connection) -> rusqlite::Result<Vec<ConnectionItem>> {
     let mut statement = connection.prepare(
         "SELECT id, folder_id, connection_type, name, target, port, tag,
-                username, authentication, credential_reference, ssh_transport, created_at, updated_at, icon, credential_mode
+                username, authentication, credential_reference, ssh_transport, created_at, updated_at, icon, credential_mode,
+                COALESCE((SELECT rules FROM connection_ssh_tunnels WHERE connection_id = connections.id), '[]')
          FROM connections ORDER BY name COLLATE NOCASE",
     )?;
     statement
@@ -516,7 +517,8 @@ pub(super) fn connection_by_id(
     connection
         .query_row(
             "SELECT id, folder_id, connection_type, name, target, port, tag,
-                    username, authentication, credential_reference, ssh_transport, created_at, updated_at, icon, credential_mode
+                    username, authentication, credential_reference, ssh_transport, created_at, updated_at, icon, credential_mode,
+                COALESCE((SELECT rules FROM connection_ssh_tunnels WHERE connection_id = connections.id), '[]')
              FROM connections WHERE id = ?1",
             [id],
             connection_from_row,
@@ -544,6 +546,8 @@ fn connection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionIt
         authentication: row.get(8)?,
         credential_reference: row.get(9)?,
         ssh_transport: row.get(10)?,
+        local_tunnels: serde_json::from_str(&row.get::<_, String>(15)?).map_err(|e|
+            rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, Box::new(e)))?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
         icon: row.get(13)?,

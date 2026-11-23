@@ -1,3 +1,4 @@
+import { tunnelEditor, bindTunnelEditor } from "./tunnel-editor.js";
 import { credentialMode, resolveCredentialPolicy, credentialSelection, parseCredentialSelection } from "./credential-policy.js";
 import { ensureAgentCredentials } from "../agent/credential-recovery.js";
 import { connectionIcon, connectionIconPicker } from "../../shared/connection-icons.js";
@@ -20,6 +21,7 @@ import { openDetachedTerminalWindow } from "./detached-terminal-window.js";
 import {
   createConnectionFolder,
   setConnectionFolderCredentials,
+  setConnectionSshTunnels,
   resolveConnectionAccount,
   createConnectionItem,
   deleteConnectionFolder,
@@ -236,7 +238,7 @@ function connectionForm(state) {
       ${isSsh ? `
         <label><span>SSH engine</span><select data-role="connection-ssh-transport">
           <option value="openssh"${(existing?.sshTransport ?? "openssh") === "openssh" ? " selected" : ""}>Terminal login (password / MFA / SSH config)</option>
-          <option value="embedded"${existing?.sshTransport === "embedded" ? " selected" : ""}>GateTree-Ops embedded SSH</option>
+          <option value="embedded"${existing?.localTunnels?.length ? " disabled" : ""}${existing?.sshTransport === "embedded" ? " selected" : ""}>GateTree-Ops embedded SSH</option>
         </select></label>
         <label><span>Authentication</span><select data-role="connection-authentication">
           ${authenticationOption("password", "Password", authentication)}
@@ -244,6 +246,7 @@ function connectionForm(state) {
           ${authenticationOption("keyboard-interactive", "Keyboard interactive", authentication)}
           ${authenticationOption("ssh-agent", "SSH agent", authentication)}
         </select></label>
+        ${existing?.localTunnels?.length ? '<small class="connection-account-hint">Local tunnels require Terminal login. Remove the tunnel rules before selecting embedded SSH.</small>' : ""}
         <small class="connection-account-hint">KeePass supplies the username and password for Password / Keyboard interactive. Local OpenSSH uses the KeePass username; password and MFA prompts stay in the terminal. Private-key login uses manual credentials.</small>` : ""}
       ${isUrl ? connectionIconPicker(existing?.icon) : ""}
       <label><span>Tag</span><input data-role="connection-tag" maxlength="120" autocomplete="off" value="${escapeHtml(existing?.tag ?? "")}" /></label>
@@ -269,6 +272,7 @@ function connectionPanel(connection, state) {
       <strong>${escapeHtml(connection.name)}</strong>
       <span>${escapeHtml(endpoint)}${connection.port ? `:${connection.port}` : ""}</span>
       <small>${details}</small>
+      ${connection.connectionType === "ssh" ? tunnelEditor(connection) : ""}
       ${activeSession ? '<span class="connection-running-status"><i></i>Running in Agent</span>' : ""}
       ${activeSession ? `<button class="connection-open-action" data-action="attach-active-session" data-session-id="${activeSession.id}">Show open session</button>` : ""}
       ${connection.connectionType === "ssh" ? `<button class="connection-open-action" data-action="new-ssh-session" data-connection-id="${connection.id}">New SSH session</button>` : ""}
@@ -283,6 +287,10 @@ function emptyPanel() {
 }
 
 function bindEvents(root, state) {
+  bindTunnelEditor(root, async (id, tunnels) => {
+    const updated = await setConnectionSshTunnels(id, tunnels);
+    Object.assign(state.connections.find(item => item.id === id), updated);
+  });
   root.querySelectorAll('[data-role="connection-account"]').forEach(select => {
     select.addEventListener("change", () => {
       const form = select.closest("form"), isFolder = form.dataset.role === "folder-credentials-form";

@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension};
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 31;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 32;
 
 pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -615,6 +615,16 @@ pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
                 UNIQUE(task_id, role)
              );
              INSERT INTO schema_migrations(version) VALUES (31);",
+        )?;
+    }
+
+    if current_version < 32 {
+        transaction.execute_batch(
+            "CREATE TABLE connection_ssh_tunnels (
+                connection_id TEXT PRIMARY KEY REFERENCES connections(id) ON DELETE CASCADE,
+                rules TEXT NOT NULL DEFAULT '[]'
+             );
+             INSERT INTO schema_migrations(version) VALUES (32);",
         )?;
     }
 

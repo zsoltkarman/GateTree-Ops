@@ -17,3 +17,5 @@ export const updateConnectionItem = (id, name, target, port, tag, username, auth
 
 export const setConnectionFolderCredentials = (id, mode, credentialReference) => change("set_connection_folder_credentials", { id, mode, credentialReference });
 export const resolveConnectionAccount = connectionId => invoke("resolve_connection_account", { connectionId });
+
+export const setConnectionSshTunnels = (id, localTunnels) => change("set_connection_ssh_tunnels", { id, localTunnels });

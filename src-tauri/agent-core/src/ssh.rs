@@ -56,6 +56,38 @@ pub enum SshAuthentication {
     OpenSsh,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshLocalTunnel {
+    pub source_port: u16,
+    pub destination_host: String,
+    pub destination_port: u16,
+}
+
+impl SshLocalTunnel {
+    pub fn validate_all(tunnels: &[Self]) -> Result<(), String> {
+        let mut ports = std::collections::HashSet::new();
+        if tunnels.len() > 32 { return Err("At most 32 local tunnels are supported.".into()); }
+        for tunnel in tunnels {
+            let host = &tunnel.destination_host;
+            let valid_host = host.parse::<std::net::IpAddr>().is_ok()
+                || (!host.is_empty() && host.len() <= 253 && host.split('.').all(|label|
+                    !label.is_empty() && label.len() <= 63 && !label.starts_with('-') && !label.ends_with('-')
+                    && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')));
+            if tunnel.source_port == 0 || tunnel.destination_port == 0 || !valid_host {
+                return Err("Tunnels require ports between 1 and 65535 and a valid destination hostname or IP address.".into());
+            }
+            if !ports.insert(tunnel.source_port) { return Err("Each tunnel needs a different local source port.".into()); }
+        }
+        Ok(())
+    }
+
+    fn forward_spec(&self) -> String {
+        let host = if self.destination_host.contains(':') { format!("[{}]", self.destination_host) } else { self.destination_host.clone() };
+        format!("127.0.0.1:{}:{}:{}", self.source_port, host, self.destination_port)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshConnectRequest {
@@ -65,6 +97,8 @@ pub struct SshConnectRequest {
     pub port: u16,
     pub username: String,
     pub authentication: SshAuthentication,
+    #[serde(default)]
+    pub local_tunnels: Vec<SshLocalTunnel>,
     pub trusted_host_key: String,
     pub columns: u16,
     pub rows: u16,
@@ -191,6 +225,7 @@ impl SshSessionManager {
             username,
             authentication,
             trusted_host_key,
+            local_tunnels: _,
             columns,
             rows,
         } = request;
@@ -313,6 +348,13 @@ impl SshSessionManager {
             "-p",
             port.as_str(),
         ]);
+        if !request.local_tunnels.is_empty() {
+            command.args(["-o", "ExitOnForwardFailure=yes"]);
+            for tunnel in &request.local_tunnels {
+                command.arg("-L");
+                command.arg(tunnel.forward_spec());
+            }
+        }
         command.args(["-l", request.username.trim()]);
         command.arg(request.host.as_str());
         command.env("TERM", "xterm-256color");
@@ -672,6 +714,10 @@ async fn connect_platform_ssh_agent()
 }
 
 fn validate_request(request: &SshConnectRequest) -> Result<(), SshManagerError> {
+    SshLocalTunnel::validate_all(&request.local_tunnels).map_err(SshManagerError::InvalidTunnel)?;
+    if !request.local_tunnels.is_empty() && !matches!(request.authentication, SshAuthentication::OpenSsh) {
+        return Err(SshManagerError::InvalidTunnel("Local tunnels require Terminal login (OpenSSH).".into()));
+    }
     validate_host(&request.host, request.port)?;
     validate_terminal_size(request.columns, request.rows)?;
     if request.connection_id.trim().is_empty()
@@ -771,6 +817,8 @@ impl client::Handler for HostKeyProbe {
 pub(crate) enum SshManagerError {
     #[error("SSH target is invalid")]
     InvalidTarget,
+    #[error("{0}")]
+    InvalidTunnel(String),
     #[error("SSH connection request is incomplete")]
     InvalidRequest,
     #[error("A trusted SSH host key is required")]
@@ -986,6 +1034,7 @@ mod tests {
         let server = TestServer::start();
         let manager = SshSessionManager::new().unwrap();
         let result = manager.connect(SshConnectRequest {
+            local_tunnels: Vec::new(),
             connection_id: "repeat-prompt".into(), name: "Repeated prompt".into(),
             host: server.address.ip().to_string(), port: server.address.port(),
             username: USERNAME.into(),
@@ -997,14 +1046,34 @@ mod tests {
         assert!(manager.list().is_empty());
     }
 
+    #[test]
+    fn local_tunnels_validate_ports_destinations_and_unique_listeners() {
+        let good = SshLocalTunnel { source_port: 13306, destination_host: "127.0.0.1".into(), destination_port: 3306 };
+        assert!(SshLocalTunnel::validate_all(&[]).is_ok());
+        assert!(SshLocalTunnel::validate_all(&[good.clone()]).is_ok());
+        assert!(SshLocalTunnel::validate_all(&[good.clone(), good.clone()]).is_err());
+        assert!(SshLocalTunnel::validate_all(&[SshLocalTunnel { source_port: 0, ..good.clone() }]).is_err());
+        assert!(SshLocalTunnel::validate_all(&[SshLocalTunnel { destination_port: 0, ..good.clone() }]).is_err());
+        for host in ["", "host:22", "host\n-L", "-option", "host/path", "host name"] {
+            assert!(SshLocalTunnel::validate_all(&[SshLocalTunnel { destination_host: host.into(), ..good.clone() }]).is_err(), "{host}");
+        }
+        for host in ["db.internal", "::1", "2001:db8::1"] {
+            assert!(SshLocalTunnel::validate_all(&[SshLocalTunnel { destination_host: host.into(), ..good.clone() }]).is_ok());
+        }
+    }
+
     #[cfg(unix)]
     #[test]
-    fn terminal_login_effective_openssh_config_disables_key_authentication() {
+    fn terminal_login_effective_openssh_config_preserves_authentication_and_local_tunnels() {
         let manager = SshSessionManager::new().unwrap();
         let mut command = CommandBuilder::new(openssh_executable());
         // -G prints the effective configuration and exits without connecting.
         command.args(["-G", "-F", "/dev/null"]);
         let session = manager.connect_openssh_with_command(SshConnectRequest {
+            local_tunnels: vec![
+                SshLocalTunnel { source_port: 13306, destination_host: "127.0.0.1".into(), destination_port: 3306 },
+                SshLocalTunnel { source_port: 15432, destination_host: "::1".into(), destination_port: 5432 },
+            ],
             connection_id: "config-probe".into(), name: "Configuration".into(),
             host: "unused.test".into(), port: 22, username: "test-user".into(),
             authentication: SshAuthentication::OpenSsh, trusted_host_key: String::new(),
@@ -1018,12 +1087,15 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
         for expected in [
+            "exitonforwardfailure yes",
+            "localforward 127.0.0.1:13306 127.0.0.1:3306",
+            "localforward 127.0.0.1:15432 ::1:5432",
             "preferredauthentications keyboard-interactive,password",
             "pubkeyauthentication false", "hostbasedauthentication no",
             "gssapiauthentication no", "identityagent none",
             "numberofpasswordprompts 1", "connectionattempts 1",
         ] {
-            assert!(output.lines().any(|line| line == expected), "Missing {expected}: {output}");
+            assert!(output.lines().any(|line| line.replace(['[', ']'], "") == expected), "Missing {expected}: {output}");
         }
         manager.disconnect(&session.id).unwrap();
     }
@@ -1034,6 +1106,7 @@ mod tests {
         let manager = SshSessionManager::new().unwrap();
         let started = std::time::Instant::now();
         let result = manager.connect_with_timeout(SshConnectRequest {
+            local_tunnels: Vec::new(),
             connection_id: "slow-auth".into(), name: "Slow authentication".into(),
             host: server.address.ip().to_string(), port: server.address.port(),
             username: USERNAME.into(),
@@ -1048,6 +1121,7 @@ mod tests {
     #[test]
     fn openssh_requires_an_explicit_username_instead_of_using_the_local_account() {
         let mut request = SshConnectRequest {
+            local_tunnels: Vec::new(),
             connection_id: "connection".into(),
             name: "Host".into(),
             host: "192.0.2.1".into(),
@@ -1063,6 +1137,10 @@ mod tests {
         assert!(validate_request(&request).is_err());
         request.username = "remote-user".into();
         assert!(validate_request(&request).is_ok());
+        request.local_tunnels = vec![SshLocalTunnel { source_port: 13306, destination_host: "127.0.0.1".into(), destination_port: 3306 }];
+        assert!(validate_request(&request).is_ok());
+        request.authentication = SshAuthentication::Password { password: "test".into() };
+        assert!(matches!(validate_request(&request), Err(SshManagerError::InvalidTunnel(_))));
     }
 
     #[cfg(unix)]
@@ -1076,6 +1154,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let manager = SshSessionManager::new().unwrap();
         let session = manager.connect_openssh_with_command(SshConnectRequest {
+            local_tunnels: Vec::new(),
             connection_id: "interactive-test".into(), name: "Test terminal login".into(),
             host: "unused.test".into(), port: 22, username: "test-user".into(),
             authentication: SshAuthentication::OpenSsh, trusted_host_key: String::new(), columns: 80, rows: 24,
@@ -1116,6 +1195,7 @@ mod tests {
 
         let session = manager
             .connect(SshConnectRequest {
+                local_tunnels: Vec::new(),
                 connection_id: "connection-1".into(),
                 name: "Test host".into(),
                 host: server.address.ip().to_string(),
@@ -1131,6 +1211,7 @@ mod tests {
             .unwrap();
         assert_eq!(manager.list(), vec![session.clone()]);
         let second = manager.connect(SshConnectRequest {
+            local_tunnels: Vec::new(),
             connection_id: "connection-2".into(),
             name: "Second test host".into(),
             host: server.address.ip().to_string(),

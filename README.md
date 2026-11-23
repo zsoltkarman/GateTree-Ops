@@ -550,3 +550,20 @@ data keeps that check polling; the next host remains queued. A timeout or fatal
 query error fails the Plan and leaves later jobs queued. Existing Plans with no step type keep their Deploy
 behavior. Existing Jira/CX reporting can attach `plan_log` to include query
 results; no ticket update is added automatically.
+
+### Local SSH tunnels
+
+Select a saved SSH connection under **Connections**, expand **SSH tunnels**, then
+choose **Add local tunnel**. Set the source port, destination host and destination
+port, and **Save tunnels**. Saving nonempty rules selects Terminal login (OpenSSH).
+Open a new SSH session and complete the password / MFA prompts in its terminal.
+Rules apply to new sessions; close the old session before reusing its source ports.
+
+For `centreon2.iad.icprod.oracleindustry.com` (SSH port 22), use source port `13306`,
+destination host `127.0.0.1`, and destination port `3306`. Connect your SQL client
+to `127.0.0.1:13306` using your database credentials. The destination is resolved
+from the SSH server. The listener is available only on this computer and closes
+when its SSH session disconnects or the Agent stops. A source port already in use
+causes OpenSSH to exit with an error in the terminal. The GUI can close while the
+Agent retains the session. Remote and dynamic forwarding are not configured by
+this editor.

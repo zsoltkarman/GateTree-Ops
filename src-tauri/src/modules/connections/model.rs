@@ -27,6 +27,7 @@ pub struct ConnectionItem {
     pub credential_reference: Option<String>,
     pub credential_mode: String,
     pub ssh_transport: String,
+    pub local_tunnels: Vec<gatetree_ops_agent_core::SshLocalTunnel>,
     pub icon: String,
     pub created_at: String,
     pub updated_at: String,

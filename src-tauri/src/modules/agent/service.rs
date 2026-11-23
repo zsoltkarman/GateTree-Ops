@@ -205,8 +205,13 @@ impl AgentService {
             };
             (authentication, trusted_host_key)
         };
+        let rules: String = state.with_connection(|db| db.query_row(
+            "SELECT COALESCE((SELECT rules FROM connection_ssh_tunnels WHERE connection_id=?1), '[]')",
+            [&connection_id], |row| row.get(0)))?;
+        let local_tunnels = serde_json::from_str(&rules).map_err(|_| AgentError::InvalidSshHost)?;
         ensure_agent_running()?;
         agent_ipc::connect_ssh(SshConnectRequest {
+            local_tunnels,
             connection_id,
             name,
             host,
@@ -395,6 +400,7 @@ fn deployment_ssh_request(host: &str, username: &str, columns: u16, rows: u16) -
         return Err(AgentError::SshUsernameRequired);
     }
     Ok(SshConnectRequest {
+        local_tunnels: Vec::new(),
         connection_id: format!("deployment-host:{host}"), name: host.to_owned(),
         host: host.to_owned(), port: 22, username: username.to_owned(),
         authentication: SshAuthentication::OpenSsh, trusted_host_key: String::new(), columns, rows,
