@@ -538,6 +538,7 @@ fn agent_job_details(job: &AgentJobStatus) -> String {
         "denied" => "Deployment denied".into(),
         "running" => format!("{phase} running"),
         "completed" => format!("{phase} completed"),
+        "failed" if job.olam_monitoring_retry_available() => format!("{phase} status unknown"),
         "failed" => format!("{phase} failed"),
         "warning" => format!("{phase} warning"),
         "stopped" => format!("{phase} stopped"),
@@ -1616,12 +1617,14 @@ fn load_plans(connection: &Connection, include_logs: bool) -> rusqlite::Result<V
             let log_column = if include_logs { "log_output" } else { "''" };
             let mut jobs = connection.prepare(&format!(
                 "SELECT id, sequence, name, target, details, payload_json, {log_column}, driver, action, status,
-                    CASE WHEN driver='jira' AND action='update' THEN instr(lower(log_output),'unconfirmed')>0 ELSE 0 END
+                    CASE WHEN driver='jira' AND action='update' THEN instr(lower(log_output),'unconfirmed')>0 ELSE 0 END,
+                    (driver='olam' AND status='failed' AND instr(details,'status unknown')>0)
                  FROM deployment_jobs WHERE plan_id = ?1 ORDER BY sequence"
             ))?;
             plan.jobs = jobs
                 .query_map([&plan.id], |row| {
                     Ok(QueueJob {
+                        olam_monitoring_retry: row.get(11)?,
                         report_unconfirmed: row.get(10)?,
                         region: None,
                         id: row.get(0)?,
@@ -2774,6 +2777,14 @@ query: 'metric{region="${DEPLOY_REGION}",instance=~"${DEPLOY_HOST_REGEX}",versio
             assert_eq!(job.log, set.jobs[0].log);
             assert_eq!(job.payload.as_deref(), Some("{}"));
         }
+        set.jobs[0].status = "failed".into();
+        set.jobs[0].phase = Some("deployment".into());
+        set.jobs[0].log = "OLAM job 137 was started, but GT could not retrieve its status. The remote job result is unknown.".into();
+        QueueService::synchronize_job_sets(&state, std::slice::from_ref(&set)).unwrap();
+        let summary = QueueService::summary_snapshot(&state).unwrap();
+        assert!(summary.plans[0].jobs[0].olam_monitoring_retry);
+        assert!(summary.plans[0].jobs[0].log.is_empty());
+        assert_eq!(summary.plans[0].jobs[0].details, "Deployment status unknown · Job #137");
         // Older Agents have no ID fields. Only use log IDs from the matching phase.
         set.jobs[0].validation_job_id = None;
         set.jobs[0].deployment_job_id = None;

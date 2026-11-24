@@ -44,3 +44,20 @@ test('parallel region rows allow approvals and lane-specific retries without byp
  b.region='a';assert.match(button(jobMarkup(plan,b,1),'restart'),/ disabled>/);
  b.region='b';a.region=null;assert.match(button(jobMarkup(plan,b,1),'restart'),/ disabled>/);
 });
+
+
+test("OLAM monitoring failure offers status recheck instead of deployment restart", () => {
+  const item = { ...job, status: "failed", action: "validate_deploy", olamMonitoringRetry: true };
+  const plan = { jobs: [item], status: "failed", parallelRegions: 1 };
+  let html = jobMarkup(plan, item, 0);
+  assert.match(button(html, "recheck_olam"), /aria-label="Recheck OLAM status \(no new deployment\)"/);
+  assert(!/ disabled[ >]/.test(button(html, "recheck_olam")));
+  assert.equal(button(html, "restart"), undefined);
+  assert.match(html, /queue-status is-warning">unknown<\/span>/);
+  html = jobMarkup({ ...plan, archived: true }, item, 0);
+  assert.match(button(html, "recheck_olam"), / disabled>/);
+  const failed = { ...item, olamMonitoringRetry: false };
+  assert.equal(button(jobMarkup({ ...plan, jobs: [failed] }, failed, 0), "recheck_olam"), undefined);
+  const blocked = { ...plan, jobs: [{ ...job, status: "queued" }, item] };
+  assert.match(button(jobMarkup(blocked, item, 1), "recheck_olam"), / disabled>/);
+});

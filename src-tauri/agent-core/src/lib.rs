@@ -103,6 +103,21 @@ pub struct AgentJobStatus {
     pub report_progress: std::collections::BTreeMap<String, String>,
 }
 
+impl AgentJobStatus {
+    pub fn olam_monitoring_retry_available(&self) -> bool {
+        let id = if self.phase.as_deref() == Some("deployment") || self.action == "deploy" {
+            self.deployment_job_id
+        } else { self.validation_job_id };
+        let Some(id) = id.filter(|id| *id > 0) else { return false; };
+        if self.driver != "olam" || self.status != "failed" { return false; }
+        let unknown = format!("OLAM job {id} was started, but GT could not retrieve its status.");
+        let failed = format!("OLAM job {id} failed.");
+        self.log.rfind(&unknown).is_some_and(|position| {
+            self.log.rfind(&failed).is_none_or(|failure| position > failure)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentJobSetStatus {
@@ -187,6 +202,10 @@ enum AgentAction {
         recover_unconfirmed_jira_report: bool,
         #[serde(default)]
         query_updates: Vec<ThanosQueryUpdate>,
+    },
+    RecheckOlamJob {
+        job_id: String,
+        credentials: Vec<AgentCredential>,
     },
     SetJobEnabled {
         job_id: String,
@@ -565,6 +584,10 @@ pub fn refresh_thanos_queries(updates: Vec<ThanosQueryUpdate>) -> Result<(), Age
     simple_request(AgentAction::RefreshThanosQueries { updates })
 }
 
+pub fn recheck_olam_job(job_id: String, credentials: Vec<AgentCredential>) -> Result<(), AgentIpcError> {
+    simple_request(AgentAction::RecheckOlamJob { job_id, credentials })
+}
+
 pub fn retry_job(job_id: String, credentials: Vec<AgentCredential>) -> Result<(), AgentIpcError> {
     retry_job_with_report_recovery(job_id, credentials, false)
 }
@@ -861,6 +884,32 @@ impl JobSetManager {
             ));
         }
         let schedule = regional::Schedule::parse(&set.plan_definition).unwrap_or_default();
+        // A failed status lookup has not established a failed deployment.
+        // Reattach before any ordinary retry path clears remote job IDs.
+        if set.jobs[index].olam_monitoring_retry_available() {
+            if !schedule.preceding_complete(set, index)
+                || set.retry_scope.as_ref().is_some_and(|scope| !scope.contains(&set.jobs[index].id)) {
+                return Err(AgentIpcError::InvalidJobSet("Complete preceding steps before checking OLAM status.".into()));
+            }
+            if credentials.is_empty() && !self.credentials.contains_key(&set.id) {
+                return Err(AgentIpcError::InvalidJobSet("Unlock KeePass before checking OLAM status.".into()));
+            }
+            if !credentials.is_empty() { self.credentials.insert(set.id.clone(), credentials); }
+            let region = schedule.region(&set.jobs[index]).map(str::to_owned);
+            let job = &mut set.jobs[index];
+            job.status = "running".into();
+            job.finished_at = None;
+            append_job_log(&mut job.log, "Rechecking existing OLAM job status. No new job will be launched.");
+            for following in &mut set.jobs[index + 1..] {
+                if following.status == "stopped" && (schedule.limit <= 1 || region.as_deref().is_some_and(|region| schedule.region(following) == Some(region))) {
+                    following.status = "queued".into();
+                }
+            }
+            set.status = "running".into();
+            let result = set.clone();
+            self.persist()?;
+            return Ok(result);
+        }
         if let Some(end) = deployment_pair_end(set, index) {
             if !schedule.preceding_complete(set, index)
                 || set
@@ -1626,6 +1675,28 @@ fn serve_requests(
                             let result = job_sets.lock().expect("job set lock").refresh_thanos_queries(updates);
                             match result {
                                 Ok(()) => (success_response(), false),
+                                Err(error) => (error_response(&error.to_string()), false),
+                            }
+                        }
+                        AgentAction::RecheckOlamJob { job_id, credentials } => {
+                            let retried = {
+                                let mut manager = job_sets.lock().expect("job set lock");
+                                let eligible = manager.job_sets.iter().flat_map(|set| &set.jobs)
+                                    .any(|job| job.id == job_id && job.olam_monitoring_retry_available());
+                                if eligible {
+                                    manager.retry(&job_id, credentials).map(|set| {
+                                        let credentials = manager.credentials.get(&set.id).cloned().unwrap_or_default();
+                                        (set, credentials)
+                                    })
+                                } else {
+                                    Err(AgentIpcError::InvalidJobSet("This job has no unknown OLAM result to recheck. Refresh the Queue.".into()))
+                                }
+                            };
+                            match retried {
+                                Ok((set, credentials)) => {
+                                    spawn_job_set_execution(job_sets.clone(), set.id, credentials);
+                                    (success_response(), false)
+                                }
                                 Err(error) => (error_response(&error.to_string()), false),
                             }
                         }
@@ -3704,6 +3775,46 @@ mod tests {
                 let loaded = JobSetManager::load(path.clone()).unwrap();
                 assert_eq!(loaded.job_sets[0].jobs[0].phase.as_deref(), Some(phase));
                 assert_eq!(loaded.job_sets[0].jobs[0].validation_job_id, Some(101));
+                fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn failed_olam_monitoring_retry_preserves_remote_job_phase_and_following_work() {
+        for phase in ["validation", "deployment"] {
+            for scoped in [false, true] {
+                let path = env::temp_dir().join(format!("gatetree-recheck-{}.json", uuid::Uuid::new_v4()));
+                let mut manager = JobSetManager::load(path.clone()).unwrap();
+                manager.submit(olam_submission(&["validate_deploy", "deploy"]), false).unwrap();
+                let set = &mut manager.job_sets[0];
+                set.status = "failed".into();
+                set.jobs[0].status = "failed".into();
+                set.jobs[0].phase = Some(phase.into());
+                set.jobs[0].validation_job_id = Some(659327);
+                set.jobs[0].deployment_job_id = (phase == "deployment").then_some(659334);
+                let id = if phase == "deployment" { 659334 } else { 659327 };
+                set.jobs[0].log = format!("Previous output\nOLAM job {id} was started, but GT could not retrieve its status. The remote job result is unknown.");
+                set.jobs[1].status = "completed".into();
+                set.jobs[1].deployment_job_id = Some(123);
+                let following = serde_json::to_value(&set.jobs[1]).unwrap();
+                if scoped { set.retry_scope = Some(vec!["job-0".into()]); }
+                manager.persist().unwrap();
+                let mut manager = JobSetManager::load(path.clone()).unwrap();
+                assert!(manager.job_sets[0].jobs[0].olam_monitoring_retry_available());
+                let result = manager.retry("job-0", vec![AgentCredential {
+                    reference: "api".into(), username: "user".into(), password: "test-only".into(),
+                }]).unwrap();
+                assert_eq!(result.jobs[0].status, "running");
+                assert_eq!(result.jobs[0].phase.as_deref(), Some(phase));
+                assert_eq!(result.jobs[0].validation_job_id, Some(659327));
+                assert_eq!(result.jobs[0].deployment_job_id, (phase == "deployment").then_some(659334));
+                assert!(result.jobs[0].log.starts_with("Previous output"));
+                assert_eq!(serde_json::to_value(&result.jobs[1]).unwrap(), following);
+                let mut failed = result.jobs[0].clone();
+                failed.status = "failed".into();
+                failed.log.push_str(&format!("\nOLAM job {id} failed.\nPLAY RECAP failed=1"));
+                assert!(!failed.olam_monitoring_retry_available(), "a confirmed remote failure requires a normal retry");
                 fs::remove_file(path).unwrap();
             }
         }

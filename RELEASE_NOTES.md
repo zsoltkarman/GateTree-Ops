@@ -1,5 +1,7 @@
 GateTree-Ops
 
+- Queue retries transient OLAM status requests and offers a Recheck OLAM status icon after monitoring failures. Rechecking keeps the existing remote job and approval, without redeploying; confirmed OLAM success remains successful if output retrieval fails.
+
 - SSH connections have a saved local Tunnels editor with custom source ports and destination hosts/ports. Rules use loopback-only OpenSSH forwarding and close with the SSH session; saving rules selects Terminal login. Reconnect to apply changes. Busy source ports stop login with a terminal error.
 
 - Planner selects a saved Thanos query whose name matches the selected role when adding a Thanos Query step. Manual selections are preserved, and unmatched names stay unselected.

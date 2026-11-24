@@ -375,11 +375,16 @@ fn poll_job(
     let mut last_output = String::new();
     let mut last_read = Instant::now();
     let mut status_auth_failures = 0;
+    let mut status_transient_failures = 0;
     let url = format!("{}/api/v2/jobs/{job_id}/", base_url.trim_end_matches('/'));
     for _ in 0..attempts {
         let response = client
             .get(&url)
             .send();
+        let transient = match &response {
+            Err(error) => error.is_connect() || error.is_timeout() || error.is_request() || error.is_body(),
+            Ok(response) => response.status().is_server_error() || matches!(response.status().as_u16(), 408 | 429),
+        };
         let unauthorized = response.as_ref().is_ok_and(|response| response.status() == reqwest::StatusCode::UNAUTHORIZED);
         let status_result = response
             .map_err(|error| format!("Could not poll OLAM job {job_id}: {error}"))
@@ -388,8 +393,16 @@ fn poll_job(
                 format!("OLAM job {job_id} response is invalid: {error}")
             }));
         let value = match status_result {
-            Ok(value) => { status_auth_failures = 0; value },
+            Ok(value) => { status_auth_failures = 0; status_transient_failures = 0; value },
             Err(error) => {
+                if transient {
+                    status_transient_failures += 1;
+                    if status_transient_failures < 3 {
+                        on_output(&format!("OLAM job {job_id} status lookup temporarily failed. Retrying {status_transient_failures}/2; no new job is being launched.\n{error}\n{last_output}"));
+                        thread::sleep(status_interval);
+                        continue;
+                    }
+                }
                 if unauthorized {
                     status_auth_failures += 1;
                     if status_auth_failures < 3 {
@@ -412,8 +425,9 @@ fn poll_job(
         };
         match value.get("status").and_then(Value::as_str).unwrap_or("") {
             "successful" => {
-                return job_output(client, base_url, job_id)
-                    .map_err(|error| format!("{error}\n{last_output}"));
+                return Ok(job_output(client, base_url, job_id).unwrap_or_else(|error| {
+                    format!("OLAM confirmed job {job_id} successful. Output could not be retrieved: {error}\nLast retrieved Ansible output:\n{last_output}")
+                }));
             }
             "failed" | "error" | "canceled" => {
                 let output =
@@ -793,6 +807,43 @@ pub(crate) mod tests {
             } else {
                 assert!(error.contains("Output retrieval also failed"));
                 assert!(!error.contains("OLAM job 381260 failed."));
+            }
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn transient_status_failures_retry_get_without_launch_and_keep_confirmed_success() {
+        for terminal in ["successful", "unavailable"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let responses = if terminal == "successful" {
+                    vec!["503", "running", "503", "503", "successful", "stdout"]
+                } else { vec!["503", "503", "503", "stdout"] };
+                for response in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut request = String::new(); reader.read_line(&mut request).unwrap();
+                    let path = if response == "stdout" { "/api/v2/jobs/659334/stdout/?format=txt" } else { "/api/v2/jobs/659334/" };
+                    assert!(request.starts_with(&format!("GET {path} HTTP/")), "retry must never launch a deployment");
+                    loop {
+                        let mut header = String::new(); reader.read_line(&mut header).unwrap();
+                        if header == "\r\n" { break; }
+                    }
+                    let (status, body) = if response == "503" || response == "stdout" {
+                        ("503 Service Unavailable", "temporarily unavailable".to_owned())
+                    } else { ("200 OK", json!({"status": response}).to_string()) };
+                    write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+            });
+            let result = poll_job(&test_api_client(), &format!("http://{address}"), 659334,
+                true, &|_| {}, Duration::ZERO, Duration::from_secs(600));
+            if terminal == "successful" {
+                assert!(result.unwrap().contains("OLAM confirmed job 659334 successful"));
+            } else {
+                assert!(result.unwrap_err().contains("remote job result is unknown"));
             }
             server.join().unwrap();
         }

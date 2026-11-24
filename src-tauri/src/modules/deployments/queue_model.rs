@@ -35,6 +35,7 @@ pub struct QueuePlan {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueJob {
+    pub olam_monitoring_retry: bool,
     pub report_unconfirmed: bool,
     pub region: Option<String>,
     pub id: String,

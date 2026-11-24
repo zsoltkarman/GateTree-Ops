@@ -108,7 +108,7 @@ pub fn control_deployment_queue_item(
         QueueService::set_approve_all(&state, &id, enabled).map_err(|error| error.to_string())?;
         return QueueService::snapshot(&state).map_err(|error| error.to_string());
     }
-    let keepass_password = if matches!(action.as_str(), "start" | "restart" | "retry_unconfirmed_report") {
+    let keepass_password = if matches!(action.as_str(), "start" | "restart" | "retry_unconfirmed_report" | "recheck_olam") {
         let status = agent_ipc::status().map_err(|error| error.to_string())?;
         crate::modules::vaults::session_keepass_password(
             &state,
@@ -117,7 +117,7 @@ pub fn control_deployment_queue_item(
     } else {
         None
     };
-    if matches!(action.as_str(), "start" | "restart" | "retry_unconfirmed_report") && keepass_password.is_none() {
+    if matches!(action.as_str(), "start" | "restart" | "retry_unconfirmed_report" | "recheck_olam") && keepass_password.is_none() {
         return Err("Unlock KeePass for the current Agent session first.".into());
     }
     if item_type == "plan" {
@@ -179,7 +179,7 @@ pub fn control_deployment_queue_item(
         QueueService::control(&state, "job", &id, &action).map_err(|error| error.to_string())?;
         return QueueService::snapshot(&state).map_err(|error| error.to_string());
     }
-    if item_type == "job" && matches!(action.as_str(), "start" | "restart" | "stop" | "retry_unconfirmed_report") {
+    if item_type == "job" && matches!(action.as_str(), "start" | "restart" | "stop" | "retry_unconfirmed_report" | "recheck_olam") {
         let snapshot = QueueService::snapshot(&state).map_err(|error| error.to_string())?;
         let plan = snapshot
             .plans
@@ -197,10 +197,14 @@ pub fn control_deployment_queue_item(
             .map_err(|error| error.to_string())?;
             let query_updates = submission.jobs.into_iter().filter(|job| job.driver == "thanos")
                 .filter_map(|job| job.payload.map(|payload| agent_ipc::ThanosQueryUpdate { job_id:job.id, payload })).collect();
-            agent_ipc::retry_job_with_thanos_queries(
-                id.clone(), submission.credentials, action == "retry_unconfirmed_report", query_updates,
-            )
-                .map_err(|error| error.to_string())?;
+            if action == "recheck_olam" {
+                agent_ipc::recheck_olam_job(id.clone(), submission.credentials)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                agent_ipc::retry_job_with_thanos_queries(
+                    id.clone(), submission.credentials, action == "retry_unconfirmed_report", query_updates,
+                ).map_err(|error| error.to_string())?;
+            }
         }
         QueueService::synchronize_agent(&state).map_err(|error| error.to_string())?;
         return QueueService::snapshot(&state).map_err(|error| error.to_string());

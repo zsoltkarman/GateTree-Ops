@@ -198,19 +198,20 @@ function planLogMarkup(plan, state) {
 }
 
 function jobMarkup(plan, job, index, groupKey = null, collapsed = false) {
-  const jobAction = controlAction(job.status);
+  const recheckOlam = job.driver === "olam" && job.status === "failed" && job.olamMonitoringRetry;
+  const jobAction = recheckOlam ? "recheck_olam" : controlAction(job.status);
   const retryPair = deploymentPairChecks(plan, index).length > 0;
   const parallel = plan.parallelRegions > 1;
   const previousIncomplete = plan.jobs.slice(0, index).some(previous => !["completed", "disabled"].includes(previous.status) && !(parallel && job.region && previous.region && job.region !== previous.region));
-  const blocked = plan.archived || job.status === "disabled" || !["stop", "approve"].includes(jobAction) && (previousIncomplete || !retryPair && parallel && (["running", "awaiting_approval"].includes(plan.status) || job.status === "completed"));
-  const controlLabel = retryPair ? "Restart deploy + Thanos" : `${actionLabel(jobAction)} Job`;
+  const blocked = plan.archived || job.status === "disabled" || !["stop", "approve"].includes(jobAction) && (previousIncomplete || !retryPair && !recheckOlam && parallel && (["running", "awaiting_approval"].includes(plan.status) || job.status === "completed"));
+  const controlLabel = recheckOlam ? "Recheck OLAM status (no new deployment)" : retryPair ? "Restart deploy + Thanos" : `${actionLabel(jobAction)} Job`;
   const blockedTitle = plan.archived ? "Archived Plan is read-only" : job.status === "disabled" ? "Enable this job before starting it" : "Waiting for previous enabled jobs to complete";
   const sshHost = ["olam", "container"].includes(job.driver) && job.action === "deploy" && /^[a-z0-9:][a-z0-9.:\-]*$/i.test(job.target || "");
   return `<div class="queue-job-item" data-job-item="${escapeHtml(job.id)}"${groupKey ? ` data-job-group-membership="${escapeHtml(groupKey)}"` : ""}${collapsed ? " hidden" : ""}><div data-job-row="${escapeHtml(job.id)}" class="queue-job-row${job.status === "disabled" ? " is-disabled" : ""}">
-      <span>${job.sequence}</span><strong>${escapeHtml(job.driver === "thanos" ? "Thanos Query" : job.name)}</strong><span class="queue-job-target"><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code>${sshHost ? `<button class="queue-host-ssh" data-ssh-job="${escapeHtml(job.id)}" title="SSH to ${escapeHtml(job.target)}" aria-label="SSH to ${escapeHtml(job.target)}">${icon("terminal")}</button>` : ""}</span><span class="queue-job-details" title="${escapeHtml(job.details)}">${jobDetailsMarkup(retryPair ? `${job.details} · Thanos validation failed` : job.status === "disabled" ? "Skipped during execution" : job.details)}</span><span class="queue-status is-${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>
+      <span>${job.sequence}</span><strong>${escapeHtml(job.driver === "thanos" ? "Thanos Query" : job.name)}</strong><span class="queue-job-target"><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code>${sshHost ? `<button class="queue-host-ssh" data-ssh-job="${escapeHtml(job.id)}" title="SSH to ${escapeHtml(job.target)}" aria-label="SSH to ${escapeHtml(job.target)}">${icon("terminal")}</button>` : ""}</span><span class="queue-job-details" title="${escapeHtml(job.details)}">${jobDetailsMarkup(retryPair ? `${job.details} · Thanos validation failed` : job.status === "disabled" ? "Skipped during execution" : job.details)}</span><span class="queue-status is-${escapeHtml(recheckOlam ? "warning" : job.status)}">${escapeHtml(recheckOlam ? "unknown" : job.status)}</span>
       <div class="queue-row-actions">
         <button data-control-job="${escapeHtml(job.id)}" data-control-action="${job.status === "disabled" ? "enable" : "disable"}" title="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-label="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-pressed="${job.status === "disabled"}" ${!plan.archived && ["queued", "stopped", "disabled"].includes(job.status) ? "" : "disabled"}>${icon(job.status === "disabled" ? "enable" : "disable")}</button>
-        <button data-control-job="${escapeHtml(job.id)}" data-control-action="${jobAction}" title="${blocked ? blockedTitle : controlLabel}" aria-label="${controlLabel}" ${blocked ? "disabled" : ""}>${icon(jobAction)}</button>
+        <button data-control-job="${escapeHtml(job.id)}" data-control-action="${jobAction}" title="${blocked ? blockedTitle : controlLabel}" aria-label="${controlLabel}" ${blocked ? "disabled" : ""}>${icon(recheckOlam ? "recheck" : jobAction)}</button>
         <button data-info="job-info:${escapeHtml(job.id)}" title="Job Info" aria-label="Job Info">${icon("info")}</button>
         <button data-info="job-log:${escapeHtml(job.id)}" title="Job Log" aria-label="Job Log">${icon("log")}</button>
       </div>
@@ -400,7 +401,7 @@ Have you checked Jira and want to resend the missing report operation?`);
         action = "retry_unconfirmed_report";
       }
     }
-    if (["start", "restart", "approve", "approve_all", "retry_unconfirmed_report"].includes(action)) {
+    if (["start", "restart", "approve", "approve_all", "retry_unconfirmed_report", "recheck_olam"].includes(action)) {
       if (!await ensureAgentCredentials()) return;
     }
     if (reviewedJob) {
@@ -408,7 +409,7 @@ Have you checked Jira and want to resend the missing report operation?`);
       const job = current.plans.flatMap((plan) => plan.jobs).find((job) => job.id === id);
       if (JSON.stringify(job) !== reviewedJob) throw new Error("The validation changed while you were reviewing it. Open Approve again to review the latest result.");
     }
-    progressDialog = showQueueProgress(root, action === "retry_unconfirmed_report" ? "Retrying Jira report…" : action === "approve_all" ? "Enabling Approve all…" : action === "revoke_approve_all" ? "Turning off Approve all…" : action === "deny" ? "Denying deployment…" : action === "disable" ? "Disabling job…" : action === "enable" ? "Enabling job…" : "Preparing Agent credentials…");
+    progressDialog = showQueueProgress(root, action === "recheck_olam" ? "Rechecking existing OLAM job…" : action === "retry_unconfirmed_report" ? "Retrying Jira report…" : action === "approve_all" ? "Enabling Approve all…" : action === "revoke_approve_all" ? "Turning off Approve all…" : action === "deny" ? "Denying deployment…" : action === "disable" ? "Disabling job…" : action === "enable" ? "Enabling job…" : "Preparing Agent credentials…");
     state.plans = (await controlDeploymentQueueItem(itemType, id, action)).plans;
     notifyQueue(state);
     render(root, state);
@@ -556,6 +557,7 @@ function icon(name) {
     trash: "<path d='M5 7h14M9 7V4h6v3M7.5 7l.7 13h7.6l.7-13'/>",
     start: "<path d='m8 5 11 7-11 7z'/>",
     stop: "<rect x='6' y='6' width='12' height='12' rx='1'/>",
+    recheck: "<path d='M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7'/><path d='m8 12 3 3 5-6'/>",
     restart: "<path d='M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7'/>",
     approve: "<path d='m5 12 4 4L19 6'/>",
     info: "<circle cx='12' cy='12' r='9'/><path d='M12 11v6M12 7h.01'/>",
