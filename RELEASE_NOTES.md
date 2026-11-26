@@ -1,5 +1,9 @@
 GateTree-Ops
 
+- Unreleased: Add a validated 18-query Kafka rolling-upgrade preset for three brokers (IDs 1,2,3; kafka1/kafka2/kafka3 DNS names), including source freshness, scrape health, current-node JDK 25.0.5.1, ISR, leadership, recovery and failures. Prepared workspace Query Sets activate on the next schema upgrade without changing existing Plans.
+
+- Unreleased: Config → Thanos Queries now supports reusable Query Sets. Planner can gate each host on all node- and cluster-scoped checks passing in consecutive complete rounds, with shared evaluation timestamps, minimum result counts, result age checks and a common timeout. Query Set policy and membership are frozen in each Plan; saved query text stays live. Missing queries/results, partial responses and failures block progress. Queue shows round progress and named check results in its logs. Existing single-query Plans retain their behavior.
+
 - Queue retries transient OLAM status requests and offers a Recheck OLAM status icon after monitoring failures. Rechecking keeps the existing remote job and approval, without redeploying; confirmed OLAM success remains successful if output retrieval fails.
 
 - SSH connections have a saved local Tunnels editor with custom source ports and destination hosts/ports. Rules use loopback-only OpenSSH forwarding and close with the SSH session; saving rules selects Terminal login. Reconnect to apply changes. Busy source ports stop login with a terminal error.

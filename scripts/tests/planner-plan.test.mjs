@@ -141,3 +141,18 @@ test('Planner requires a saved query selection and rejects missing or deleted li
  assert.equal(plan.inputs.olam.steps[0].query,'vector(1)');
  assert.ok(!Object.hasOwn(plan.inputs.olam.steps[0],'validationQueryId'));
 });
+
+test('Query Set selection freezes membership and policy and serializes a single gate',()=>{
+ const d=draft();d.olamTargets={roles:['kafka'],sites:['phx'],hosts:['node1','node2'],job_mode:'per_host'};
+ d.steps=[{name:'Deploy'},{name:'Kafka health',type:'thanos_query_set',querySetId:'set'}];
+ const sets=[{id:'set',name:'Kafka',items:[{queryId:'java',scope:'node',expectedVersion:'25.0.5.1',minResults:1},{queryId:'isr',scope:'cluster',minResults:3}],stableSamples:3,intervalSeconds:30,timeoutSeconds:1200,maxAgeSeconds:120}];
+ const queries=[{id:'java',query:'jvm_info{instance=~"${DEPLOY_HOST_REGEX}",version="${EXPECTED_VERSION}"}'},{id:'isr',query:'isr{region="${DEPLOY_REGION}"}'}];
+ const configs=[{...processes[0],definition:JSON.stringify({steps:[{driver:'olam'}],details:{thanos:{url:'https://thanos.test'}}})}];
+ const plan=buildPlannerPlan(d,configs,accounts,queries,sets);
+ assert.equal(plan.inputs.olam.steps.length,2);assert.equal(plan.inputs.olam.steps[1].query_set.items[1].minResults,3);
+ sets[0].stableSamples=8;assert.equal(plan.inputs.olam.steps[1].query_set.stableSamples,3);
+ const yaml=plannerPlanYaml(plan);assert.ok(yaml.includes('type: "thanos_query_set"'));assert.ok(yaml.includes('query_set: {'));
+ d.olamTargets.job_mode='together';assert.throws(()=>buildPlannerPlan(d,configs,accounts,queries,sets),/Separate job/);
+ d.olamTargets.job_mode='per_host';assert.throws(()=>buildPlannerPlan(d,configs,accounts,queries.slice(1),sets),/deleted/);
+ d.steps.reverse();assert.throws(()=>buildPlannerPlan(d,configs,accounts,queries,sets),/preceding/);
+});

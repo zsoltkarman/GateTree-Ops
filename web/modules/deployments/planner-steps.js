@@ -1,8 +1,8 @@
 import { escapeHtml } from "../../shared/ui.js";
 
-const defaultStepName = type => type === "thanos_query" ? "Thanos" : "Deploy";
+const defaultStepName = type => type === "thanos_query_set" ? "Thanos Query Set" : type === "thanos_query" ? "Thanos" : "Deploy";
 export const emptyPlannerStep = () => ({ id: crypto.randomUUID(), name: "Deploy", type: "deploy", query: "", expectedVersion: "", extraVarsText: "" });
-export function mountPlannerSteps(root, { draft, onChange = () => {}, validationQueries = () => [] } = {}) {
+export function mountPlannerSteps(root, { draft, onChange = () => {}, validationQueries = () => [], querySets = () => [] } = {}) {
   draft.strategy ||= "linear";
   draft.parallelRegions ??= 1;
   if (!draft.steps?.length) draft.steps = [emptyPlannerStep()];
@@ -13,6 +13,7 @@ export function mountPlannerSteps(root, { draft, onChange = () => {}, validation
   }
   function render(focus) {
     const queries = validationQueries();
+    const sets = querySets();
     const roles = draft.targetSelection?.roles ?? draft.olamTargets?.roles ?? [];
     const role = roles.length === 1 ? roles[0].trim().toLowerCase() : "";
     for (const step of draft.steps) {
@@ -32,12 +33,12 @@ export function mountPlannerSteps(root, { draft, onChange = () => {}, validation
       <header class="planner-details-heading"><h2>Steps</h2><nav><label class="planner-parallel-regions">Parallel regions<input type="number" min="1" max="16" step="1" data-parallel-regions aria-label="Parallel regions" title="Maximum regions running together. Deploy and Thanos stay sequential within each region. Requires Separate job per host." value="${escapeHtml(String(draft.parallelRegions))}"></label><select data-planner-strategy aria-label="Execution strategy" title="Execution strategy"><option value="linear" ${draft.strategy === "linear" ? "selected" : ""}>Linear</option><option value="free" ${draft.strategy === "free" ? "selected" : ""}>Free</option></select><button type="button" data-add-step>+ Add Step</button></nav></header>
 
       <div class="planner-step-list">${draft.steps.map((step, index) => `<article class="planner-step" data-planner-step="${escapeHtml(step.id)}">
-        <header><strong>${index + 1}.</strong><select data-step-type aria-label="Step ${index + 1} type"><option value="deploy"${step.type === "deploy" ? " selected" : ""}>Deploy</option><option value="thanos_query"${step.type === "thanos_query" ? " selected" : ""}>Thanos Query</option></select><input data-step-name aria-label="Step ${index + 1} name" value="${escapeHtml(step.name)}" placeholder="Step name" required><nav>
+        <header><strong>${index + 1}.</strong><select data-step-type aria-label="Step ${index + 1} type"><option value="deploy"${step.type === "deploy" ? " selected" : ""}>Deploy</option><option value="thanos_query"${step.type === "thanos_query" ? " selected" : ""}>Thanos Query</option><option value="thanos_query_set"${step.type === "thanos_query_set" ? " selected" : ""}>Thanos Query Set</option></select><input data-step-name aria-label="Step ${index + 1} name" value="${escapeHtml(step.name)}" placeholder="Step name" required><nav>
           <button type="button" data-step-up title="Move step up" aria-label="Move step ${index + 1} up" ${index === 0 ? "disabled" : ""}>${icon("up")}</button>
           <button type="button" data-step-down title="Move step down" aria-label="Move step ${index + 1} down" ${index === draft.steps.length - 1 ? "disabled" : ""}>${icon("down")}</button>
           <button type="button" data-step-remove title="Remove step" aria-label="Remove step ${index + 1}" ${draft.steps.length === 1 ? "disabled" : ""}>${icon("remove")}</button>
         </nav></header>
-        ${step.type === "thanos_query" ? `<label class="planner-saved-query">Saved query<select data-step-saved-query aria-label="Step ${index + 1} saved validation query"><option value="" disabled${!queries.some(query => query.id === step.validationQueryId) ? " selected" : ""}>${queries.length ? "Select a saved query" : "Add queries in Config → Thanos Queries"}</option>${queries.map(query => `<option value="${escapeHtml(query.id)}"${step.validationQueryId === query.id ? " selected" : ""}>${escapeHtml(query.name)}</option>`).join("")}</select></label>${step.query.includes("${EXPECTED_VERSION}") ? `<label>Expected exporter version<input data-step-expected-version aria-label="Step ${index + 1} expected exporter version" value="${escapeHtml(step.expectedVersion)}" placeholder="e.g. 1.97.0"></label>` : ""}${step.query ? `<textarea data-step-query-preview rows="5" aria-label="Step ${index + 1} saved PromQL query" readonly spellcheck="false">${escapeHtml(step.query)}</textarea>` : ""}<p class="planner-query-hint">Manage queries in Deployments → Config → Thanos Queries.</p>` : `<textarea data-step-vars rows="3" aria-label="Step ${index + 1} extra variables" title="Optional extra variables: NAME: value or NAME=value, one per line" placeholder="VARIABLE: value&#10;OTHER_VARIABLE: value" spellcheck="false">${escapeHtml(step.extraVarsText)}</textarea>`}
+        ${step.type === "thanos_query_set" ? `<label class="planner-saved-query">Saved Query Set<select data-step-query-set aria-label="Step ${index+1} saved Query Set"><option value="">Select a Query Set</option>${sets.map(set => `<option value="${escapeHtml(set.id)}"${set.id === step.querySetId ? " selected" : ""}>${escapeHtml(set.name)}</option>`).join("")}</select></label>${sets.find(set => set.id === step.querySetId) ? `<p class="planner-query-hint">${sets.find(set => set.id === step.querySetId).items.length} required checks · ${sets.find(set => set.id === step.querySetId).stableSamples} consecutive healthy rounds · all must pass. Manage in Config → Thanos Queries.</p>` : ""}` : step.type === "thanos_query" ? `<label class="planner-saved-query">Saved query<select data-step-saved-query aria-label="Step ${index + 1} saved validation query"><option value="" disabled${!queries.some(query => query.id === step.validationQueryId) ? " selected" : ""}>${queries.length ? "Select a saved query" : "Add queries in Config → Thanos Queries"}</option>${queries.map(query => `<option value="${escapeHtml(query.id)}"${step.validationQueryId === query.id ? " selected" : ""}>${escapeHtml(query.name)}</option>`).join("")}</select></label>${step.query.includes("${EXPECTED_VERSION}") ? `<label>Expected exporter version<input data-step-expected-version aria-label="Step ${index + 1} expected exporter version" value="${escapeHtml(step.expectedVersion)}" placeholder="e.g. 1.97.0"></label>` : ""}${step.query ? `<textarea data-step-query-preview rows="5" aria-label="Step ${index + 1} saved PromQL query" readonly spellcheck="false">${escapeHtml(step.query)}</textarea>` : ""}<p class="planner-query-hint">Manage queries in Deployments → Config → Thanos Queries.</p>` : `<textarea data-step-vars rows="3" aria-label="Step ${index + 1} extra variables" title="Optional extra variables: NAME: value or NAME=value, one per line" placeholder="VARIABLE: value&#10;OTHER_VARIABLE: value" spellcheck="false">${escapeHtml(step.extraVarsText)}</textarea>`}
       </article>`).join("")}</div></section>`;
     bind();
     if (focus) root.querySelector(focus)?.focus();
@@ -57,6 +58,8 @@ export function mountPlannerSteps(root, { draft, onChange = () => {}, validation
         if (!step.name.trim() || step.name === defaultStepName(step.type)) step.name = defaultStepName(event.target.value);
         step.type = event.target.value; render(`[data-planner-step="${CSS.escape(step.id)}"] [data-step-name]`); onChange();
       });
+      const querySet = el.querySelector("[data-step-query-set]");
+      if (querySet) querySet.addEventListener("change", () => { step.querySetId = querySet.value; render(); onChange(); });
       const saved = el.querySelector("[data-step-saved-query]");
       if (saved) saved.addEventListener("change", () => {
         step.validationQueryId = saved.value;

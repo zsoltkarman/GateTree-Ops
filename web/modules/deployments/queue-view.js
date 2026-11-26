@@ -208,7 +208,7 @@ function jobMarkup(plan, job, index, groupKey = null, collapsed = false) {
   const blockedTitle = plan.archived ? "Archived Plan is read-only" : job.status === "disabled" ? "Enable this job before starting it" : "Waiting for previous enabled jobs to complete";
   const sshHost = ["olam", "container"].includes(job.driver) && job.action === "deploy" && /^[a-z0-9:][a-z0-9.:\-]*$/i.test(job.target || "");
   return `<div class="queue-job-item" data-job-item="${escapeHtml(job.id)}"${groupKey ? ` data-job-group-membership="${escapeHtml(groupKey)}"` : ""}${collapsed ? " hidden" : ""}><div data-job-row="${escapeHtml(job.id)}" class="queue-job-row${job.status === "disabled" ? " is-disabled" : ""}">
-      <span>${job.sequence}</span><strong>${escapeHtml(job.driver === "thanos" ? "Thanos Query" : job.name)}</strong><span class="queue-job-target"><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code>${sshHost ? `<button class="queue-host-ssh" data-ssh-job="${escapeHtml(job.id)}" title="SSH to ${escapeHtml(job.target)}" aria-label="SSH to ${escapeHtml(job.target)}">${icon("terminal")}</button>` : ""}</span><span class="queue-job-details" title="${escapeHtml(job.details)}">${jobDetailsMarkup(retryPair ? `${job.details} · Thanos validation failed` : job.status === "disabled" ? "Skipped during execution" : job.details)}</span><span class="queue-status is-${escapeHtml(recheckOlam ? "warning" : job.status)}">${escapeHtml(recheckOlam ? "unknown" : job.status)}</span>
+      <span>${job.sequence}</span><strong>${escapeHtml(job.driver === "thanos" ? thanosJobName(job) : job.name)}</strong><span class="queue-job-target"><code title="${escapeHtml(job.target || "Plan level")}">${escapeHtml(job.target || "—")}</code>${sshHost ? `<button class="queue-host-ssh" data-ssh-job="${escapeHtml(job.id)}" title="SSH to ${escapeHtml(job.target)}" aria-label="SSH to ${escapeHtml(job.target)}">${icon("terminal")}</button>` : ""}</span><span class="queue-job-details" title="${escapeHtml(job.details)}">${jobDetailsMarkup(retryPair ? `${job.details} · Thanos validation failed` : job.status === "disabled" ? "Skipped during execution" : job.details)}</span><span class="queue-status is-${escapeHtml(recheckOlam ? "warning" : job.status)}">${escapeHtml(recheckOlam ? "unknown" : job.status)}</span>
       <div class="queue-row-actions">
         <button data-control-job="${escapeHtml(job.id)}" data-control-action="${job.status === "disabled" ? "enable" : "disable"}" title="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-label="${job.status === "disabled" ? "Enable Job" : "Disable Job"}" aria-pressed="${job.status === "disabled"}" ${!plan.archived && ["queued", "stopped", "disabled"].includes(job.status) ? "" : "disabled"}>${icon(job.status === "disabled" ? "enable" : "disable")}</button>
         <button data-control-job="${escapeHtml(job.id)}" data-control-action="${jobAction}" title="${blocked ? blockedTitle : controlLabel}" aria-label="${controlLabel}" ${blocked ? "disabled" : ""}>${icon(recheckOlam ? "recheck" : jobAction)}</button>
@@ -218,6 +218,11 @@ function jobMarkup(plan, job, index, groupKey = null, collapsed = false) {
     </div>
     ${jobInfoMarkup(job)}
     ${jobLogMarkup(job)}</div>`;
+}
+
+function thanosJobName(job) {
+  try { const payload = JSON.parse(job.payload ?? "{}"); if (Array.isArray(payload.checks)) return `Thanos Set · ${payload.query_set_name || job.name}`; } catch {}
+  return "Thanos Query";
 }
 
 function jobDetailsMarkup(details = "") {

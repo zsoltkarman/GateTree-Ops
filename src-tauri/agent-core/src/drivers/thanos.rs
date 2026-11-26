@@ -113,10 +113,15 @@ fn query_result(body: &Value) -> Result<(bool, String), String> {
 pub(crate) fn payload_query(job: &AgentJobStatus) -> Result<String, String> {
     let payload: Value = serde_json::from_str(job.payload.as_deref().unwrap_or("{}"))
         .map_err(|_| "Invalid Thanos query payload.")?;
-    if let Some(error) = payload["query_error"].as_str() { return Err(error.into()); }
-    payload["query"].as_str().map(str::trim)
+    if let Some(error) = payload["query_error"].as_str() {
+        return Err(error.into());
+    }
+    payload["query"]
+        .as_str()
+        .map(str::trim)
         .filter(|s| !s.is_empty() && s.len() <= 32768 && !s.contains("${"))
-        .map(str::to_owned).ok_or_else(|| "A complete PromQL query is required.".into())
+        .map(str::to_owned)
+        .ok_or_else(|| "A complete PromQL query is required.".into())
 }
 
 pub fn execute(
@@ -126,7 +131,25 @@ pub fn execute(
     on_output: &dyn Fn(&str),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
-    execute_with_query(process, credentials, on_output, &|| payload_query(job), cancelled)
+    let payload: Value = serde_json::from_str(job.payload.as_deref().unwrap_or("{}"))
+        .map_err(|_| "Invalid Thanos payload.")?;
+    if payload.get("checks").is_some() {
+        execute_with_queries(
+            process,
+            credentials,
+            on_output,
+            &|| Ok(payload.clone()),
+            cancelled,
+        )
+    } else {
+        execute_with_query(
+            process,
+            credentials,
+            on_output,
+            &|| payload_query(job),
+            cancelled,
+        )
+    }
 }
 
 pub(crate) fn execute_with_query(
@@ -136,12 +159,141 @@ pub(crate) fn execute_with_query(
     current_query: &dyn Fn() -> Result<String, String>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
+    execute_with_queries(
+        process,
+        credentials,
+        on_output,
+        &|| Ok(serde_json::json!({"query": current_query()?})),
+        cancelled,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Check {
+    name: String,
+    query: String,
+    min_results: usize,
+}
+
+fn checks(payload: &Value) -> Result<Vec<Check>, String> {
+    if let Some(error) = payload["query_error"].as_str() {
+        return Err(error.into());
+    }
+    let entries: Vec<&Value> = if let Some(items) = payload.get("checks") {
+        let items = items
+            .as_array()
+            .filter(|items| !items.is_empty() && items.len() <= 32)
+            .ok_or("A Query Set requires 1..32 checks.")?;
+        items.iter().collect()
+    } else {
+        vec![payload]
+    };
+    entries
+        .into_iter()
+        .map(|item| {
+            if let Some(error) = item["query_error"].as_str() {
+                return Err(error.into());
+            }
+            let query = item["query"]
+                .as_str()
+                .map(str::trim)
+                .filter(|q| !q.is_empty() && q.len() <= 32768 && !q.contains("${"))
+                .ok_or("A complete PromQL query is required for every check.")?;
+            let min_results = item
+                .get("min_results")
+                .map_or(Some(1), Value::as_u64)
+                .filter(|n| (1..=10000).contains(n))
+                .ok_or("Invalid minimum result count.")? as usize;
+            Ok(Check {
+                name: item["query_name"].as_str().unwrap_or("Query").into(),
+                query: query.into(),
+                min_results,
+            })
+        })
+        .collect()
+}
+
+fn result_for_check(
+    body: &Value,
+    check: &Check,
+    evaluated_at: f64,
+    max_age: Option<u64>,
+) -> Result<(bool, String), String> {
+    let (mut ok, mut summary) = query_result(body)?;
+    let data = &body["data"];
+    let rows: Vec<&Value> = if data["resultType"] == "scalar" {
+        vec![&data["result"]]
+    } else {
+        data["result"]
+            .as_array()
+            .map(|a| a.iter().map(|r| &r["value"]).collect())
+            .unwrap_or_default()
+    };
+    if rows.len() < check.min_results {
+        ok = false;
+        summary.push_str(&format!("; need at least {} results", check.min_results));
+    }
+    if let Some(age) = max_age {
+        let fresh = rows.iter().all(|row| {
+            row[0].as_f64().is_some_and(|t| {
+                t.is_finite() && t <= evaluated_at + 1.0 && evaluated_at - t <= age as f64
+            })
+        });
+        if !fresh {
+            ok = false;
+            summary.push_str("; stale or invalid result timestamp");
+        }
+    }
+    Ok((ok, summary))
+}
+
+pub(crate) fn execute_with_queries(
+    process: &str,
+    credentials: &[AgentCredential],
+    on_output: &dyn Fn(&str),
+    current_payload: &dyn Fn() -> Result<Value, String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
     let process: Value = serde_json::from_str(process).map_err(|_| "Invalid Process Config.")?;
-    let c = config(
+    let mut c = config(
         process
             .pointer("/details/thanos")
             .ok_or("Configure details.thanos in Deployments → Config.")?,
     )?;
+    let initial = current_payload()?;
+    let is_set = initial.get("checks").is_some();
+    let stable = if is_set {
+        initial["stable_samples"]
+            .as_u64()
+            .filter(|v| (1..=100).contains(v))
+            .ok_or("Invalid Query Set consecutive rounds.")?
+    } else {
+        1
+    };
+    let max_age = if is_set {
+        Some(
+            initial["max_age_seconds"]
+                .as_u64()
+                .filter(|v| (1..=3600).contains(v))
+                .ok_or("Invalid Query Set maximum result age.")?,
+        )
+    } else {
+        None
+    };
+    if is_set {
+        c.timeout_seconds = initial["timeout_seconds"]
+            .as_u64()
+            .filter(|v| (1..=86400).contains(v))
+            .ok_or("Invalid Query Set timeout.")?;
+        c.interval_seconds = initial["interval_seconds"]
+            .as_u64()
+            .filter(|v| *v > 0 && *v <= c.timeout_seconds)
+            .ok_or("Invalid Query Set interval.")?;
+        if (stable - 1) * c.interval_seconds >= c.timeout_seconds {
+            return Err("Query Set consecutive rounds cannot fit within its timeout.".into());
+        }
+    }
+    checks(&initial)?;
     let credential = if c.auth == "none" {
         None
     } else {
@@ -164,7 +316,8 @@ pub(crate) fn execute_with_query(
         c.timeout_seconds, c.interval_seconds
     );
     let mut attempt = 0;
-    let mut previous_query = String::new();
+    let mut previous_payload = Value::Null;
+    let mut streak = 0;
     loop {
         if cancelled() {
             return Err("Thanos validation stopped.".into());
@@ -176,25 +329,52 @@ pub(crate) fn execute_with_query(
                 c.timeout_seconds
             ));
         }
-        let query = current_query().map_err(|error| format!("{log}\n{error}"))?;
-        if query != previous_query {
-            log.push_str(&format!("Query: {query}\n"));
-            previous_query.clone_from(&query);
+        let payload = if attempt == 0 {
+            initial.clone()
+        } else {
+            current_payload().map_err(|error| format!("{log}\n{error}"))?
+        };
+        let entries = checks(&payload).map_err(|error| format!("{log}\n{error}"))?;
+        if payload != previous_payload {
+            streak = 0;
+            for check in &entries {
+                log.push_str(&format!("{} — Query: {}\n", check.name, check.query));
+            }
+            previous_payload = payload.clone();
         }
-        attempt += 1;
-        let mut request = client
-            .get(&url)
-            .query(&[("query", query.as_str()), ("partial_response", "false")])
-            .header("Accept", "application/json")
-            .timeout(remaining.min(Duration::from_secs(15)));
-        if let Some(credential) = credential {
-            request = if c.auth == "basic" {
-                request.basic_auth(&credential.username, Some(&credential.password))
-            } else {
-                request.bearer_auth(&credential.password)
-            };
-        }
-        let mut result = (|| -> Result<(bool, String), String> { Ok(match request.send() {
+        let evaluated_at = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        let query_time = evaluated_at.to_string();
+        let mut round_ok = true;
+        let mut round_log = String::new();
+        for check in &entries {
+            if cancelled() {
+                return Err("Thanos validation stopped.".into());
+            }
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                round_ok = false;
+                break;
+            }
+            let query = &check.query;
+            // Every member is queried at the same evaluation time.
+
+            let mut request = client
+                .get(&url)
+                .query(&[
+                    ("query", query.as_str()),
+                    ("partial_response", "false"),
+                    ("time", query_time.as_str()),
+                ])
+                .header("Accept", "application/json")
+                .timeout(remaining.min(Duration::from_secs(15)));
+            if let Some(credential) = credential {
+                request = if c.auth == "basic" {
+                    request.basic_auth(&credential.username, Some(&credential.password))
+                } else {
+                    request.bearer_auth(&credential.password)
+                };
+            }
+            let result = (|| -> Result<(bool, String), String> { Ok(match request.send() {
             Ok(mut response) => {
                 let status = response.status();
                 if matches!(status.as_u16(), 400 | 401 | 403 | 404 | 422) { return Err(format!("Thanos query failed (HTTP {}). Check the query, URL and configured Vault account.", status.as_u16())); }
@@ -204,33 +384,49 @@ pub(crate) fn execute_with_query(
                     Read::take(&mut response, 2 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|_| "Could not read Thanos response.")?;
                     if bytes.len() > 2 * 1024 * 1024 { return Err("Thanos response exceeds 2 MiB. Narrow the query.".into()); }
                     let body: Value = serde_json::from_slice(&bytes).map_err(|_| "Thanos returned invalid JSON.")?;
-                    let (ok, summary) = query_result(&body)?;
+                    let (ok, summary) = result_for_check(&body, check, evaluated_at, max_age)?;
                     // Keep the last response as evidence, bounded independently from the polling log.
                     let evidence = serde_json::to_string(&body["data"]).unwrap_or_default();
                     (ok, format!("{summary}\nResult: {}", evidence.chars().take(12000).collect::<String>()))
                 }
             },
             Err(error) => (false, format!("Thanos connection/timeout error; retrying ({}).", if error.is_timeout() { "timeout" } else { "connection" })),
-        }) })().map_err(|error| format!("{log}\n{error}"))?;
-        // A Config edit during the request invalidates its response. The next
-        // poll must verify the current expression before it can pass the job.
-        if current_query().map_err(|error| format!("{log}\n{error}"))? != query {
-            result = (false, "Saved query changed during the request; verifying the latest Config next.".into());
+        }) })().map_err(|error| format!("{log}\n{}: {error}", check.name))?;
+            round_ok &= result.0;
+            round_log.push_str(&format!(
+                "{}: {} — {}\n",
+                check.name,
+                if result.0 { "OK" } else { "WAITING" },
+                result.1
+            ));
         }
+        // A library edit invalidates the entire round, including earlier successes.
+        if current_payload().map_err(|error| format!("{log}\n{error}"))? != payload {
+            round_ok = false;
+            round_log.push_str(
+                "Saved query changed during the request; verifying the latest Config next.\n",
+            );
+        }
+        attempt += 1;
+        streak = if round_ok { streak + 1 } else { 0 };
         if log.len() > 48000 {
-            log = format!("Thanos validation\nQuery: {query}\nEarlier attempts omitted.\n");
+            log = "Thanos validation\nEarlier attempts omitted.\n".into();
         }
         log.push_str(&format!(
             "\n{} - attempt {attempt}, elapsed {}s: {}\n",
             chrono::Utc::now().to_rfc3339(),
             start.elapsed().as_secs(),
-            result.1
+            format!("{round_log}Consecutive healthy rounds: {streak}/{stable}")
         ));
         on_output(&log);
         if cancelled() {
             return Err("Thanos validation stopped.".into());
         }
-        if result.0 && start.elapsed() <= timeout {
+        if round_ok
+            && streak >= stable
+            && start.elapsed() <= timeout
+            && current_payload().map_err(|error| format!("{log}\n{error}"))? == payload
+        {
             return Ok(format!("{log}\nThanos validation passed."));
         }
         let next = Instant::now()
@@ -291,7 +487,7 @@ mod tests {
                 }
                 requests.push(String::from_utf8(bytes).unwrap());
                 let body =
-                    json!({"status":"success","data":{"resultType":"scalar","result":[1,value]}})
+                    json!({"status":"success","data":{"resultType":"scalar","result":[chrono::Utc::now().timestamp_millis() as f64 / 1000.0,value]}})
                         .to_string();
                 write!(stream,"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             }
@@ -369,7 +565,7 @@ mod tests {
     }
     #[test]
     fn only_complete_nonempty_all_one_results_pass() {
-        let scalar = |value: &str| json!({"status":"success","data":{"resultType":"scalar","result":[1,value]}});
+        let scalar = |value: &str| json!({"status":"success","data":{"resultType":"scalar","result":[chrono::Utc::now().timestamp_millis() as f64 / 1000.0,value]}});
         for value in ["0", "2", "NaN", "+Inf", "-1"] {
             assert!(!query_result(&scalar(value)).unwrap().0);
         }
@@ -390,11 +586,20 @@ mod tests {
     #[test]
     fn every_http_attempt_uses_latest_config_and_logs_the_actual_query() {
         let (url, handle) = server(vec![("0", 200), ("1", 200)]);
-        let process = json!({"details":{"thanos":{"url":url,"timeout_seconds":5,"interval_seconds":1}}}).to_string();
+        let process =
+            json!({"details":{"thanos":{"url":url,"timeout_seconds":5,"interval_seconds":1}}})
+                .to_string();
         let query = std::cell::RefCell::new("vector(0)".to_string());
-        let log = execute_with_query(&process, &[], &|_| {
-            *query.borrow_mut() = "vector(1)".into();
-        }, &|| Ok(query.borrow().clone()), &|| false).unwrap();
+        let log = execute_with_query(
+            &process,
+            &[],
+            &|_| {
+                *query.borrow_mut() = "vector(1)".into();
+            },
+            &|| Ok(query.borrow().clone()),
+            &|| false,
+        )
+        .unwrap();
         let requests = handle.join().unwrap();
         assert!(requests[0].contains("query=vector%280%29"));
         assert!(requests[1].contains("query=vector%281%29"));
@@ -405,12 +610,27 @@ mod tests {
     #[test]
     fn config_change_during_successful_request_requires_another_poll() {
         let (url, handle) = server(vec![("1", 200), ("1", 200)]);
-        let process = json!({"details":{"thanos":{"url":url,"timeout_seconds":5,"interval_seconds":1}}}).to_string();
+        let process =
+            json!({"details":{"thanos":{"url":url,"timeout_seconds":5,"interval_seconds":1}}})
+                .to_string();
         let reads = std::cell::Cell::new(0);
-        let log = execute_with_query(&process, &[], &|_| {}, &|| {
-            let count = reads.get(); reads.set(count + 1);
-            Ok(if count == 0 { "vector(1)" } else { "sum(vector(1))" }.into())
-        }, &|| false).unwrap();
+        let log = execute_with_query(
+            &process,
+            &[],
+            &|_| {},
+            &|| {
+                let count = reads.get();
+                reads.set(count + 1);
+                Ok(if count == 0 {
+                    "vector(1)"
+                } else {
+                    "sum(vector(1))"
+                }
+                .into())
+            },
+            &|| false,
+        )
+        .unwrap();
         assert_eq!(handle.join().unwrap().len(), 2);
         assert!(log.contains("changed during the request"));
         assert!(log.contains("Query: sum(vector(1))"));
@@ -430,5 +650,108 @@ mod tests {
             invalid[field] = value;
             assert!(validate_config(&invalid).is_err());
         }
+    }
+    fn set_payload() -> Value {
+        json!({"checks":[{"query_name":"Java","query":"vector(1)","min_results":1},
+            {"query_name":"ISR","query":"sum(vector(1))","min_results":1}],
+            "stable_samples":2,"interval_seconds":1,"timeout_seconds":10,"max_age_seconds":120})
+    }
+    #[test]
+    fn query_set_requires_all_members_in_consecutive_rounds_and_resets_on_failure() {
+        let (url, handle) = server(vec![
+            ("1", 200),
+            ("1", 200),
+            ("1", 200),
+            ("0", 200),
+            ("1", 200),
+            ("1", 200),
+            ("1", 200),
+            ("1", 200),
+        ]);
+        let process =
+            json!({"details":{"thanos":{"url":url,"timeout_seconds":30,"interval_seconds":1}}})
+                .to_string();
+        let log =
+            execute_with_queries(&process, &[], &|_| {}, &|| Ok(set_payload()), &|| false).unwrap();
+        let requests = handle.join().unwrap();
+        assert_eq!(requests.len(), 8);
+        assert!(log.contains("attempt 4"));
+        assert!(log.contains("Consecutive healthy rounds: 0/2"));
+        assert!(log.contains("Consecutive healthy rounds: 2/2"));
+        assert!(log.contains("ISR: WAITING"));
+        for pair in requests.chunks(2) {
+            let time = |request: &str| {
+                request
+                    .split("time=")
+                    .nth(1)
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            };
+            assert_eq!(time(&pair[0]), time(&pair[1]));
+        }
+    }
+    #[test]
+    fn query_set_library_changes_reset_the_entire_streak() {
+        let (url, handle) = server(vec![("1", 200); 6]);
+        let process =
+            json!({"details":{"thanos":{"url":url,"timeout_seconds":10,"interval_seconds":1}}})
+                .to_string();
+        let payload = std::cell::RefCell::new(set_payload());
+        let count = std::cell::Cell::new(0);
+        let log = execute_with_queries(
+            &process,
+            &[],
+            &|_| {
+                if count.get() == 0 {
+                    payload.borrow_mut()["checks"][0]["query"] = json!("max(vector(1))");
+                }
+                count.set(count.get() + 1);
+            },
+            &|| Ok(payload.borrow().clone()),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(handle.join().unwrap().len(), 6);
+        assert!(log.contains("attempt 3"));
+    }
+    #[test]
+    fn sets_reject_empty_deleted_invalid_and_incomplete_checks() {
+        assert!(checks(&json!({"checks":[]})).is_err());
+        assert!(
+            checks(&json!({"checks":[{"query":"vector(1)","query_error":"deleted"}]})).is_err()
+        );
+        assert!(
+            checks(&json!({"checks":[{"query":"metric{host=\"${DEPLOY_HOST_REGEX}\"}"}]})).is_err()
+        );
+        assert!(checks(&json!({"checks":[{"query":"vector(1)","min_results":0}]})).is_err());
+        let check = Check {
+            name: "Brokers".into(),
+            query: "x".into(),
+            min_results: 3,
+        };
+        let body = json!({"status":"success","data":{"resultType":"vector","result":[{"value":[1000,"1"]},{"value":[1000,"1"]}]}});
+        assert!(
+            !result_for_check(&body, &check, 1000.0, Some(120))
+                .unwrap()
+                .0
+        );
+        let check = Check {
+            min_results: 1,
+            ..check
+        };
+        assert!(
+            result_for_check(&body, &check, 1000.0, Some(120))
+                .unwrap()
+                .0
+        );
+        assert!(
+            !result_for_check(&body, &check, 1201.0, Some(120))
+                .unwrap()
+                .0
+        );
+        assert!(!result_for_check(&body, &check, 998.0, Some(120)).unwrap().0);
     }
 }

@@ -2211,6 +2211,9 @@ fn run_jobs(
                 let prefix = prefix.get_or_insert_with(|| active.log.clone());
                 active.log.clone_from(prefix);
                 append_job_log(&mut active.log, output);
+                if active.driver == "thanos" && let Some(progress) = output.lines().rev().find(|line| line.starts_with("Consecutive healthy rounds: ")) {
+                    active.details = format!("Thanos · {progress}");
+                }
                 let _ = manager.persist();
             }
         };
@@ -2243,7 +2246,7 @@ fn run_jobs(
             update(&report_context, &job, &credentials, &checkpoint, &on_output)
                 .map(drivers::DriverOutcome::Completed)
         } else if job.driver == "thanos" && job.action == "query" {
-            drivers::thanos::execute_with_query(
+            drivers::thanos::execute_with_queries(
                 &process_definition, &credentials, &on_output,
                 &|| {
                     let manager = job_sets.lock().map_err(|_| "Agent job set lock failed.")?;
@@ -2251,14 +2254,22 @@ fn run_jobs(
                         .ok_or("Thanos Plan is no longer available.")?;
                     let current = set.jobs.iter().find(|active| active.id == job.id)
                         .ok_or("Thanos job is no longer available.")?;
-                    let payload: serde_json::Value = serde_json::from_str(current.payload.as_deref().unwrap_or("{}"))
+                    let mut payload: serde_json::Value = serde_json::from_str(current.payload.as_deref().unwrap_or("{}"))
                         .map_err(|_| "Invalid Thanos query payload.")?;
                     if let Some(error) = payload["query_error"].as_str() { return Err(error.into()); }
-                    if payload["query_revision"].as_i64().is_none() {
-                        return Err("Refresh this Plan's saved Thanos query from Config before execution. Start or retry it from the application.".into());
-                    }
-                    let resolved = drivers::thanos_version::resolve(set, current)?;
-                    drivers::thanos::payload_query(&resolved)
+                    let resolve = |value: &serde_json::Value| -> Result<serde_json::Value, String> {
+                        if let Some(error) = value["query_error"].as_str() { return Err(error.into()); }
+                        if value["query_revision"].as_i64().is_none() {
+                            return Err("Refresh this Plan's saved Thanos query from Config before execution. Start or retry it from the application.".into());
+                        }
+                        let mut member = current.clone(); member.payload = Some(value.to_string());
+                        let resolved = drivers::thanos_version::resolve(set, &member)?;
+                        serde_json::from_str(resolved.payload.as_deref().unwrap_or("{}")).map_err(|_| "Invalid resolved query.".into())
+                    };
+                    if let Some(items) = payload.get_mut("checks").and_then(serde_json::Value::as_array_mut) {
+                        for item in items { *item = resolve(item)?; }
+                        Ok(payload)
+                    } else { resolve(&payload) }
                 },
                 &|| {
                     let manager = job_sets.lock().expect("job set lock");

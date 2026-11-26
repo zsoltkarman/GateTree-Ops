@@ -84,6 +84,8 @@ struct PlanStep {
     #[serde(default)]
     validation_query_id: Option<String>,
     #[serde(default)]
+    query_set: Option<super::query_sets::QuerySet>,
+    #[serde(default)]
     expected_version: Option<String>,
     #[serde(default, rename = "extra_vars")]
     extra_vars: YamlValue,
@@ -1121,10 +1123,14 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
         })?;
     let catalog: JsonValue = serde_json::from_str(include_str!("drivers/catalog.json"))?;
     let mut jobs = Vec::new();
-    let has_queries = input.inputs.olam.steps.iter().any(|s| s.kind == "thanos_query");
+    let has_queries = input.inputs.olam.steps.iter().any(|s| matches!(s.kind.as_str(), "thanos_query" | "thanos_query_set"));
     for plan_step in &input.inputs.olam.steps {
-        if !matches!(plan_step.kind.as_str(), "" | "deploy" | "thanos_query") {
+        if !matches!(plan_step.kind.as_str(), "" | "deploy" | "thanos_query" | "thanos_query_set") {
             return Err(QueueError::Invalid("Unknown Planner step type.".into()));
+        }
+        if plan_step.kind == "thanos_query_set" {
+            plan_step.query_set.as_ref().ok_or_else(|| QueueError::Invalid("Select a saved Thanos Query Set.".into()))?
+                .validate().map_err(QueueError::Invalid)?;
         }
         if plan_step.kind == "thanos_query" {
             let query = plan_step.query.as_deref().unwrap_or("").trim();
@@ -1306,7 +1312,7 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
                 let mut consumed_queries = 0;
                 for (step_index, plan_step) in input.inputs.olam.steps.iter().enumerate() {
                     if consumed_queries > 0 { consumed_queries -= 1; continue; }
-                    if plan_step.kind == "thanos_query" {
+                    if matches!(plan_step.kind.as_str(), "thanos_query" | "thanos_query_set") {
                         if action == "deploy" {
                             jobs.extend(build_thanos_jobs(plan_step, &input.inputs.olam.targets, process, preceding_deploy, None)?);
                         }
@@ -1314,7 +1320,7 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
                     }
                     if action == "deploy" { preceding_deploy = true; }
                     let host_queries: Vec<&PlanStep> = if action == "deploy" && !together {
-                        input.inputs.olam.steps[step_index + 1..].iter().take_while(|s| s.kind == "thanos_query").collect()
+                        input.inputs.olam.steps[step_index + 1..].iter().take_while(|s| matches!(s.kind.as_str(), "thanos_query" | "thanos_query_set")).collect()
                     } else { Vec::new() };
                     consumed_queries = host_queries.len();
                     for role in &input.inputs.olam.targets.roles {
@@ -1346,7 +1352,7 @@ fn generate_jobs(input: &PlanInput, process: &JsonValue) -> Result<Vec<JobDefini
                             });
                             for query_step in &host_queries {
                                 let template = query_step.query.as_deref().unwrap_or("");
-                                if !template.contains("${DEPLOY_HOST_REGEX}") {
+                                if query_step.kind == "thanos_query" && !template.contains("${DEPLOY_HOST_REGEX}") {
                                     return Err(QueueError::Invalid("Per-host Thanos validation requires instance=~\"${DEPLOY_HOST_REGEX}\" so another host cannot satisfy the check. Choose Separate job per host and update the query.".into()));
                                 }
                                 let host = limits[0].as_str();
@@ -1436,14 +1442,9 @@ pub(super) fn resolve_thanos_query(template: &str, region: Option<&str>, version
     Ok(result)
 }
 
-fn build_thanos_jobs(step: &PlanStep, targets: &OlamTargets, process: &JsonValue, preceding_deploy: bool, host: Option<&str>) -> Result<Vec<JobDefinition>, QueueError> {
-    let template = step.query.as_deref().unwrap_or("").trim();
-    if template.contains("${DEPLOY_IMAGE_VERSION}") && (!preceding_deploy || host.is_none()) {
-        return Err(QueueError::Invalid("DEPLOY_IMAGE_VERSION requires a preceding Deploy step and Separate job per host.".into()));
-    }
-    let version = step.expected_version.as_deref().map(str::trim);
+fn thanos_regions(needs_region: bool, targets: &OlamTargets, process: &JsonValue, preceding_deploy: bool) -> Result<Vec<Option<String>>, QueueError> {
     let mut regions = Vec::new();
-    if template.contains("${DEPLOY_REGION}") {
+    if needs_region {
         if !preceding_deploy { return Err(QueueError::Invalid("DEPLOY_REGION requires a preceding Deploy step.".into())); }
         if targets._sites.is_empty() { return Err(QueueError::Invalid("Select deployment sites for DEPLOY_REGION.".into())); }
         let mapping = process.pointer("/details/thanos/region_map");
@@ -1458,8 +1459,21 @@ fn build_thanos_jobs(step: &PlanStep, targets: &OlamTargets, process: &JsonValue
             if !regions.contains(&region.to_owned()) { regions.push(region.to_owned()); }
         }
     }
-    let contexts: Vec<Option<&str>> = if regions.is_empty() { vec![None] } else { regions.iter().map(|r| Some(r.as_str())).collect() };
-    contexts.into_iter().map(|region| {
+    Ok(if regions.is_empty() { vec![None] } else { regions.into_iter().map(Some).collect() })
+}
+
+fn build_thanos_jobs(step: &PlanStep, targets: &OlamTargets, process: &JsonValue, preceding_deploy: bool, host: Option<&str>) -> Result<Vec<JobDefinition>, QueueError> {
+    if step.kind == "thanos_query_set" {
+        return build_thanos_set_jobs(step, targets, process, preceding_deploy, host);
+    }
+    let template = step.query.as_deref().unwrap_or("").trim();
+    if template.contains("${DEPLOY_IMAGE_VERSION}") && (!preceding_deploy || host.is_none()) {
+        return Err(QueueError::Invalid("DEPLOY_IMAGE_VERSION requires a preceding Deploy step and Separate job per host.".into()));
+    }
+    let version = step.expected_version.as_deref().map(str::trim);
+    let contexts = thanos_regions(template.contains("${DEPLOY_REGION}"), targets, process, preceding_deploy)?;
+    contexts.iter().map(|region| {
+        let region = region.as_deref();
         let query = resolve_thanos_query(template, region, version, host)?;
         Ok(JobDefinition {
             name: match host.or(region) { Some(target) => format!("{} · {target}", step.name.trim()), None => step.name.trim().into() },
@@ -1472,6 +1486,37 @@ fn build_thanos_jobs(step: &PlanStep, targets: &OlamTargets, process: &JsonValue
         })
     }).collect()
 }
+
+fn build_thanos_set_jobs(step: &PlanStep, targets: &OlamTargets, process: &JsonValue, preceding_deploy: bool, host: Option<&str>) -> Result<Vec<JobDefinition>, QueueError> {
+    let set = step.query_set.as_ref().ok_or_else(|| QueueError::Invalid("Missing Thanos Query Set.".into()))?;
+    set.validate().map_err(QueueError::Invalid)?;
+    if !preceding_deploy || targets._sites.len() != 1 && host.is_some() || targets._sites.is_empty() {
+        return Err(QueueError::Invalid("Query Sets require a preceding Deploy step and selected deployment sites.".into()));
+    }
+    if set.items.iter().any(|item| item.scope == "node") && host.is_none() {
+        return Err(QueueError::Invalid("Node-scoped Query Set items require Separate job per host.".into()));
+    }
+    let contexts = thanos_regions(true, targets, process, preceding_deploy)?;
+    contexts.iter().map(|region| {
+        let region = region.as_deref();
+        let checks: Vec<_> = set.items.iter().map(|item| json!({
+            "validation_query_id":item.query_id,"scope":item.scope,"min_results":item.min_results,
+            "query_context":{"region":region,"expected_version":item.expected_version.trim(),
+                "host":if item.scope == "node" { host } else { None },"preceding_deploy":preceding_deploy}
+        })).collect();
+        Ok(JobDefinition {
+            name: format!("{} · {}", step.name.trim(),host.or(region).unwrap_or("cluster")),
+            target:host.or(region).map(str::to_owned),
+            details:format!("Thanos Query Set: {} required checks pending",set.items.len()),
+            payload:Some(json!({"query_set_id":set.id,"query_set_name":set.name,
+                "query_context":{"region":region,"host":host,"preceding_deploy":preceding_deploy},
+                "checks":checks,"stable_samples":set.stable_samples,"interval_seconds":set.interval_seconds,
+                "timeout_seconds":set.timeout_seconds,"max_age_seconds":set.max_age_seconds}).to_string()),
+            driver:"thanos".into(),action:"query".into(),
+        })
+    }).collect()
+}
+
 
 fn build_olam_payload(
     input: &PlanInput,
@@ -3006,6 +3051,37 @@ inputs:
         state.lock().expect("lock workspace");
         fs::remove_dir_all(directory).expect("remove test directory");
     }
+    #[test]
+    fn query_set_is_one_gate_per_host_before_the_next_deployment() {
+        let mut input = plan_input();
+        input.inputs.olam.targets.roles = vec!["kafka".into()];
+        input.inputs.olam.targets.hosts = vec!["one.example.test".into(),"two.example.test".into()];
+        input.inputs.olam.targets.inventory_groups.clear();
+        input.inputs.olam.targets._sites = vec!["phx".into()];
+        input.inputs.olam.targets.job_mode = Some(OlamJobMode::PerHost);
+        input.inputs.olam.steps = serde_json::from_value(json!([{ "name":"Deploy" },
+            {"name":"Kafka health","type":"thanos_query_set","query_set":{
+                "id":"health","name":"Kafka","items":[{"queryId":"java","scope":"node","expectedVersion":"25.0.5.1","minResults":1},
+                {"queryId":"isr","scope":"cluster","minResults":3}],
+                "stableSamples":3,"intervalSeconds":30,"timeoutSeconds":1200,"maxAgeSeconds":120}}])).unwrap();
+        let process = json!({"steps":[{"name":"Deploy","driver":"olam","action":"deploy","workflow":["approve","deploy"]}],
+            "details":{"olam":{"account":"deployment","payload_defaults":{"ENVIRONMENT":"test"}},
+            "thanos":{"url":"https://thanos.example.test","timeout_seconds":300,"interval_seconds":30,"region_map":{"phx":"phx_icstg"}}}});
+        let jobs = generate_jobs(&input,&process).unwrap();
+        assert_eq!(jobs.iter().map(|j|j.driver.as_str()).collect::<Vec<_>>(),vec!["olam","thanos","olam","thanos"]);
+        for (index,host) in [(1,"one.example.test"),(3,"two.example.test")] {
+            assert_eq!(jobs[index].target.as_deref(),Some(host));
+            let payload: JsonValue = serde_json::from_str(jobs[index].payload.as_deref().unwrap()).unwrap();
+            assert_eq!(payload["checks"][0]["query_context"]["host"],host);
+            assert!(payload["checks"][1]["query_context"]["host"].is_null());
+            assert_eq!(payload["checks"][1]["query_context"]["region"],"phx_icstg");
+            assert_eq!(payload["checks"][1]["min_results"],3);
+            assert_eq!(payload["stable_samples"],3);
+        }
+        input.inputs.olam.targets.job_mode = Some(OlamJobMode::Together);
+        assert!(generate_jobs(&input,&process).is_err());
+    }
+
 }
 
 // Reconstruct only query bindings from the frozen Plan and Process. Execution
@@ -3016,4 +3092,5 @@ pub(super) fn thanos_bindings(definition: &str, process: &str) -> Result<Vec<(i6
     Ok(generate_jobs(&input, &process)?.into_iter().enumerate()
         .filter(|(_, job)| job.driver == "thanos")
         .filter_map(|(i, job)| job.payload.map(|payload| (i as i64 + 1, payload))).collect())
+
 }

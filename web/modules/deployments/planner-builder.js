@@ -16,7 +16,7 @@ export const emptyPlannerDraft = () => ({ planName: "", processId: "", cxNo: "",
 
 export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose = () => {}, loadProcesses = getDeploymentConfig, loadAccounts = getVaults, loadTasks = getDeploymentTasks, mountTargets = mountPlannerTargets, mountSteps = mountPlannerSteps, savePlan = createDeploymentPlan, onSaved = () => {} } = {}) {
   let disposed = false, saving = false, committed = false, multiSaving = false, disposeMulti = null;
-  const choices = { processes: [], entries: [], validationQueries: [] };
+  const choices = { processes: [], entries: [], validationQueries: [], querySets: [] };
   root.innerHTML = `<section class="planner-builder queue-plan-editor" aria-labelledby="planner-builder-title">
     <header class="planner-builder-header">
       <div><p class="planner-builder-eyebrow">New deployment</p><h1 id="planner-builder-title">Planner Builder</h1></div>
@@ -70,7 +70,7 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
     });
   });
   selectTab(draft.plannerTab);
-  const disposeSteps = mountSteps(root.querySelector("[data-planner-steps]"), { draft, validationQueries: () => choices.validationQueries });
+  const disposeSteps = mountSteps(root.querySelector("[data-planner-steps]"), { draft, validationQueries: () => choices.validationQueries, querySets: () => choices.querySets });
   const targets = mountTargets(root.querySelector("[data-planner-targets]"), { draft, onRoleChange: () => disposeSteps.refresh?.() });
   const form = root.querySelector("form");
   const taskSelect = form.querySelector("[data-planner-task]");
@@ -133,7 +133,7 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
       const snapshot = await load();
       if (disposed || !root.contains(form)) return;
       choices[key] = snapshot[key];
-      if (fieldName === "processId") { choices.validationQueries = snapshot.validationQueries ?? []; disposeSteps.refresh?.(); }
+      if (fieldName === "processId") { choices.validationQueries = snapshot.validationQueries ?? []; choices.querySets = snapshot.querySets ?? []; disposeSteps.refresh?.(); }
       const items = [...snapshot[key]].sort((a, b) => a.name.localeCompare(b.name));
       select.innerHTML = `<option value="">${items.length ? label : "None available"}</option>${items.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("")}`;
       select.disabled = !items.length;
@@ -160,7 +160,7 @@ export function mountPlannerBuilder(root, { draft = emptyPlannerDraft(), onClose
     message.classList.remove("is-error");
     if (!form.reportValidity()) { message.textContent = "Complete the required Plan details."; message.classList.add("is-error"); return; }
     let definition;
-    try { definition = plannerPlanYaml(buildPlannerPlan(draft, choices.processes, choices.entries, choices.validationQueries)); }
+    try { definition = plannerPlanYaml(buildPlannerPlan(draft, choices.processes, choices.entries, choices.validationQueries, choices.querySets)); }
     catch (cause) { message.textContent = cause.message || String(cause); message.classList.add("is-error"); return; }
     saving = true;
     const controls = [...root.querySelectorAll("input,select,textarea,button")].map(control => [control, control.disabled]);

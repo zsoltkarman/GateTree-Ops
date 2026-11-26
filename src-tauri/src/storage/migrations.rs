@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension};
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 32;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 33;
 
 pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -628,6 +628,37 @@ pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    if current_version < 33 {
+        transaction.execute_batch(
+            "CREATE TABLE deployment_validation_query_sets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                definition_json TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1
+             );
+             INSERT INTO schema_migrations(version) VALUES (33);",
+        )?;
+        // Configuration prepared by an older GUI is activated atomically with
+        // the schema upgrade; no running Plan or Agent payload is rewritten.
+        let pending: Option<String> = transaction.query_row(
+            "SELECT value FROM workspace_metadata WHERE key='deployment_pending_query_sets'",
+            [], |row| row.get(0),
+        ).optional()?;
+        if let Some(pending) = pending {
+            let sets: Vec<serde_json::Value> = serde_json::from_str(&pending)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            for set in sets {
+                let field = |key: &str| set[key].as_str().filter(|v| !v.is_empty())
+                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(format!("Pending Query Set is missing {key}.")));
+                transaction.execute(
+                    "INSERT INTO deployment_validation_query_sets(id,name,definition_json,revision) VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![field("id")?,field("name")?,set.to_string(),set["revision"].as_i64().unwrap_or(1)],
+                )?;
+            }
+            transaction.execute("DELETE FROM workspace_metadata WHERE key='deployment_pending_query_sets'",[])?;
+        }
+    }
+
     transaction.execute(
         "INSERT INTO workspace_metadata(key, value) VALUES ('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -639,6 +670,23 @@ pub fn run_migrations(connection: &mut Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_query_sets_activate_once_without_changing_plans() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES(32);
+            CREATE TABLE workspace_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE deployment_plans(id TEXT PRIMARY KEY,definition_yaml TEXT);
+            INSERT INTO deployment_plans VALUES('existing','frozen original plan');").unwrap();
+        let preset: serde_json::Value = serde_json::from_str(include_str!("../modules/deployments/presets/kafka-upgrade-health.json")).unwrap();
+        db.execute("INSERT INTO workspace_metadata VALUES('deployment_pending_query_sets',?1)",[preset["querySets"].to_string()]).unwrap();
+        run_migrations(&mut db).unwrap();
+        run_migrations(&mut db).unwrap();
+        let set: String = db.query_row("SELECT definition_json FROM deployment_validation_query_sets",[],|row|row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&set).unwrap(),preset["querySets"][0]);
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM workspace_metadata WHERE key='deployment_pending_query_sets'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(db.query_row("SELECT definition_yaml FROM deployment_plans WHERE id='existing'",[],|r|r.get::<_,String>(0)).unwrap(),"frozen original plan");
+    }
 
     #[test]
     fn version_30_adds_query_library_without_changing_existing_data() {

@@ -93,6 +93,10 @@ fn current_payload(
 }
 
 fn refresh_payload(payload: &mut Value, queries: &[validation_queries::ValidationQuery]) {
+    if let Some(items) = payload.get_mut("checks").and_then(Value::as_array_mut) {
+        for item in items { refresh_payload(item, queries); }
+        return;
+    }
     let result = (|| -> Result<(), String> {
         let source = if let Some(id) = payload["validation_query_id"].as_str() {
             queries.iter().find(|query| query.id == id)
@@ -133,6 +137,7 @@ fn refresh_payload(payload: &mut Value, queries: &[validation_queries::Validatio
         .map_err(|error| error.to_string())?;
         payload["query"] = json!(query);
         payload["query_revision"] = json!(source.revision);
+        payload["query_name"] = json!(source.name);
         Ok(())
     })();
     match result {
@@ -341,4 +346,18 @@ mod tests {
         state.lock().unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }
+    #[test]
+    fn set_refresh_resolves_every_member_and_missing_queries_block() {
+        let mut payload = json!({"checks":[
+            {"validation_query_id":"java","query_context":{"host":"node1","region":"phx","expected_version":"25.0.5.1","preceding_deploy":true}},
+            {"validation_query_id":"isr","query_context":{"host":null,"region":"phx","preceding_deploy":true}}],"stable_samples":3});
+        let queries = vec![saved("java",r#"jvm_info{instance=~"${DEPLOY_HOST_REGEX}",version="${EXPECTED_VERSION}"}"#), saved("isr",r#"isr{region="${DEPLOY_REGION}"}"#)];
+        refresh_payload(&mut payload,&queries);
+        assert!(payload["checks"][0]["query_error"].is_null());
+        assert_eq!(payload["checks"][1]["query"],r#"isr{region="phx"}"#);
+        assert_eq!(payload["stable_samples"],3);
+        refresh_payload(&mut payload,&queries[..1]);
+        assert!(payload["checks"][1]["query_error"].as_str().unwrap().contains("missing"));
+    }
+
 }

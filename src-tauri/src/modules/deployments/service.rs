@@ -28,6 +28,7 @@ impl DeploymentsService {
                 Ok(DeploymentConfigSnapshot {
                     drivers: load_resources(connection, ResourceType::Driver)?,
                     processes: load_resources(connection, ResourceType::Process)?,
+                    query_sets: super::query_sets::load(connection)?,
                     validation_queries: super::validation_queries::load(connection)?,
                 })
             })
@@ -213,7 +214,8 @@ impl DeploymentsService {
         serde_json::to_string_pretty(&json!({
             "schema_version": 2,
             "processes": processes,
-            "validation_queries": snapshot.validation_queries
+            "validation_queries": snapshot.validation_queries,
+            "query_sets": snapshot.query_sets
         }))
         .map_err(DeploymentError::Json)
     }

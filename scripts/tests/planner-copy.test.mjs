@@ -42,3 +42,9 @@ test('copy keeps the saved query identity even after Config text changes',()=>{
  const d=copiedPlannerDraft(source);
  assert.equal(d.steps[1].validationQueryId,'stable-query-id');
 });
+
+test('copy preserves Query Set identity without carrying execution results',()=>{
+ const source=sourcePlan();source.plan.inputs.olam.steps[1]={name:'Kafka health',type:'thanos_query_set',query_set:{id:'kafka',items:[{queryId:'q'}]}};
+ const copy=copiedPlannerDraft(source);assert.equal(copy.steps[1].querySetId,'kafka');assert.equal(copy.steps[1].type,'thanos_query_set');
+ assert.equal(copy.steps[1].checks,undefined);
+});

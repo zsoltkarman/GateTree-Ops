@@ -1400,3 +1400,13 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in sr
 .ssh-tunnel-actions { display: flex; gap: 8px; }
 .ssh-tunnel-editor [role="status"] { color: var(--accent); }
 @media (max-width: 680px) { .ssh-tunnel-row { grid-template-columns: 1fr 1fr; } }
+
+/* Query Set editor shares the saved-query page. */
+.deployment-queries-page { overflow: auto; grid-template-rows: auto auto; align-content: start; }
+.deployment-queries-page > [data-query-sets], .deployment-queries-page > [data-validation-queries] { flex: 0 0 auto; min-height: 0; }
+.query-set-library fieldset { border: 0; padding: 0; min-width: 0; display: grid; gap: 10px; }
+.query-set-policy { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 10px; }
+.query-set-items { display: grid; gap: 10px; }
+.query-set-items > div { display: grid; grid-template-columns: minmax(140px,2fr) minmax(100px,1fr) minmax(110px,1fr) 90px auto; align-items: end; gap: 8px; }
+@media (max-width: 850px) { .query-set-items > div { grid-template-columns: 1fr 1fr; } }
+.deployment-queries-page > [data-query-sets] { display: flex; min-width: 0; }

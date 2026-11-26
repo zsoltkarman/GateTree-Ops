@@ -1,3 +1,4 @@
+import { mountQuerySets } from "./query-sets.js";
 import { mountValidationQueries } from "./validation-queries.js";
 import { mountLocalAnsibleSource } from "./local-ansible-source.js";
 import { showDeploymentHelp } from "../help/help-view.js";
@@ -12,7 +13,7 @@ export async function mountDeploymentConfigView(root, detail = {}, { onCatalogCh
   const alive = () => root.isConnected && root.dataset.configMountId === mountId;
   const queriesOnly = detail.configSection === "queries";
   root.innerHTML = queriesOnly
-    ? `<div class="deployment-config-module deployment-queries-page"><div data-validation-queries><p class="deployment-config-loading">Loading Thanos queries…</p></div></div>`
+    ? `<div class="deployment-config-module deployment-queries-page"><div data-query-sets></div><div data-validation-queries><p class="deployment-config-loading">Loading Thanos queries…</p></div></div>`
     : `<div class="deployment-config-module deployment-config-accordion"><div data-local-ansible-settings></div><section class="deployment-config-list" data-config-list><p class="deployment-config-loading">Loading deployment config…</p></section></div>`;
   if (!queriesOnly) mountLocalAnsibleSource(root.querySelector("[data-local-ansible-settings]"));
   try {
@@ -20,7 +21,8 @@ export async function mountDeploymentConfigView(root, detail = {}, { onCatalogCh
     if (!alive()) return;
     state.processes = snapshot.processes;
     if (queriesOnly) {
-      mountValidationQueries(root.querySelector("[data-validation-queries]"), { queries: snapshot.validationQueries ?? [] });
+      const sets = mountQuerySets(root.querySelector("[data-query-sets]"), { sets: snapshot.querySets ?? [], queries: snapshot.validationQueries ?? [] });
+      mountValidationQueries(root.querySelector("[data-validation-queries]"), { queries: snapshot.validationQueries ?? [], onChange: queries => sets.updateQueries(queries) });
       return;
     }
     if (detail.resourceId && state.processes.some(p => p.id === detail.resourceId)) state.expanded.add(detail.resourceId);

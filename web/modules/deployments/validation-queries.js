@@ -1,7 +1,7 @@
 import { escapeHtml } from "../../shared/ui.js";
 import { saveValidationQuery, deleteValidationQuery } from "./deployments-api.js";
 
-export function mountValidationQueries(root, { queries = [], save = saveValidationQuery, remove = deleteValidationQuery } = {}) {
+export function mountValidationQueries(root, { queries = [], save = saveValidationQuery, remove = deleteValidationQuery, onChange = () => {} } = {}) {
   const state = { queries: [...queries], draft: null, pendingDelete: null, busy: false, message: "", error: false };
   const alive = () => root.isConnected;
   function render() {
@@ -51,7 +51,7 @@ export function mountValidationQueries(root, { queries = [], save = saveValidati
   }
   async function action(run) {
     state.busy = true; state.error = false; state.message = ""; render();
-    try { await run(); } catch (error) { state.error = true; state.message = String(error); }
+    try { await run(); onChange(state.queries); } catch (error) { state.error = true; state.message = String(error); }
     finally { state.busy = false; if (alive()) render(); }
   }
   render();

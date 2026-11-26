@@ -1,0 +1,233 @@
+{
+  "queries": [
+    {
+      "id": "0f3f81e4-4ad5-5f87-a0fc-a7be03c4cb32",
+      "name": "Kafka health / Java version (current node)",
+      "query": "((sum(jvm_info{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\",instance=~\"${DEPLOY_HOST_REGEX}\",version=~\"\\\\Q${EXPECTED_VERSION}\\\\E([+].*)?\"} * (time() - timestamp(jvm_info{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\",instance=~\"${DEPLOY_HOST_REGEX}\",version=~\"\\\\Q${EXPECTED_VERSION}\\\\E([+].*)?\"}) < bool 120)) == bool 1)) or on() vector(0)",
+      "revision": 1
+    },
+    {
+      "id": "a45418a5-1a80-59d1-964e-297a11bd0e57",
+      "name": "Kafka health / Broker count and IDs (3; IDs 1,2,3)",
+      "query": "((min(kafka_brokers{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) == bool 3) * (max(kafka_brokers{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) == bool 3) * min((time() - timestamp(kafka_brokers{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) < bool 120)) * (count(kafka_broker_info{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) == bool 3) * (count(kafka_broker_info{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\",id=~\"1|2|3\"}) == bool 3) * min((time() - timestamp(kafka_broker_info{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) < bool 120)) * (count(kafka_server_kafkaserver_brokerstate{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) == bool 3)) or on() vector(0)",
+      "revision": 1
+    },
+    {
+      "id": "6464f302-61ac-5d26-97fa-0d04027a0dd0",
+      "name": "Kafka health / All brokers Running",
+      "query": "(kafka_server_kafkaserver_brokerstate{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 3) * (time() - timestamp(kafka_server_kafkaserver_brokerstate{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)",
+      "revision": 1
+    },
+    {
+      "id": "66c1c83e-a011-5a7e-a924-7bdbe14e0462",
+      "name": "Kafka health / Under-replicated partitions",
+      "query": "(kafka_server_replicamanager_underreplicatedpartitions{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 0) * (time() - timestamp(kafka_server_replicamanager_underreplicatedpartitions{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)",
+      "revision": 1
+    },
+    {
+      "id": "d7216793-9474-5039-a82e-a5dd4e3d4ae4",
+      "name": "Kafka health / Under-min-ISR partitions",
+      "query": "(kafka_server_replicamanager_underminisrpartitioncount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 0) * (time() - timestamp(kafka_server_replicamanager_underminisrpartitioncount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)",
+      "revision": 1
+    },
+    {
+      "id": "2c8c6e16-f7fe-5351-8852-329290d1bb3a",
+      "name": "Kafka health / Offline partitions",
+      "query": "(kafka_controller_kafkacontroller_offlinepartitionscount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 0) * (time() - timestamp(kafka_controller_kafkacontroller_offlinepartitionscount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)",
+      "revision": 1
+    },
+    {
+      "id": "ca0a1bf4-534b-5dc3-824f-86ab0036a772",
+      "name": "Kafka health / Failed fetcher partitions",
+      "query": "(kafka_server_replicafetchermanager_failedpartitionscount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 0) * (time() - timestamp(kafka_server_replicafetchermanager_failedpartitionscount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)",
+      "revision": 1
+    },
+    {
+      "id": "3309f1ee-b6ea-58d8-9b08-e98ad391be34",
+      "name": "Kafka health / Offline replicas",
+      "query": "(kafka_server_replicamanager_offlinereplicacount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 0) * (time() - timestamp(kafka_server_replicamanager_offlinereplicacount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)",
+      "revision": 1
+    },
+    {
+      "id": "1c772c6e-e67d-5c72-90e8-7a2f32007e86",
+      "name": "Kafka health / Offline log directories",
+      "query": "(kafka_log_logmanager_offlinelogdirectorycount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 0) * (time() - timestamp(kafka_log_logmanager_offlinelogdirectorycount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)",
+      "revision": 1
+    },
+    {
+      "id": "76975210-4204-51d0-a4f6-5b4c167bbdb7",
+      "name": "Kafka health / Reassigning partitions",
+      "query": "(kafka_server_replicamanager_reassigningpartitions{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 0) * (time() - timestamp(kafka_server_replicamanager_reassigningpartitions{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)",
+      "revision": 1
+    },
+    {
+      "id": "422c6595-05d0-501b-8090-d1d167523e3a",
+      "name": "Kafka health / No log recovery",
+      "query": "((kafka_log_logmanager_remaininglogstorecover{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 0) * (time() - timestamp(kafka_log_logmanager_remaininglogstorecover{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)) or on(instance,region) ((kafka_server_kafkaserver_brokerstate{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 3) * (time() - timestamp(kafka_server_kafkaserver_brokerstate{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120))",
+      "revision": 1
+    },
+    {
+      "id": "8ddf5a35-6316-5182-9a3d-f8ee58ab10d1",
+      "name": "Kafka health / Exactly one active controller",
+      "query": "((count(kafka_controller_kafkacontroller_activecontrollercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) == bool 3) * (sum(kafka_controller_kafkacontroller_activecontrollercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) == bool 1) * min((kafka_controller_kafkacontroller_activecontrollercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 0) + (kafka_controller_kafkacontroller_activecontrollercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 1)) * min((time() - timestamp(kafka_controller_kafkacontroller_activecontrollercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120))) or on() vector(0)",
+      "revision": 1
+    },
+    {
+      "id": "0694fd40-bcf2-5fcc-9fb5-a1a83cff754a",
+      "name": "Kafka health / Leader count per broker (Kafka1,2,3)",
+      "query": "((kafka_server_replicamanager_leadercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\",instance=~\"kafka1[.].*\"} == bool scalar(count(kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"} == 1) or vector(0))) * (time() - timestamp(kafka_server_replicamanager_leadercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\",instance=~\"kafka1[.].*\"}) < bool 120)) or ((kafka_server_replicamanager_leadercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\",instance=~\"kafka2[.].*\"} == bool scalar(count(kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"} == 2) or vector(0))) * (time() - timestamp(kafka_server_replicamanager_leadercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\",instance=~\"kafka2[.].*\"}) < bool 120)) or ((kafka_server_replicamanager_leadercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\",instance=~\"kafka3[.].*\"} == bool scalar(count(kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"} == 3) or vector(0))) * (time() - timestamp(kafka_server_replicamanager_leadercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\",instance=~\"kafka3[.].*\"}) < bool 120))",
+      "revision": 1
+    },
+    {
+      "id": "25e190d0-2ab1-55ce-833c-2760aa98629f",
+      "name": "Kafka health / Leader total equals partition total",
+      "query": "((count(kafka_server_replicamanager_leadercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) == bool 3) * (sum(kafka_server_replicamanager_leadercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) == bool count(kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"})) * min((time() - timestamp(kafka_server_replicamanager_leadercount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120))) or on() vector(0)",
+      "revision": 1
+    },
+    {
+      "id": "228197e6-ff17-5eb5-8aa7-4ca8d5a70e6f",
+      "name": "Kafka health / Assigned replica total",
+      "query": "((count(kafka_server_replicamanager_partitioncount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) == bool 3) * (sum(kafka_server_replicamanager_partitioncount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) == bool sum(kafka_topic_partition_replicas{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"})) * min((time() - timestamp(kafka_server_replicamanager_partitioncount{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120))) or on() vector(0)",
+      "revision": 1
+    },
+    {
+      "id": "f357a6e7-bf55-5d3d-9bdd-b7c5c2071835",
+      "name": "Kafka health / All assigned replicas in ISR",
+      "query": "(min((kafka_topic_partition_in_sync_replica{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"} == bool on(topic,partition) kafka_topic_partition_replicas{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"})) * (count((kafka_topic_partition_in_sync_replica{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"} == bool on(topic,partition) kafka_topic_partition_replicas{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"})) == bool count(kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"})) * min((time() - timestamp(kafka_topic_partition_in_sync_replica{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) < bool 120)) * min((time() - timestamp(kafka_topic_partition_replicas{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) < bool 120))) or on() vector(0)",
+      "revision": 1
+    },
+    {
+      "id": "4b881e84-0456-5c0e-80bf-31b914e3a3a9",
+      "name": "Kafka health / Partition coverage and source freshness",
+      "query": "((count(kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) > bool 0) * (count(kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) == bool count(kafka_topic_partition_replicas{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"})) * (count(kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) == bool count(kafka_topic_partition_in_sync_replica{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"})) * min((kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"} >= bool 1) * (kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"} <= bool 3)) * min(kafka_topic_partition_replicas{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"} > bool 0) * min((time() - timestamp(kafka_topic_partition_leader{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) < bool 120)) * min((time() - timestamp(kafka_topic_partition_replicas{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) < bool 120)) * min((time() - timestamp(kafka_topic_partition_in_sync_replica{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) < bool 120))) or on() vector(0)",
+      "revision": 1
+    },
+    {
+      "id": "848425ea-68e5-510f-9c55-49749e0c1a96",
+      "name": "Kafka health / Kafka exporter scrape targets UP",
+      "query": "((count(up{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) == bool 3) * min(up{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"} == bool 1) * min((time() - timestamp(up{region=\"${DEPLOY_REGION}\",job=\"KafkaJVMExporter\"}) < bool 120)) * min(up{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"} == bool 1) * min((time() - timestamp(up{region=\"${DEPLOY_REGION}\",job=\"KafkaExporter\"}) < bool 120))) or on() vector(0)",
+      "revision": 1
+    }
+  ],
+  "querySets": [
+    {
+      "id": "b1f9c9c8-1fbf-5536-b73f-15bd20678028",
+      "name": "Kafka rolling upgrade / 3 brokers / JDK 25.0.5.1",
+      "revision": 1,
+      "items": [
+        {
+          "queryId": "0f3f81e4-4ad5-5f87-a0fc-a7be03c4cb32",
+          "scope": "node",
+          "expectedVersion": "25.0.5.1",
+          "minResults": 1
+        },
+        {
+          "queryId": "a45418a5-1a80-59d1-964e-297a11bd0e57",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 1
+        },
+        {
+          "queryId": "6464f302-61ac-5d26-97fa-0d04027a0dd0",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "66c1c83e-a011-5a7e-a924-7bdbe14e0462",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "d7216793-9474-5039-a82e-a5dd4e3d4ae4",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "2c8c6e16-f7fe-5351-8852-329290d1bb3a",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "ca0a1bf4-534b-5dc3-824f-86ab0036a772",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "3309f1ee-b6ea-58d8-9b08-e98ad391be34",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "1c772c6e-e67d-5c72-90e8-7a2f32007e86",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "76975210-4204-51d0-a4f6-5b4c167bbdb7",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "422c6595-05d0-501b-8090-d1d167523e3a",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "8ddf5a35-6316-5182-9a3d-f8ee58ab10d1",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 1
+        },
+        {
+          "queryId": "0694fd40-bcf2-5fcc-9fb5-a1a83cff754a",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 3
+        },
+        {
+          "queryId": "25e190d0-2ab1-55ce-833c-2760aa98629f",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 1
+        },
+        {
+          "queryId": "228197e6-ff17-5eb5-8aa7-4ca8d5a70e6f",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 1
+        },
+        {
+          "queryId": "f357a6e7-bf55-5d3d-9bdd-b7c5c2071835",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 1
+        },
+        {
+          "queryId": "4b881e84-0456-5c0e-80bf-31b914e3a3a9",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 1
+        },
+        {
+          "queryId": "848425ea-68e5-510f-9c55-49749e0c1a96",
+          "scope": "cluster",
+          "expectedVersion": "",
+          "minResults": 1
+        }
+      ],
+      "stableSamples": 3,
+      "intervalSeconds": 30,
+      "timeoutSeconds": 1200,
+      "maxAgeSeconds": 120
+    }
+  ]
+}

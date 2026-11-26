@@ -28,7 +28,7 @@ export function stepExtraVars(step, index) {
   return result;
 }
 
-export function buildPlannerPlan(draft, processes, accounts, validationQueries = []) {
+export function buildPlannerPlan(draft, processes, accounts, validationQueries = [], querySets = []) {
   const name = draft.planName.trim(); if (!name) throw new Error("Enter a Plan Name.");
   const process = processes.find(item => item.id === draft.processId); if (!process) throw new Error("Select a Process.");
   const account = accounts.find(item => item.id === draft.accountId); if (!account) throw new Error("Select an Account.");
@@ -50,7 +50,24 @@ export function buildPlannerPlan(draft, processes, accounts, validationQueries =
   const steps = draft.steps.map((step, index) => {
     if (!step.name.trim()) throw new Error(`Enter a name for Step ${index + 1}.`);
     const type = step.type || "deploy";
-    if (!["deploy", "thanos_query"].includes(type)) throw new Error(`Step ${index + 1}: unknown step type.`);
+    if (!["deploy", "thanos_query", "thanos_query_set"].includes(type)) throw new Error(`Step ${index + 1}: unknown step type.`);
+    if (type === "thanos_query_set") {
+      const set = querySets.find(set => set.id === step.querySetId);
+      if (!set?.items?.length) throw new Error(`Step ${index+1}: select a saved Thanos Query Set.`);
+      if (!config.details?.thanos?.url) throw new Error("Configure details.thanos before adding a Query Set.");
+      const preceding = draft.steps.slice(0,index).some(s => !s.type || s.type === "deploy");
+      if (!preceding || !targets.sites?.length) throw new Error("Query Sets require a preceding Deploy step and selected sites.");
+      const together = targets.job_mode === "together" || (!targets.job_mode && groups.length > 0);
+      for (const item of set.items) {
+        const source = validationQueries.find(q => q.id === item.queryId);
+        if (!source) throw new Error("A Query Set query was deleted. Update it in Config.");
+        if (!["node","cluster"].includes(item.scope)) throw new Error("Invalid Query Set scope.");
+        if (item.scope === "node" && (together || !source.query.includes("${DEPLOY_HOST_REGEX}"))) throw new Error("Node checks require Separate job per host and DEPLOY_HOST_REGEX.");
+        if (item.scope === "cluster" && /\$\{DEPLOY_(?:HOST_REGEX|IMAGE_VERSION)\}/.test(source.query)) throw new Error("Cluster checks cannot use host or deployment image placeholders.");
+        if (source.query.includes("${EXPECTED_VERSION}") && !item.expectedVersion?.trim()) throw new Error("A Query Set check needs an expected version. Update it in Config.");
+      }
+      return { name: step.name.trim(), type, query_set: structuredClone(set) };
+    }
     if (type === "thanos_query") {
       if (!step.query?.trim()) throw new Error(`Step ${index + 1}: select a saved Thanos query. Add it in Deployments → Config → Thanos Queries first.`);
       if (step.query.length > 32768) throw new Error(`Step ${index + 1}: query is too long.`);
@@ -95,6 +112,7 @@ export function plannerPlanYaml(plan) {
   for (const step of olam.steps) {
     lines.push(`      - name: ${q(step.name)}`);
     if (step.type === "thanos_query") lines.push(`        type: ${q(step.type)}`, `        query: ${q(step.query)}`);
+    if (step.type === "thanos_query_set") lines.push(`        type: ${q(step.type)}`, `        query_set: ${q(step.query_set)}`);
     if (step.validation_query_id) lines.push(`        validation_query_id: ${q(step.validation_query_id)}`);
     if (step.expected_version) lines.push(`        expected_version: ${q(step.expected_version)}`);
     if (step.extra_vars) lines.push(`        extra_vars: ${q(step.extra_vars)}`);

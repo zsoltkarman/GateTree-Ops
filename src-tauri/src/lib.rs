@@ -34,7 +34,7 @@ use modules::deployments::{
     get_deployment_config_bundle, get_deployment_queue, get_deployment_queue_log, get_local_ansible_settings,
     get_local_deployment_inventory, get_local_deployment_roles, set_local_ansible_folder, restore_deployment_config_resource,
     restore_deployment_credentials, save_deployment_config_resource, update_deployment_plan,
-    validate_deployment_config_resource, save_deployment_validation_query, delete_deployment_validation_query,
+    validate_deployment_config_resource, save_deployment_validation_query, delete_deployment_validation_query, save_deployment_query_set, delete_deployment_query_set,
 };
 use modules::local_terminal::{
     LocalTerminals, close_local_terminal, open_local_terminal, read_local_terminal,
@@ -186,6 +186,8 @@ pub fn run() {
             read_ai_skill,
             run_ai_skill,
             get_deployment_config,
+            save_deployment_query_set,
+            delete_deployment_query_set,
             save_deployment_validation_query,
             delete_deployment_validation_query,
             get_local_ansible_settings,

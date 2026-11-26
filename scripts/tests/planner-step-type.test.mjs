@@ -133,3 +133,14 @@ test('query suggestions require an unambiguous full role-name match and keep exi
  mountPlannerSteps(new Root(),{draft,validationQueries:()=>[{id:'matching',name:'ping_tool',query:'new query'}]});
  assert.equal(draft.steps[0].query,'existing draft');assert.notEqual(draft.steps[0].validationQueryId,'matching');
 });
+
+test('Query Set step selects reusable sets and displays the shared ALL-of policy',()=>{
+ const draft={steps:[{id:'one',name:'Deploy',type:'deploy'}]};const root=new Root();
+ const sets=[{id:'kafka',name:'Kafka health',items:[{queryId:'java'},{queryId:'isr'}],stableSamples:3}];
+ mountPlannerSteps(root,{draft,querySets:()=>sets});
+ root.articles[0].querySelector('[data-step-type]').fire('change','thanos_query_set');
+ assert.equal(draft.steps[0].name,'Thanos Query Set');assert.ok(root.html.includes('Kafka health'));
+ root.articles[0].querySelector('[data-step-query-set]').fire('change','kafka');
+ assert.equal(draft.steps[0].querySetId,'kafka');assert.ok(root.html.includes('2 required checks · 3 consecutive healthy rounds'));
+ assert.equal(root.articles[0].querySelector('[data-step-vars]'),null);
+});

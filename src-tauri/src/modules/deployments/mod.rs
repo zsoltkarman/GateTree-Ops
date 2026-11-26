@@ -6,6 +6,8 @@ mod queue_model;
 mod queue_service;
 mod service;
 mod validation_queries;
+mod query_sets;
+pub use query_sets::{save_deployment_query_set, delete_deployment_query_set};
 mod live_queries;
 mod tasks;
 pub use tasks::{get_deployment_tasks, save_deployment_task, link_deployment_task_plan, delete_deployment_task};

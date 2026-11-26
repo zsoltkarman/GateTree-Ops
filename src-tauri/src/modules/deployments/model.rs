@@ -16,6 +16,7 @@ pub struct DeploymentConfigResource {
 pub struct DeploymentConfigSnapshot {
     pub drivers: Vec<DeploymentConfigResource>,
     pub processes: Vec<DeploymentConfigResource>,
+    pub query_sets: Vec<super::query_sets::QuerySet>,
     pub validation_queries: Vec<super::validation_queries::ValidationQuery>,
 }
 
